@@ -1,0 +1,40 @@
+from typing import Any
+
+from pydantic import BaseModel, Field
+
+
+class SendMessageIn(BaseModel):
+    text: str = Field(min_length=1, max_length=4096)
+    channel: str = ""
+
+
+class CustomerUpdateIn(BaseModel):
+    display_name: str | None = Field(default=None, max_length=160)
+    phone: str | None = Field(default=None, max_length=80)
+    first_name: str | None = Field(default=None, max_length=100)
+    last_name: str | None = Field(default=None, max_length=100)
+    city: str | None = Field(default=None, max_length=120)
+    customer_type: str | None = Field(default=None, max_length=80)
+    interests: str | None = Field(default=None, max_length=800)
+    tags: str | list[str] | None = None
+    notes: str | None = Field(default=None, max_length=4000)
+    payment_status: str | None = Field(default=None, max_length=80)
+    payment_reference: str | None = Field(default=None, max_length=160)
+    crm_stage: str | None = Field(default=None, max_length=80)
+    intent: str | None = Field(default=None, max_length=120)
+    profile_json: dict[str, Any] | None = None
+
+
+class LabelCreateIn(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    color: str = Field(default="#5eead4", max_length=32)
+    description: str = Field(default="", max_length=500)
+    category: str = Field(default="general", max_length=80)
+
+
+class LabelPatchIn(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    color: str | None = Field(default=None, max_length=32)
+    description: str | None = Field(default=None, max_length=500)
+    category: str | None = Field(default=None, max_length=80)
+    is_active: bool | None = None
