@@ -31,6 +31,10 @@ class TenantMembershipOut(BaseModel):
     tenant_slug: str
     tenant_name: str
     role: str
+    tenant_status: str = "active"
+    plan_code: str = "starter"
+    subscription_status: str = "none"
+    trial_ends_at: Optional[str] = None
 
 
 class TokenOut(BaseModel):

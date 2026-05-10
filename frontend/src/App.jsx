@@ -94,6 +94,21 @@ function todayLabel() {
 }
 const pct = (used, limit) => (!Number(limit || 0) ? 0 : Math.min(100, Math.round((Number(used || 0) / Number(limit || 0)) * 100)));
 const number = (value) => Number(value || 0).toLocaleString("es-CO");
+const dateLabel = (value) => {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return new Intl.DateTimeFormat("es-CO", { day: "2-digit", month: "short", year: "numeric" }).format(date);
+};
+const lifecycleLabel = (status) => ({
+  trial: "Demo",
+  active: "Activo",
+  past_due: "Pago pendiente",
+  suspended: "Suspendido",
+  cancelled: "Cancelado",
+  paused: "Pausado",
+  none: "Sin suscripcion",
+}[String(status || "").toLowerCase()] || String(status || "Activo"));
 
 function App() {
   const [accessToken, setAccessToken] = useState(() => localStorage.getItem(TOKEN_KEY) || "");
@@ -138,6 +153,11 @@ function App() {
   const billingLimits = billingPlan?.limits || {};
   const billingUsage = billingOverview?.usage || {};
   const billingRemaining = billingOverview?.remaining || {};
+  const subscription = billingOverview?.subscription || {};
+  const subscriptionStatus = subscription.status || activeCompany?.subscription_status || "none";
+  const lifecycleStatus = subscriptionStatus !== "none" ? subscriptionStatus : (billingPlan.tenant_status || activeCompany?.tenant_status || "active");
+  const trialEndsAt = subscriptionStatus === "trial" ? subscription.current_period_end : activeCompany?.trial_ends_at;
+  const trialEndLabel = dateLabel(trialEndsAt);
   const featureFlags = billingOverview?.features || {};
   const featureLoaded = Boolean(billingOverview?.features);
   const hasFeature = (key) => !featureLoaded || featureFlags[key] !== false;
@@ -365,7 +385,8 @@ function App() {
               <label>Nombre</label><div className="input-wrap"><span>id</span><input autoComplete="name" value={register.full_name} onChange={(event) => setRegister((prev) => ({ ...prev, full_name: event.target.value }))} /></div>
               <label>Empresa</label><div className="input-wrap"><span>co</span><input autoComplete="organization" value={register.tenant_name} onChange={(event) => setRegister((prev) => ({ ...prev, tenant_name: event.target.value }))} /></div>
               <label>Slug publico</label><div className="input-wrap"><span>#</span><input autoComplete="off" value={register.tenant_slug} onChange={(event) => setRegister((prev) => ({ ...prev, tenant_slug: event.target.value }))} /></div>
-              <button className="primary auth-submit" type="submit">Crear empresa</button>
+              <small className="field-hint">Tu cuenta inicia con demo de 30 dias en el plan basico. Luego el admin puede activar el plan final.</small>
+              <button className="primary auth-submit" type="submit">Crear demo 30 dias</button>
               <div className="auth-links"><button type="button" onClick={() => setMode("login")}>Volver al login</button></div>
             </form>
           )}
@@ -381,7 +402,7 @@ function App() {
         <nav>
           {navItems.map(({ key, label }) => <button key={key} className={"nav-item " + (activeView === key ? "active" : "")} onClick={() => setActiveView(key)}>{label}</button>)}
         </nav>
-        <div className="company-card"><span>Empresa activa</span><strong>{activeCompany?.tenant_name || activeCompany?.name || me.tenant_id}</strong><small>{me.role} / plan {billingPlan.display_name || billingPlan.plan_code || activeCompany?.plan_code || "starter"}</small></div>
+        <div className="company-card"><span>Empresa activa</span><strong>{activeCompany?.tenant_name || activeCompany?.name || me.tenant_id}</strong><small>{me.role} / plan {billingPlan.display_name || billingPlan.plan_code || activeCompany?.plan_code || "starter"}</small><span className={`mini-badge ${String(lifecycleStatus).toLowerCase()}`}>{lifecycleLabel(lifecycleStatus)}{trialEndLabel ? ` hasta ${trialEndLabel}` : ""}</span></div>
       </aside>
 
       <main className="content">
@@ -393,8 +414,9 @@ function App() {
 
         {activeView === "dashboard" ? (
           <section className="dashboard-page">
-            <div className="hero-card glass-card"><div><p className="eyebrow">Resumen operativo</p><h2>Bienvenido, {me.email}</h2><p>En la interfaz usamos “Empresa” o “Workspace”. El identificador tecnico queda oculto para no ensuciar la experiencia.</p></div><button type="button" className="icon-button" onClick={() => loadDashboard(false)}>Actualizar</button></div>
+            <div className="hero-card glass-card"><div><p className="eyebrow">Resumen operativo</p><h2>Bienvenido, {me.email}</h2><p>En la interfaz usamos “Empresa” o “Workspace”. El identificador tecnico queda oculto para no ensuciar la experiencia.</p>{lifecycleStatus === "trial" ? <p className="trial-note">Demo de 30 dias activa{trialEndLabel ? ` hasta ${trialEndLabel}` : ""}. Puedes configurar Meta, IA y plantillas antes de pasar a pago.</p> : null}</div><button type="button" className="icon-button" onClick={() => loadDashboard(false)}>Actualizar</button></div>
             <div className="metric-grid">
+              <article className="metric-card mint"><span>Estado cuenta</span><strong>{lifecycleLabel(lifecycleStatus)}</strong><small>{trialEndLabel ? `Termina ${trialEndLabel}` : "Operativa"}</small></article>
               <article className="metric-card mint"><span>Conversaciones activas</span><strong>{number(conversations.length)}</strong><small>Inbox actual</small></article>
               <article className="metric-card blue"><span>No leidos</span><strong>{number(unreadTotal)}</strong><small>Pendientes</small></article>
               <article className="metric-card amber"><span>Mensajes mes</span><strong>{number(billingUsage.used_monthly_messages)} / {number(billingLimits.max_monthly_messages)}</strong><small>Plan {billingPlan.display_name || billingPlan.plan_code || "starter"}</small></article>
@@ -455,6 +477,11 @@ function App() {
               <div className="settings-stack">
                 <article className="panel glass-card">
                   <div className="panel-head"><h2>Plan y consumo</h2><button type="button" onClick={loadBilling}>Refrescar</button></div>
+                  <div className="plan-summary">
+                    <div><span>Estado</span><strong>{lifecycleLabel(lifecycleStatus)}</strong></div>
+                    <div><span>Plan</span><strong>{billingPlan.display_name || billingPlan.plan_code || "starter"}</strong></div>
+                    <div><span>Periodo</span><strong>{trialEndLabel || dateLabel(subscription.current_period_end) || billingOverview?.period_yyyymm || "-"}</strong></div>
+                  </div>
                   <div className="usage-bars">
                     <div className="usage-line"><div><strong>Mensajes mensuales</strong><span>{number(billingRemaining.monthly_messages)} disponibles</span></div><div className="meter"><span style={{ width: `${pct(billingUsage.used_monthly_messages, billingLimits.max_monthly_messages)}%` }} /></div></div>
                     <div className="usage-line"><div><strong>Integraciones activas</strong><span>{number(billingRemaining.integrations)} disponibles</span></div><div className="meter"><span style={{ width: `${pct(billingUsage.used_integrations, billingLimits.max_integrations)}%` }} /></div></div>

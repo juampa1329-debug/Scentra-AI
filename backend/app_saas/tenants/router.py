@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
+from app_saas.billing.trials import configured_trial_plan_code, create_trial_subscription
 from app_saas.db import db_session
 from app_saas.shared.security import AuthContext, get_current_user, normalize_slug, require_role
 from app_saas.tenants.schemas import TenantCreateIn, TenantOut, TenantPatchIn
@@ -43,11 +44,12 @@ def create_tenant(payload: TenantCreateIn, ctx: AuthContext = Depends(get_curren
         raise HTTPException(status_code=400, detail="valid_tenant_slug_required")
     try:
         with db_session() as conn:
+            trial_plan_code = configured_trial_plan_code(conn)
             tenant = conn.execute(
                 text(
                     """
-                    INSERT INTO saas_tenants (slug, name, timezone, locale)
-                    VALUES (:slug, :name, :timezone, :locale)
+                    INSERT INTO saas_tenants (slug, name, timezone, locale, status, plan_code)
+                    VALUES (:slug, :name, :timezone, :locale, 'trial', :plan_code)
                     RETURNING id::text AS tenant_id, slug, name, plan_code, status
                     """
                 ),
@@ -56,6 +58,7 @@ def create_tenant(payload: TenantCreateIn, ctx: AuthContext = Depends(get_curren
                     "name": payload.name.strip(),
                     "timezone": payload.timezone.strip(),
                     "locale": payload.locale.strip(),
+                    "plan_code": trial_plan_code,
                 },
             ).mappings().first()
             conn.execute(
@@ -67,6 +70,7 @@ def create_tenant(payload: TenantCreateIn, ctx: AuthContext = Depends(get_curren
                 ),
                 {"tenant_id": tenant["tenant_id"], "user_id": ctx.user_id},
             )
+            create_trial_subscription(conn, tenant["tenant_id"], trial_plan_code)
     except IntegrityError:
         raise HTTPException(status_code=409, detail="tenant_slug_already_exists")
 

@@ -816,7 +816,7 @@ def patch_subscription(
             {
                 "tenant_id": tenant_id,
                 "plan_code": effective_plan,
-                "tenant_status": "past_due" if status == "past_due" else "suspended" if status == "suspended" else "cancelled" if status == "cancelled" else "active",
+                "tenant_status": "trial" if status == "trial" else "past_due" if status == "past_due" else "suspended" if status == "suspended" else "cancelled" if status == "cancelled" else "active",
             },
         )
         row = conn.execute(

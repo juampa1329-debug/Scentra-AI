@@ -13,6 +13,7 @@ from app_saas.auth.schemas import (
     TenantMembershipOut,
     TokenOut,
 )
+from app_saas.billing.trials import configured_trial_plan_code, create_trial_subscription
 from app_saas.db import db_session
 from app_saas.shared.security import (
     AuthContext,
@@ -36,12 +37,23 @@ def _tenant_rows(conn, user_id: str) -> list[dict]:
                 t.id::text AS tenant_id,
                 t.slug AS tenant_slug,
                 t.name AS tenant_name,
+                t.status AS tenant_status,
+                t.plan_code,
+                COALESCE(s.status, 'none') AS subscription_status,
+                CASE WHEN COALESCE(s.status, '') = 'trial' THEN s.current_period_end::text ELSE NULL END AS trial_ends_at,
                 m.role
             FROM saas_memberships m
             JOIN saas_tenants t ON t.id = m.tenant_id
+            LEFT JOIN LATERAL (
+                SELECT status, current_period_end
+                FROM saas_billing_subscriptions
+                WHERE tenant_id = t.id
+                ORDER BY updated_at DESC
+                LIMIT 1
+            ) s ON TRUE
             WHERE m.user_id = CAST(:user_id AS uuid)
               AND m.is_active = TRUE
-              AND t.status = 'active'
+              AND t.status IN ('active', 'trial')
             ORDER BY
                 CASE m.role
                     WHEN 'owner' THEN 1
@@ -115,15 +127,16 @@ def register(payload: RegisterIn):
                     "password_hash": hash_password(payload.password),
                 },
             ).mappings().first()
+            trial_plan_code = configured_trial_plan_code(conn)
             tenant = conn.execute(
                 text(
                     """
-                    INSERT INTO saas_tenants (slug, name)
-                    VALUES (:slug, :name)
+                    INSERT INTO saas_tenants (slug, name, status, plan_code)
+                    VALUES (:slug, :name, 'trial', :plan_code)
                     RETURNING id::text, slug, name
                     """
                 ),
-                {"slug": tenant_slug, "name": str(payload.tenant_name).strip()},
+                {"slug": tenant_slug, "name": str(payload.tenant_name).strip(), "plan_code": trial_plan_code},
             ).mappings().first()
             conn.execute(
                 text(
@@ -134,6 +147,7 @@ def register(payload: RegisterIn):
                 ),
                 {"tenant_id": tenant["id"], "user_id": user["id"]},
             )
+            create_trial_subscription(conn, tenant["id"], trial_plan_code)
             tenants = _tenant_rows(conn, user["id"])
     except IntegrityError:
         raise HTTPException(status_code=409, detail="email_or_tenant_already_exists")
