@@ -23,7 +23,7 @@ services:
       migrate:
         condition: service_completed_successfully
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg2://${POSTGRES_USER:-scentra_saas}:${POSTGRES_PASSWORD:-scentra_saas_dev}@db:5432/${POSTGRES_DB:-scentra_saas}}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg2://scentra_saas:scentra_saas_dev@db:5432/scentra_saas}
       SAAS_ENV: ${SAAS_ENV:-local}
       SAAS_JWT_SECRET: ${SAAS_JWT_SECRET:-change-me-local-saas-secret}
       SAAS_JWT_ISSUER: ${SAAS_JWT_ISSUER:-scentra-ai}
@@ -45,7 +45,7 @@ services:
       db:
         condition: service_healthy
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg2://${POSTGRES_USER:-scentra_saas}:${POSTGRES_PASSWORD:-scentra_saas_dev}@db:5432/${POSTGRES_DB:-scentra_saas}}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg2://scentra_saas:scentra_saas_dev@db:5432/scentra_saas}
       SAAS_ENV: ${SAAS_ENV:-local}
       SAAS_JWT_SECRET: ${SAAS_JWT_SECRET:-change-me-local-saas-secret}
       SAAS_JWT_ISSUER: ${SAAS_JWT_ISSUER:-scentra-ai}
@@ -64,7 +64,7 @@ services:
       migrate:
         condition: service_completed_successfully
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg2://${POSTGRES_USER:-scentra_saas}:${POSTGRES_PASSWORD:-scentra_saas_dev}@db:5432/${POSTGRES_DB:-scentra_saas}}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg2://scentra_saas:scentra_saas_dev@db:5432/scentra_saas}
       SAAS_ENV: ${SAAS_ENV:-local}
       SAAS_JWT_SECRET: ${SAAS_JWT_SECRET:-change-me-local-saas-secret}
       SAAS_JWT_ISSUER: ${SAAS_JWT_ISSUER:-scentra-ai}
