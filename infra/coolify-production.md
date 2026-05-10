@@ -29,23 +29,39 @@ api   CNAME   scentra-ai.online
 Mantén `@` como registro `A` hacia la IP publica. No uses IP privada/local.
 
 ## Variables backend API / worker / migrate
-Estas variables deben estar disponibles en runtime:
+Si usas el Postgres incluido en el Docker Compose, coloca estas variables en el recurso Docker Compose de Coolify. Coolify las entrega a `db`, `api`, `migrate` y `worker`.
 
 ```env
+POSTGRES_DB=scentra_saas
+POSTGRES_USER=scentra_saas
+POSTGRES_PASSWORD=<password_seguro_postgres>
+DATABASE_URL=postgresql+psycopg2://scentra_saas:<password_seguro_postgres>@db:5432/scentra_saas
+
 SAAS_ENV=production
 SAAS_JWT_SECRET=<secreto_largo_aleatorio>
 SAAS_JWT_ISSUER=scentra-ai
+SAAS_ACCESS_TOKEN_MINUTES=15
+SAAS_REFRESH_TOKEN_DAYS=15
 SAAS_CORS_ORIGINS=https://app.scentra-ai.online,https://admin.scentra-ai.online
 SAAS_TRIAL_DAYS=30
 SAAS_TRIAL_PLAN_CODE=starter
-SCENTRA_META_ACCESS_TOKEN=<token_permanente_meta_whatsapp_cloud>
+SAAS_MIGRATION_PROFILE=core
+SAAS_WORKER_NAME=worker-production
+
+SCENTRA_META_ACCESS_TOKEN=
+SCENTRA_WHATSAPP_BUSINESS_ACCOUNT_ID=
 SCENTRA_META_GRAPH_VERSION=v22.0
 SCENTRA_META_TIMEOUT_SEC=15
 ```
 
-Si usas un WABA global para pruebas, tambien puedes definir:
+`POSTGRES_PASSWORD` y la clave dentro de `DATABASE_URL` deben ser exactamente iguales.
+
+`SCENTRA_META_ACCESS_TOKEN` puede quedar vacio si todavia no vas a enviar WhatsApp real.
+
+Si usas un WABA global para pruebas, define tambien:
 
 ```env
+SCENTRA_META_ACCESS_TOKEN=<token_permanente_meta_whatsapp_cloud>
 SCENTRA_WHATSAPP_BUSINESS_ACCOUNT_ID=<waba_id>
 ```
 
