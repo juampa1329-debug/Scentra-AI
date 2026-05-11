@@ -3,12 +3,10 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
-
     depends_on:
       migrate:
         condition: service_completed_successfully
     environment:
-
       DATABASE_URL: ${DATABASE_URL}
       SAAS_ENV: ${SAAS_ENV:-local}
       SAAS_JWT_SECRET: ${SAAS_JWT_SECRET:-change-me-local-saas-secret}
@@ -30,7 +28,6 @@ services:
       context: .
       dockerfile: backend/Dockerfile
     environment:
- 
       DATABASE_URL: ${DATABASE_URL}
       SAAS_ENV: ${SAAS_ENV:-local}
       SAAS_JWT_SECRET: ${SAAS_JWT_SECRET:-change-me-local-saas-secret}
@@ -48,7 +45,6 @@ services:
       migrate:
         condition: service_completed_successfully
     environment:
-
       DATABASE_URL: ${DATABASE_URL}
       SAAS_ENV: ${SAAS_ENV:-local}
       SAAS_JWT_SECRET: ${SAAS_JWT_SECRET:-change-me-local-saas-secret}
@@ -61,4 +57,3 @@ services:
       SCENTRA_META_GRAPH_VERSION: ${SCENTRA_META_GRAPH_VERSION:-v22.0}
       SCENTRA_META_TIMEOUT_SEC: ${SCENTRA_META_TIMEOUT_SEC:-15}
     command: ["python", "-m", "app_saas.workers.runner"]
-
