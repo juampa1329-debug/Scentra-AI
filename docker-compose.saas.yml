@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
-    
+
     environment:
       DATABASE_URL: ${DATABASE_URL}
       SAAS_ENV: ${SAAS_ENV:-local}
@@ -18,21 +18,10 @@ services:
       SCENTRA_WHATSAPP_BUSINESS_ACCOUNT_ID: ${SCENTRA_WHATSAPP_BUSINESS_ACCOUNT_ID:-}
       SCENTRA_META_GRAPH_VERSION: ${SCENTRA_META_GRAPH_VERSION:-v22.0}
       SCENTRA_META_TIMEOUT_SEC: ${SCENTRA_META_TIMEOUT_SEC:-15}
+
     ports:
       - "127.0.0.1:${SAAS_API_HOST_PORT:-8010}:8000"
-    networks:
-      - coolify
 
-  
-    environment:
-      DATABASE_URL: ${DATABASE_URL}
-      SAAS_ENV: ${SAAS_ENV:-local}
-      SAAS_JWT_SECRET: ${SAAS_JWT_SECRET:-change-me-local-saas-secret}
-      SAAS_JWT_ISSUER: ${SAAS_JWT_ISSUER:-scentra-ai}
-      SAAS_TRIAL_DAYS: ${SAAS_TRIAL_DAYS:-30}
-      SAAS_TRIAL_PLAN_CODE: ${SAAS_TRIAL_PLAN_CODE:-starter}
-      SAAS_MIGRATION_PROFILE: ${SAAS_MIGRATION_PROFILE:-core}
-    command: ["python", "-m", "app_saas.tools.migrate", "/app/migrations"]
     networks:
       - coolify
 
@@ -40,7 +29,7 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
-    
+
     environment:
       DATABASE_URL: ${DATABASE_URL}
       SAAS_ENV: ${SAAS_ENV:-local}
@@ -53,7 +42,9 @@ services:
       SCENTRA_WHATSAPP_BUSINESS_ACCOUNT_ID: ${SCENTRA_WHATSAPP_BUSINESS_ACCOUNT_ID:-}
       SCENTRA_META_GRAPH_VERSION: ${SCENTRA_META_GRAPH_VERSION:-v22.0}
       SCENTRA_META_TIMEOUT_SEC: ${SCENTRA_META_TIMEOUT_SEC:-15}
+
     command: ["python", "-m", "app_saas.workers.runner"]
+
     networks:
       - coolify
 
