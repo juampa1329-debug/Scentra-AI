@@ -8,7 +8,7 @@ services:
     ports:
       - "127.0.0.1:${SAAS_DB_HOST_PORT:-55432}:5432"
     volumes:
-      - pgdata_saas:/var/lib/postgresql/data
+      - pgdata_saas_new:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-scentra_saas} -d ${POSTGRES_DB:-scentra_saas}"]
       interval: 5s
@@ -82,4 +82,4 @@ services:
     command: ["python", "-m", "app_saas.workers.runner"]
 
 volumes:
-  pgdata_saas: {}
+  pgdata_saas_new: {}
