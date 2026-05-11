@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     saas_jwt_issuer: str = "scentra-ai"
     saas_access_token_minutes: int = 15
     saas_refresh_token_days: int = 15
+    saas_secret_key: str = ""
     saas_cors_origins: str = "http://localhost:5174,http://127.0.0.1:5174,http://localhost:5175,http://127.0.0.1:5175,http://localhost:3000,http://127.0.0.1:3000"
     saas_trial_days: int = 30
     saas_trial_plan_code: str = "starter"

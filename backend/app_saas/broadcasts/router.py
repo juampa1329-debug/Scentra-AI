@@ -25,6 +25,7 @@ from app_saas.broadcasts.schemas import (
     MetaTemplatePatchIn,
 )
 from app_saas.db import db_session, set_tenant_context
+from app_saas.shared.secrets import decrypt_secret
 from app_saas.shared.security import AuthContext, get_current_user, require_role
 from app_saas.workers.dispatch import process_due_outbound_messages
 
@@ -87,7 +88,7 @@ def _load_meta_integration(conn, tenant_id: str) -> dict[str, Any] | None:
 
 
 def _secret_from_integration(config: dict[str, Any], integration: dict[str, Any] | None) -> str:
-    inline_token = _clean_text(config.get("access_token") or config.get("token"), 2000)
+    inline_token = _clean_text(decrypt_secret(config.get("access_token") or config.get("token")), 2000)
     if inline_token:
         return inline_token
     env_name = _clean_text(config.get("access_token_env"), 120)

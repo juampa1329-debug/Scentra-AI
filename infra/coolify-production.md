@@ -40,6 +40,7 @@ DATABASE_URL=postgresql+psycopg2://scentra_saas:<password_seguro_postgres>@db:54
 SAAS_ENV=production
 SAAS_JWT_SECRET=<secreto_largo_aleatorio>
 SAAS_JWT_ISSUER=scentra-ai
+SAAS_SECRET_KEY=<secreto_largo_para_cifrar_tokens_por_cliente>
 SAAS_ACCESS_TOKEN_MINUTES=15
 SAAS_REFRESH_TOKEN_DAYS=15
 SAAS_CORS_ORIGINS=https://app.scentra-ai.online,https://admin.scentra-ai.online
@@ -57,6 +58,8 @@ SCENTRA_META_TIMEOUT_SEC=15
 `POSTGRES_PASSWORD` y la clave dentro de `DATABASE_URL` deben ser exactamente iguales.
 
 `SCENTRA_META_ACCESS_TOKEN` puede quedar vacio si todavia no vas a enviar WhatsApp real.
+
+`SAAS_SECRET_KEY` se usa para cifrar tokens que cada cliente guarda desde el portal. No lo cambies despues de tener clientes conectados, porque los tokens cifrados dejarian de poder leerse.
 
 Si usas un WABA global para pruebas, define tambien:
 

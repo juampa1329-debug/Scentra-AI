@@ -12,6 +12,7 @@ from sqlalchemy import text
 
 from app_saas.billing.limits import tenant_entitlements
 from app_saas.db import db_session, set_tenant_context
+from app_saas.shared.secrets import decrypt_secret
 
 
 class DispatchPermanentError(Exception):
@@ -183,7 +184,7 @@ def _mark_outbound(
 
 
 def _secret_from_env(config: dict[str, Any], integration: dict[str, Any]) -> str:
-    inline_token = str(config.get("access_token") or config.get("token") or "").strip()
+    inline_token = decrypt_secret(str(config.get("access_token") or config.get("token") or "").strip())
     if inline_token:
         return inline_token
     env_name = str(config.get("access_token_env") or "").strip()
@@ -248,7 +249,7 @@ def _send_meta_cloud_text(integration: dict[str, Any], job: dict[str, Any]) -> d
 
     access_token = _secret_from_env(config, integration)
     if not access_token:
-        raise DispatchPermanentError("meta_access_token_env_missing")
+        raise DispatchPermanentError("meta_access_token_missing")
 
     recipient = _normalize_recipient(str(job.get("recipient_external_id") or ""))
     body_text = str(job.get("body_text") or "").strip()
