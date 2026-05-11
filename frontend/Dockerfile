@@ -2,11 +2,14 @@ FROM node:20 AS build
 
 WORKDIR /app
 
-COPY frontend/package*.json ./
+ARG VITE_API_BASE
+ENV VITE_API_BASE=$VITE_API_BASE
+
+COPY package*.json ./
 
 RUN npm install
 
-COPY frontend .
+COPY . .
 
 RUN npm run build
 
