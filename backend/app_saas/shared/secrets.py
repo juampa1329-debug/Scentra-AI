@@ -18,7 +18,7 @@ def _fernet() -> Fernet:
 
 
 def is_masked_secret(value: str | None) -> bool:
-    return str(value or "").strip() in {MASKED_SECRET, "••••••••", "************"}
+    return str(value or "").strip() in {MASKED_SECRET, "************"}
 
 
 def encrypt_secret(value: str | None) -> str:

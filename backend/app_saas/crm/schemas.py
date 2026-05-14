@@ -25,6 +25,11 @@ class CustomerUpdateIn(BaseModel):
     profile_json: dict[str, Any] | None = None
 
 
+class CustomerCreateIn(CustomerUpdateIn):
+    channel: str = Field(default="whatsapp", max_length=40)
+    external_contact_id: str | None = Field(default=None, max_length=180)
+
+
 class LabelCreateIn(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     color: str = Field(default="#5eead4", max_length=32)

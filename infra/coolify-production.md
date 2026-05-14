@@ -28,14 +28,16 @@ api   CNAME   scentra-ai.online
 
 Mantén `@` como registro `A` hacia la IP publica. No uses IP privada/local.
 
-## Variables backend API / worker / migrate
-Si usas el Postgres incluido en el Docker Compose, coloca estas variables en el recurso Docker Compose de Coolify. Coolify las entrega a `db`, `api`, `migrate` y `worker`.
+## Variables backend API / worker
+Si usas el Postgres incluido en el Docker Compose, coloca estas variables en el recurso Docker Compose de Coolify. Coolify las entrega a `db`, `api` y `worker`.
+
+La API ejecuta las migraciones automaticamente antes de iniciar `uvicorn`, asi evitamos un contenedor `migrate` que quede en estado `Exited` dentro de Coolify.
 
 ```env
 POSTGRES_DB=scentra_saas
 POSTGRES_USER=scentra_saas
 POSTGRES_PASSWORD=<password_seguro_postgres>
-DATABASE_URL=postgresql+psycopg2://scentra_saas:<password_seguro_postgres>@db:5432/scentra_saas
+DATABASE_URL=postgresql+psycopg2://scentra_saas:<password_seguro_postgres>@scentra-saas-db:5432/scentra_saas
 
 SAAS_ENV=production
 SAAS_JWT_SECRET=<secreto_largo_aleatorio>
@@ -56,6 +58,8 @@ SCENTRA_META_TIMEOUT_SEC=15
 ```
 
 `POSTGRES_PASSWORD` y la clave dentro de `DATABASE_URL` deben ser exactamente iguales.
+
+No reutilices la base de datos de la app original para clientes SaaS de venta, salvo que sea una migracion controlada. Lo recomendado es crear una base/usuario separado para Scentra SaaS; puede vivir en el mismo VPS o Postgres, pero con credenciales y volumen propios.
 
 `SCENTRA_META_ACCESS_TOKEN` puede quedar vacio si todavia no vas a enviar WhatsApp real.
 

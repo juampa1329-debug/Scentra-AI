@@ -4,8 +4,7 @@
 1. Desde `saas-version/`:
    `docker compose -f docker-compose.saas.yml up --build`
 
-2. Aplicar migraciones en otra terminal:
-   `docker compose -f docker-compose.saas.yml run --rm migrate`
+2. La API aplica migraciones automaticamente antes de iniciar `uvicorn`.
 
    El perfil local aplica migraciones SaaS core. Las migraciones `002`, `003` y `004` son para convertir una base legacy existente.
 
@@ -74,6 +73,7 @@ Para enviar mensajes reales:
 4. En `Inbox`, envia una respuesta. El worker llamara a Graph API `/{phone_number_id}/messages`.
 
 Notas:
-- No pegues tokens en la UI. Solo guarda el nombre de la variable de entorno.
+- En SaaS real el cliente puede pegar su token permanente de Meta en `Ajustes > Canales`; el backend lo cifra y la UI solo muestra una pista.
+- `SCENTRA_META_ACCESS_TOKEN` sigue funcionando como fallback global para pruebas o una sola cuenta de WhatsApp.
 - `SCENTRA_META_GRAPH_VERSION` queda configurable para ajustar la version vigente de tu app Meta.
 - Si falta token o `Phone Number ID`, el mensaje se marca como `failed` con el error correspondiente.

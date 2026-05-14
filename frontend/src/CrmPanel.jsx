@@ -45,6 +45,7 @@ export default function CrmPanel({ apiCall, showStatus, onOpenInbox }) {
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [creating, setCreating] = useState(false);
 
   const selectedCustomer = useMemo(
     () => customers.find((customer) => customer.id === selectedId) || null,
@@ -61,6 +62,7 @@ export default function CrmPanel({ apiCall, showStatus, onOpenInbox }) {
       const nextSelected = rows.find((item) => item.id === selectedId) || rows[0] || null;
       setSelectedId(nextSelected?.id || "");
       setForm(toCustomerForm(nextSelected));
+      setCreating(false);
       if (!silent) showStatus("Clientes actualizados", "ok");
     } catch (err) {
       showStatus(String(err.message || err), "error");
@@ -87,6 +89,20 @@ export default function CrmPanel({ apiCall, showStatus, onOpenInbox }) {
   const selectCustomer = (customer) => {
     setSelectedId(customer.id);
     setForm(toCustomerForm(customer));
+    setCreating(false);
+  };
+
+  const startNewCustomer = () => {
+    setSelectedId("");
+    setForm(emptyCustomerForm);
+    setCreating(true);
+  };
+
+  const cancelNewCustomer = () => {
+    setCreating(false);
+    const nextSelected = customers[0] || null;
+    setSelectedId(nextSelected?.id || "");
+    setForm(toCustomerForm(nextSelected));
   };
 
   const updateField = (field, value) => {
@@ -94,17 +110,25 @@ export default function CrmPanel({ apiCall, showStatus, onOpenInbox }) {
   };
 
   const saveCustomer = async () => {
-    if (!selectedId) return;
+    if (!creating && !selectedId) return;
+    if (creating && !form.display_name.trim() && !form.phone.trim()) {
+      showStatus("Escribe al menos nombre visible o telefono para crear el cliente.", "error");
+      return;
+    }
     setSaving(true);
     try {
-      const data = await apiCall(`/saas/v1/customers/${encodeURIComponent(selectedId)}`, {
-        method: "PATCH",
-        body: JSON.stringify(form),
-      });
+      const data = creating
+        ? await apiCall("/saas/v1/customers", { method: "POST", body: JSON.stringify(form) })
+        : await apiCall(`/saas/v1/customers/${encodeURIComponent(selectedId)}`, {
+            method: "PATCH",
+            body: JSON.stringify(form),
+          });
       const updated = data?.customer;
-      setCustomers((prev) => prev.map((item) => (item.id === selectedId ? updated : item)));
+      setCustomers((prev) => (creating ? [updated, ...prev] : prev.map((item) => (item.id === selectedId ? updated : item))));
+      setSelectedId(updated?.id || "");
       setForm(toCustomerForm(updated));
-      showStatus("Ficha CRM guardada", "ok");
+      setCreating(false);
+      showStatus(creating ? "Cliente creado" : "Ficha CRM guardada", "ok");
     } catch (err) {
       showStatus(String(err.message || err), "error");
     } finally {
@@ -141,7 +165,10 @@ export default function CrmPanel({ apiCall, showStatus, onOpenInbox }) {
         <article className="panel glass-card module-card">
           <div className="panel-head">
             <h2>Base de clientes</h2>
-            <span>{loading ? "cargando" : `${number(customers.length)} registros`}</span>
+            <span className="row-actions">
+              <em>{loading ? "cargando" : `${number(customers.length)} registros`}</em>
+              <button type="button" className="primary" onClick={startNewCustomer}>+ Nuevo</button>
+            </span>
           </div>
           <form className="search-strip" onSubmit={(event) => { event.preventDefault(); loadCustomers(false); }}>
             <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Buscar por nombre, telefono, ciudad o etiqueta" />
@@ -163,22 +190,22 @@ export default function CrmPanel({ apiCall, showStatus, onOpenInbox }) {
                 <em>{customer.takeover ? "Humano" : "IA"}</em>
               </button>
             ))}
-            {!loading && customers.length === 0 ? <div className="empty">Aun no hay clientes sincronizados.</div> : null}
+            {!loading && customers.length === 0 ? <div className="empty">Aun no hay clientes sincronizados. Puedes crear uno manualmente.</div> : null}
           </div>
         </article>
 
         <article className="panel glass-card module-card">
           <div className="panel-head">
             <h2>Ficha CRM</h2>
-            <span>{selectedCustomer ? selectedCustomer.channel : "selecciona cliente"}</span>
+            <span>{creating ? "nuevo cliente" : selectedCustomer ? selectedCustomer.channel : "selecciona cliente"}</span>
           </div>
-          {selectedCustomer ? (
+          {selectedCustomer || creating ? (
             <>
               <div className="profile-mini">
                 <div className="avatar-preview">{String(form.display_name || form.phone || "S").slice(0, 1).toUpperCase()}</div>
                 <div>
                   <strong>{form.display_name || form.phone || "Cliente"}</strong>
-                  <p>{selectedCustomer.last_message_text || "Sin ultimo mensaje registrado."}</p>
+                  <p>{selectedCustomer?.last_message_text || (creating ? "Crea una ficha comercial manual para seguimiento, pagos y remarketing." : "Sin ultimo mensaje registrado.")}</p>
                 </div>
               </div>
               <div className="form-grid two">
@@ -204,8 +231,9 @@ export default function CrmPanel({ apiCall, showStatus, onOpenInbox }) {
               </div>
               <label>Notas internas<textarea rows={5} value={form.notes} onChange={(event) => updateField("notes", event.target.value)} /></label>
               <div className="panel-actions">
-                <button type="button" className="primary" disabled={saving} onClick={saveCustomer}>{saving ? "Guardando..." : "Guardar ficha"}</button>
-                <button type="button" onClick={() => onOpenInbox(selectedCustomer)}>Abrir en inbox</button>
+                <button type="button" className="primary" disabled={saving} onClick={saveCustomer}>{saving ? "Guardando..." : creating ? "Crear cliente" : "Guardar ficha"}</button>
+                {creating ? <button type="button" onClick={cancelNewCustomer}>Cancelar</button> : null}
+                {selectedCustomer ? <button type="button" onClick={() => onOpenInbox(selectedCustomer)}>Abrir en inbox</button> : null}
               </div>
             </>
           ) : (

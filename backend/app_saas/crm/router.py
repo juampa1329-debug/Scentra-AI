@@ -9,7 +9,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from app_saas.billing.limits import ensure_monthly_message_quota
-from app_saas.crm.schemas import CustomerUpdateIn, LabelCreateIn, LabelPatchIn, SendMessageIn
+from app_saas.crm.schemas import CustomerCreateIn, CustomerUpdateIn, LabelCreateIn, LabelPatchIn, SendMessageIn
 from app_saas.db import db_session, set_tenant_context
 from app_saas.shared.security import AuthContext, get_current_user, require_role
 from app_saas.workers.dispatch import process_due_outbound_messages
@@ -212,6 +212,271 @@ def list_customers(
             params,
         ).mappings().all()
     return {"tenant_id": ctx.tenant_id, "customers": [_customer_row(row) for row in rows]}
+
+
+@router.get("/dashboard/overview")
+def dashboard_overview(ctx: AuthContext = Depends(get_current_user)):
+    with db_session() as conn:
+        set_tenant_context(conn, ctx.tenant_id)
+        totals = conn.execute(
+            text(
+                """
+                SELECT
+                    COUNT(*)::int AS conversations,
+                    COALESCE(SUM(unread_count), 0)::int AS unread,
+                    COUNT(*) FILTER (WHERE takeover = TRUE)::int AS takeover,
+                    COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '30 days')::int AS new_customers_30d,
+                    COUNT(*) FILTER (WHERE payment_status = 'pending')::int AS pending_payments,
+                    COUNT(*) FILTER (WHERE payment_status = 'paid')::int AS paid_customers
+                FROM saas_conversations
+                WHERE tenant_id = CAST(:tenant_id AS uuid)
+                """
+            ),
+            {"tenant_id": ctx.tenant_id},
+        ).mappings().first() or {}
+
+        message_totals = conn.execute(
+            text(
+                """
+                SELECT
+                    COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '30 days')::int AS messages_30d,
+                    COUNT(*) FILTER (WHERE direction = 'in' AND created_at >= NOW() - INTERVAL '30 days')::int AS inbound_30d,
+                    COUNT(*) FILTER (WHERE direction = 'out' AND created_at >= NOW() - INTERVAL '30 days')::int AS outbound_30d
+                FROM saas_messages
+                WHERE tenant_id = CAST(:tenant_id AS uuid)
+                """
+            ),
+            {"tenant_id": ctx.tenant_id},
+        ).mappings().first() or {}
+
+        funnel_rows = conn.execute(
+            text(
+                """
+                SELECT COALESCE(NULLIF(crm_stage, ''), 'sin_etapa') AS stage, COUNT(*)::int AS count
+                FROM saas_conversations
+                WHERE tenant_id = CAST(:tenant_id AS uuid)
+                GROUP BY COALESCE(NULLIF(crm_stage, ''), 'sin_etapa')
+                """
+            ),
+            {"tenant_id": ctx.tenant_id},
+        ).mappings().all()
+
+        payment_rows = conn.execute(
+            text(
+                """
+                SELECT COALESCE(NULLIF(payment_status, ''), 'sin_estado') AS status, COUNT(*)::int AS count
+                FROM saas_conversations
+                WHERE tenant_id = CAST(:tenant_id AS uuid)
+                GROUP BY COALESCE(NULLIF(payment_status, ''), 'sin_estado')
+                ORDER BY count DESC, status ASC
+                """
+            ),
+            {"tenant_id": ctx.tenant_id},
+        ).mappings().all()
+
+        channel_rows = conn.execute(
+            text(
+                """
+                SELECT channel, COUNT(*)::int AS count
+                FROM saas_conversations
+                WHERE tenant_id = CAST(:tenant_id AS uuid)
+                GROUP BY channel
+                ORDER BY count DESC, channel ASC
+                """
+            ),
+            {"tenant_id": ctx.tenant_id},
+        ).mappings().all()
+
+        activity_rows = conn.execute(
+            text(
+                """
+                WITH days AS (
+                    SELECT generate_series((CURRENT_DATE - INTERVAL '13 days')::date, CURRENT_DATE, INTERVAL '1 day')::date AS day
+                ),
+                message_counts AS (
+                    SELECT
+                        created_at::date AS day,
+                        COUNT(*) FILTER (WHERE direction = 'in')::int AS inbound,
+                        COUNT(*) FILTER (WHERE direction = 'out')::int AS outbound,
+                        COUNT(*)::int AS total
+                    FROM saas_messages
+                    WHERE tenant_id = CAST(:tenant_id AS uuid)
+                      AND created_at >= CURRENT_DATE - INTERVAL '13 days'
+                    GROUP BY created_at::date
+                )
+                SELECT
+                    days.day::text AS date,
+                    COALESCE(message_counts.inbound, 0)::int AS inbound,
+                    COALESCE(message_counts.outbound, 0)::int AS outbound,
+                    COALESCE(message_counts.total, 0)::int AS total
+                FROM days
+                LEFT JOIN message_counts ON message_counts.day = days.day
+                ORDER BY days.day ASC
+                """
+            ),
+            {"tenant_id": ctx.tenant_id},
+        ).mappings().all()
+
+        recent_rows = conn.execute(
+            text(
+                """
+                SELECT
+                    m.created_at::text,
+                    m.direction,
+                    m.msg_type,
+                    LEFT(COALESCE(NULLIF(m.text, ''), '[' || m.msg_type || ']'), 220) AS text,
+                    c.channel,
+                    c.display_name,
+                    c.phone,
+                    c.external_contact_id
+                FROM saas_messages m
+                JOIN saas_conversations c ON c.id = m.conversation_id
+                WHERE m.tenant_id = CAST(:tenant_id AS uuid)
+                ORDER BY m.created_at DESC
+                LIMIT 8
+                """
+            ),
+            {"tenant_id": ctx.tenant_id},
+        ).mappings().all()
+
+    total_conversations = int(totals.get("conversations") or 0)
+    stage_order = ["contactado", "interes", "intencion_compra", "pago_pendiente", "pago_confirmado", "sin_etapa"]
+    stage_labels = {
+        "contactado": "Contactados",
+        "interes": "Interes",
+        "intencion_compra": "Intencion de compra",
+        "pago_pendiente": "Pago pendiente",
+        "pago_confirmado": "Pago confirmado",
+        "sin_etapa": "Sin etapa",
+    }
+    funnel_map = {str(row["stage"]): int(row["count"] or 0) for row in funnel_rows}
+    funnel = [
+        {
+            "stage": stage,
+            "label": stage_labels.get(stage, stage.replace("_", " ").title()),
+            "count": funnel_map.get(stage, 0),
+            "pct": round((funnel_map.get(stage, 0) / total_conversations) * 100, 2) if total_conversations else 0,
+        }
+        for stage in stage_order
+        if stage in funnel_map or stage != "sin_etapa"
+    ]
+
+    return {
+        "tenant_id": ctx.tenant_id,
+        "totals": {**dict(totals), **dict(message_totals)},
+        "funnel": funnel,
+        "payments": [dict(row) for row in payment_rows],
+        "channels": [dict(row) for row in channel_rows],
+        "activity": [dict(row) for row in activity_rows],
+        "recent": [dict(row) for row in recent_rows],
+    }
+
+
+@router.post("/customers")
+def create_customer(
+    payload: CustomerCreateIn,
+    ctx: AuthContext = Depends(require_role("owner", "admin", "supervisor", "agent")),
+):
+    raw = payload.model_dump(exclude_unset=True)
+    channel = _clean_text(raw.get("channel"), 40).lower() or "whatsapp"
+    phone = _clean_text(raw.get("phone"), 80)
+    display_name = _clean_text(raw.get("display_name"), 160)
+    external_contact_id = _clean_text(raw.get("external_contact_id"), 180) or phone
+    if not external_contact_id:
+        external_contact_id = f"manual:{uuid4().hex}"
+    if not display_name and not phone and external_contact_id.startswith("manual:"):
+        raise HTTPException(status_code=400, detail="customer_name_or_phone_required")
+
+    params: dict[str, Any] = {
+        "tenant_id": ctx.tenant_id,
+        "channel": channel,
+        "external_contact_id": external_contact_id,
+        "phone": phone,
+        "display_name": display_name or phone or "Cliente manual",
+        "first_name": _clean_text(raw.get("first_name"), 100),
+        "last_name": _clean_text(raw.get("last_name"), 100),
+        "city": _clean_text(raw.get("city"), 120),
+        "customer_type": _clean_text(raw.get("customer_type"), 80),
+        "interests": _clean_text(raw.get("interests"), 800),
+        "tags": _tags_csv(_normalize_tags(raw.get("tags"))),
+        "notes": _clean_text(raw.get("notes"), 4000),
+        "payment_status": _clean_text(raw.get("payment_status"), 80),
+        "payment_reference": _clean_text(raw.get("payment_reference"), 160),
+        "crm_stage": _clean_text(raw.get("crm_stage"), 80) or "contactado",
+        "intent": _clean_text(raw.get("intent"), 120),
+        "profile_json": json.dumps(raw.get("profile_json") or {}),
+        "last_message_text": "Cliente creado manualmente",
+    }
+
+    try:
+        with db_session() as conn:
+            set_tenant_context(conn, ctx.tenant_id)
+            row = conn.execute(
+                text(
+                    """
+                    INSERT INTO saas_conversations (
+                        tenant_id,
+                        channel,
+                        external_contact_id,
+                        phone,
+                        display_name,
+                        first_name,
+                        last_name,
+                        city,
+                        customer_type,
+                        interests,
+                        tags,
+                        notes,
+                        payment_status,
+                        payment_reference,
+                        crm_stage,
+                        intent,
+                        profile_json,
+                        last_message_text,
+                        updated_at
+                    )
+                    VALUES (
+                        CAST(:tenant_id AS uuid),
+                        :channel,
+                        :external_contact_id,
+                        :phone,
+                        :display_name,
+                        :first_name,
+                        :last_name,
+                        :city,
+                        :customer_type,
+                        :interests,
+                        :tags,
+                        :notes,
+                        :payment_status,
+                        :payment_reference,
+                        :crm_stage,
+                        :intent,
+                        CAST(:profile_json AS jsonb),
+                        :last_message_text,
+                        NOW()
+                    )
+                    RETURNING id::text
+                    """
+                ),
+                params,
+            ).mappings().first()
+
+            created = conn.execute(
+                text(
+                    f"""
+                    {CUSTOMER_SELECT}
+                    WHERE c.tenant_id = CAST(:tenant_id AS uuid)
+                      AND c.id = CAST(:conversation_id AS uuid)
+                    LIMIT 1
+                    """
+                ),
+                {"tenant_id": ctx.tenant_id, "conversation_id": row["id"]},
+            ).mappings().first()
+    except IntegrityError:
+        raise HTTPException(status_code=409, detail="customer_already_exists")
+
+    return {"ok": True, "tenant_id": ctx.tenant_id, "customer": _customer_row(created)}
 
 
 @router.get("/customers/{conversation_id}")

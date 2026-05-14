@@ -16,6 +16,15 @@ router = APIRouter(prefix="/integrations", tags=["saas-integrations"])
 SENSITIVE_CONFIG_KEYS = {"access_token", "token", "permanent_token", "app_secret"}
 
 
+def _secret_hint(value: str) -> str:
+    clean = str(value or "").strip()
+    if not clean:
+        return ""
+    if len(clean) <= 10:
+        return f"{clean[:2]}...{clean[-2:]}"
+    return f"{clean[:4]}...{clean[-4:]}"
+
+
 def _safe_config_for_output(raw: dict | None) -> dict:
     config = dict(raw or {})
     for key in SENSITIVE_CONFIG_KEYS:
@@ -32,8 +41,11 @@ def _merge_secret_config(incoming: dict, existing: dict | None) -> dict:
     for key in SENSITIVE_CONFIG_KEYS:
         incoming_value = str(next_config.get(key) or "").strip()
         if incoming_value and not is_masked_secret(incoming_value):
+            next_config[f"{key}_hint"] = _secret_hint(incoming_value)
             next_config[key] = encrypt_secret(incoming_value)
             continue
+        if existing_config.get(f"{key}_hint"):
+            next_config[f"{key}_hint"] = existing_config[f"{key}_hint"]
         if existing_config.get(key):
             next_config[key] = existing_config[key]
         elif key in next_config:
