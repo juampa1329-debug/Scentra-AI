@@ -26,6 +26,7 @@ class CustomerUpdateIn(BaseModel):
     payment_reference: str | None = Field(default=None, max_length=160)
     crm_stage: str | None = Field(default=None, max_length=80)
     intent: str | None = Field(default=None, max_length=120)
+    takeover: bool | None = None
     profile_json: dict[str, Any] | None = None
 
 

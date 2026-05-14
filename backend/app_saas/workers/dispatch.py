@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import tempfile
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -330,6 +333,75 @@ def _media_message_type(kind: str, content_type: str) -> str:
     return "document"
 
 
+def _meta_upload_mime(content_type: str) -> str:
+    return str(content_type or "application/octet-stream").split(";", 1)[0].strip().lower() or "application/octet-stream"
+
+
+def _prepare_audio_asset_for_meta(asset: dict[str, Any]) -> dict[str, Any]:
+    content_type = _meta_upload_mime(str(asset.get("content_type") or ""))
+    if not content_type.startswith("audio/"):
+        return asset
+    if content_type in {"audio/ogg", "audio/mpeg", "audio/mp4", "audio/aac", "audio/amr"}:
+        next_asset = dict(asset)
+        next_asset["content_type"] = content_type
+        return next_asset
+
+    raw = bytes(asset.get("data") or b"")
+    if not raw:
+        raise DispatchPermanentError("audio_file_empty")
+
+    suffix = ".webm" if "webm" in content_type else ".audio"
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / f"input{suffix}"
+            target = Path(tmp) / "voice-note.ogg"
+            source.write_bytes(raw)
+            subprocess.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-i",
+                    str(source),
+                    "-vn",
+                    "-c:a",
+                    "libopus",
+                    "-b:a",
+                    "32k",
+                    "-vbr",
+                    "on",
+                    str(target),
+                ],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=45,
+            )
+            converted = target.read_bytes()
+    except FileNotFoundError as exc:
+        raise DispatchPermanentError("audio_transcode_unavailable_ffmpeg_required") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise DispatchTransientError("audio_transcode_timeout") from exc
+    except subprocess.CalledProcessError as exc:
+        stderr = (exc.stderr or b"").decode("utf-8", errors="replace")[-300:]
+        raise DispatchPermanentError(f"audio_transcode_failed:{stderr}") from exc
+
+    next_asset = dict(asset)
+    original_name = str(asset.get("filename") or "nota-voz").rsplit(".", 1)[0]
+    next_asset["filename"] = f"{original_name}.ogg"
+    next_asset["content_type"] = "audio/ogg"
+    next_asset["data"] = converted
+    next_asset["byte_size"] = len(converted)
+    return next_asset
+
+
+def _prepare_asset_for_meta(asset: dict[str, Any], message_type: str) -> dict[str, Any]:
+    if message_type == "audio":
+        return _prepare_audio_asset_for_meta(asset)
+    next_asset = dict(asset)
+    next_asset["content_type"] = _meta_upload_mime(str(asset.get("content_type") or "application/octet-stream"))
+    return next_asset
+
+
 def _upload_meta_media(config: dict[str, Any], access_token: str, asset: dict[str, Any]) -> dict[str, Any]:
     phone_number_id = str(config.get("phone_number_id") or "").strip()
     if not phone_number_id:
@@ -337,7 +409,7 @@ def _upload_meta_media(config: dict[str, Any], access_token: str, asset: dict[st
     base_url = str(config.get("graph_base_url") or "https://graph.facebook.com").rstrip("/")
     version = _meta_graph_version(config)
     timeout_sec = int(config.get("timeout_sec") or os.getenv("SCENTRA_META_TIMEOUT_SEC") or "30")
-    content_type = str(asset.get("content_type") or "application/octet-stream").strip()
+    content_type = _meta_upload_mime(str(asset.get("content_type") or "application/octet-stream").strip())
     url = f"{base_url}/{version}/{phone_number_id}/media"
     response = _post_multipart(
         url,
@@ -373,12 +445,6 @@ def _send_meta_cloud_media(conn, integration: dict[str, Any], job: dict[str, Any
     asset: dict[str, Any] | None = None
     if local_media_id:
         asset = _load_local_media_asset(conn, str(job["tenant_id"]), local_media_id)
-    if not provider_media_id:
-        upload = _upload_meta_media(config, access_token, asset or {})
-        provider_media_id = upload["provider_media_id"]
-    else:
-        upload = {"provider_media_id": provider_media_id, "upload_response": {}}
-
     recipient = _normalize_recipient(str(job.get("recipient_external_id") or ""))
     body_text = str(job.get("body_text") or "").strip()
     content_type = str((asset or {}).get("content_type") or payload_json.get("mime_type") or "").strip()
@@ -387,6 +453,14 @@ def _send_meta_cloud_media(conn, integration: dict[str, Any], job: dict[str, Any
         message_type = "document"
     if message_type not in {"image", "video", "audio", "document"}:
         message_type = _media_message_type(str((asset or {}).get("kind") or ""), content_type)
+    if asset:
+        asset = _prepare_asset_for_meta(asset, message_type)
+        content_type = str(asset.get("content_type") or content_type)
+    if not provider_media_id:
+        upload = _upload_meta_media(config, access_token, asset or {})
+        provider_media_id = upload["provider_media_id"]
+    else:
+        upload = {"provider_media_id": provider_media_id, "upload_response": {}}
 
     media_payload: dict[str, Any] = {"id": provider_media_id}
     if message_type in {"image", "video", "document"} and body_text:
@@ -645,14 +719,14 @@ def _dispatch_one(conn, job: dict[str, Any]) -> str:
     return "sent"
 
 
-def process_due_outbound_messages(limit: int = 25, tenant_id: str | None = None) -> dict[str, int]:
+def process_due_outbound_messages(limit: int = 25, tenant_id: str | None = None) -> dict[str, Any]:
     filters = ["status IN ('queued', 'retry')", "next_attempt_at <= NOW()"]
     params: dict[str, Any] = {"limit": int(limit)}
     if tenant_id:
         filters.append("tenant_id = CAST(:tenant_id AS uuid)")
         params["tenant_id"] = tenant_id
 
-    stats = {"picked": 0, "sent": 0, "blocked": 0, "failed": 0}
+    stats: dict[str, Any] = {"picked": 0, "sent": 0, "blocked": 0, "failed": 0, "errors": []}
     with db_session() as conn:
         if tenant_id:
             set_tenant_context(conn, tenant_id)
@@ -698,6 +772,14 @@ def process_due_outbound_messages(limit: int = 25, tenant_id: str | None = None)
             try:
                 status = _dispatch_one(conn, job)
                 stats[status] = stats.get(status, 0) + 1
+                if status in {"blocked", "failed"}:
+                    row_error = conn.execute(
+                        text("SELECT error FROM saas_outbound_messages WHERE id = CAST(:id AS uuid)"),
+                        {"id": job["id"]},
+                    ).scalar() or ""
+                    if row_error:
+                        stats["last_error"] = str(row_error)
+                        stats["errors"].append({"id": job["id"], "status": status, "error": str(row_error)})
             except Exception as exc:
                 attempts = int(job.get("attempts") or 0) + 1
                 max_attempts = int(job.get("max_attempts") or 5)
@@ -722,4 +804,6 @@ def process_due_outbound_messages(limit: int = 25, tenant_id: str | None = None)
                 )
                 _mark_message_dispatch(conn, str(job.get("message_id") or ""), next_status, error=str(exc)[:500])
                 stats["failed"] += 1
+                stats["last_error"] = str(exc)[:500]
+                stats["errors"].append({"id": job["id"], "status": next_status, "error": str(exc)[:500]})
     return stats

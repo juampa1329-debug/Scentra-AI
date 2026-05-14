@@ -39,6 +39,7 @@ CUSTOMER_FIELDS = {
     "payment_reference",
     "crm_stage",
     "intent",
+    "takeover",
     "profile_json",
 }
 
@@ -520,6 +521,9 @@ def update_customer(
             params[key] = json.dumps(value or {})
             assignments.append("profile_json = CAST(:profile_json AS jsonb)")
             assignments.append("last_profiled_at = NOW()")
+        elif key == "takeover":
+            params[key] = bool(value)
+            assignments.append("takeover = :takeover")
         else:
             params[key] = _clean_text(value)
             assignments.append(f"{key} = :{key}")
@@ -829,13 +833,23 @@ def list_conversations(
                     external_contact_id,
                     phone,
                     display_name,
+                    first_name,
+                    last_name,
+                    city,
+                    customer_type,
+                    interests,
                     takeover,
                     last_message_text,
-                    last_message_at,
+                    last_message_at::text,
                     unread_count,
                     tags,
                     notes,
-                    updated_at
+                    payment_status,
+                    payment_reference,
+                    crm_stage,
+                    intent,
+                    profile_json,
+                    updated_at::text
                 FROM saas_conversations
                 WHERE {" AND ".join(where)}
                 ORDER BY updated_at DESC
@@ -1107,13 +1121,31 @@ def send_message(
     try:
         dispatch_result = process_due_outbound_messages(limit=5, tenant_id=ctx.tenant_id)
     except Exception as exc:
-        dispatch_result = {"picked": 0, "sent": 0, "blocked": 0, "failed": 1, "error": str(exc)[:300]}
+        dispatch_result = {"picked": 0, "sent": 0, "blocked": 0, "failed": 1, "last_error": str(exc)[:300], "errors": [{"error": str(exc)[:300]}]}
+
+    with db_session() as conn:
+        set_tenant_context(conn, ctx.tenant_id)
+        outbound_status = conn.execute(
+            text(
+                """
+                SELECT id::text, status, provider, error, attempts, payload_json, updated_at::text
+                FROM saas_outbound_messages
+                WHERE tenant_id = CAST(:tenant_id AS uuid)
+                  AND id = CAST(:outbound_id AS uuid)
+                LIMIT 1
+                """
+            ),
+            {"tenant_id": ctx.tenant_id, "outbound_id": outbound["id"]},
+        ).mappings().first()
+    if outbound_status and outbound_status.get("error") and not dispatch_result.get("last_error"):
+        dispatch_result["last_error"] = str(outbound_status["error"])
 
     return {
         "ok": True,
         "tenant_id": ctx.tenant_id,
         "message": dict(message),
         "outbound": dict(outbound),
+        "outbound_status": dict(outbound_status) if outbound_status else None,
         "dispatch": dispatch_result,
         "triggers": trigger_result,
     }

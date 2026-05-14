@@ -39,14 +39,14 @@ const FEATURE_LABELS = {
 };
 
 const NAV_ITEMS = [
-  { key: "dashboard", label: "Dashboard" },
-  { key: "inbox", label: "Inbox" },
-  { key: "customers", label: "Clientes" },
-  { key: "labels", label: "Etiquetas" },
-  { key: "campaigns", label: "Campanas" },
-  { key: "broadcast", label: "Mensajeria" },
-  { key: "ads", label: "Ads Manager" },
-  { key: "settings", label: "Ajustes" },
+  { key: "dashboard", label: "Dashboard", icon: "▥" },
+  { key: "inbox", label: "Inbox", icon: "□" },
+  { key: "customers", label: "Clientes", icon: "◎" },
+  { key: "labels", label: "Etiquetas", icon: "◇" },
+  { key: "campaigns", label: "CRM", icon: "↯" },
+  { key: "broadcast", label: "Masiva", icon: "◁" },
+  { key: "ads", label: "Ads", icon: "▤" },
+  { key: "settings", label: "Ajustes", icon: "⚙" },
 ];
 
 const defaultRegister = () => ({ email: "", password: "", full_name: "", tenant_name: "", tenant_slug: "" });
@@ -121,6 +121,14 @@ const CHAT_EMOJIS = [
   "✨", "💎", "🎁", "🚚", "✅", "❌", "⏰", "📌", "📦", "💳", "💰", "🛍️",
   "🌸", "💐", "💬", "📲", "🤝", "🥰", "😇", "🤣", "😋", "👌", "🫶", "🎉",
 ];
+const EMOJI_GROUPS = [
+  { label: "Frecuentes", icon: "↺", items: CHAT_EMOJIS },
+  { label: "Caras", icon: "☺", items: ["😀", "😃", "😄", "😁", "😆", "😅", "😂", "🤣", "🙂", "🙃", "😉", "😊", "😇", "🥰", "😍", "😘", "😋", "😜", "🤪", "🤗", "🤭", "🤔", "😎", "🥳", "😌", "😔", "😢", "😭", "😤", "😡"] },
+  { label: "Gestos", icon: "☝", items: ["👍", "👎", "👌", "👏", "🙌", "🙏", "🤝", "💪", "👀", "🫶", "💅", "✍️", "💃", "🕺", "🏃", "🧘"] },
+  { label: "Ventas", icon: "$", items: ["💬", "📲", "📞", "📩", "✅", "❌", "⏰", "📌", "📦", "🚚", "💳", "💰", "🛍️", "🎁", "🏷️", "🧾", "📊", "📈", "🤝", "🔥"] },
+  { label: "Objetos", icon: "□", items: ["🌸", "💐", "💎", "✨", "⭐", "🌟", "❤️", "💚", "💙", "💜", "🖤", "🤍", "🎉", "🎊", "☕", "🍫", "🍔", "🎵", "📍", "🔗"] },
+];
+const RECENT_EMOJIS_KEY = "scentra_recent_emojis";
 const EMPTY_WAVEFORM = Array.from({ length: 32 }, (_, idx) => 8 + ((idx * 7) % 18));
 const formatDuration = (seconds) => {
   const safe = Math.max(0, Number(seconds || 0));
@@ -135,6 +143,13 @@ const mediaKindFromMime = (type) => {
   if (mime.startsWith("audio/")) return "audio";
   return "document";
 };
+const channelLabel = (channel) => ({
+  whatsapp: "WhatsApp",
+  facebook: "Facebook",
+  instagram: "Instagram",
+  tiktok: "TikTok",
+  meta: "Meta",
+}[String(channel || "").toLowerCase()] || String(channel || "Canal"));
 
 function App() {
   const metaAccessTokenRef = useRef(null);
@@ -147,6 +162,7 @@ function App() {
   const recordingTimerRef = useRef(null);
   const recordingAnimationRef = useRef(null);
   const audioContextRef = useRef(null);
+  const lastUnreadTotalRef = useRef(0);
   const [accessToken, setAccessToken] = useState(() => localStorage.getItem(TOKEN_KEY) || "");
   const [refreshToken, setRefreshToken] = useState(() => localStorage.getItem(REFRESH_KEY) || "");
   const [mode, setMode] = useState("login");
@@ -180,8 +196,21 @@ function App() {
   const [messages, setMessages] = useState([]);
   const [replyText, setReplyText] = useState("");
   const [attachmentFile, setAttachmentFile] = useState(null);
+  const [attachmentKind, setAttachmentKind] = useState("");
   const [attachmentPreview, setAttachmentPreview] = useState("");
   const [emojiOpen, setEmojiOpen] = useState(false);
+  const [emojiSearch, setEmojiSearch] = useState("");
+  const [recentEmojis, setRecentEmojis] = useState(() => {
+    try { return JSON.parse(localStorage.getItem(RECENT_EMOJIS_KEY) || "[]"); }
+    catch { return []; }
+  });
+  const [attachMenuOpen, setAttachMenuOpen] = useState(false);
+  const [inboxChannelFilter, setInboxChannelFilter] = useState("all");
+  const [inboxSearch, setInboxSearch] = useState("");
+  const [crmPanelOpen, setCrmPanelOpen] = useState(true);
+  const [crmDraft, setCrmDraft] = useState({});
+  const [savingCrm, setSavingCrm] = useState(false);
+  const [notificationSoundEnabled, setNotificationSoundEnabled] = useState(true);
   const [isRecording, setIsRecording] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [recordingLevels, setRecordingLevels] = useState(EMPTY_WAVEFORM);
@@ -225,6 +254,31 @@ function App() {
   const activeWebhooks = webhooks.filter((item) => item.is_active).length;
   const activeWhatsappIntegration = integrations.find((item) => item.channel === "whatsapp" && item.status === "connected");
   const whatsappDispatchMode = String(activeWhatsappIntegration?.config_json?.dispatch_mode || "stub").toLowerCase();
+  const availableInboxChannels = Array.from(new Set([
+    ...integrations.filter((item) => item.status === "connected").map((item) => String(item.channel || "").toLowerCase()),
+    ...conversations.map((item) => String(item.channel || "").toLowerCase()),
+  ].filter(Boolean))).filter((channel) => !["billing"].includes(channel)).sort();
+  const filteredConversations = conversations.filter((conversation) => {
+    const channelOk = inboxChannelFilter === "all" || String(conversation.channel || "").toLowerCase() === inboxChannelFilter;
+    const needle = inboxSearch.trim().toLowerCase();
+    if (!channelOk) return false;
+    if (!needle) return true;
+    return [
+      conversation.display_name,
+      conversation.phone,
+      conversation.external_contact_id,
+      conversation.last_message_text,
+      conversation.tags,
+    ].some((value) => String(value || "").toLowerCase().includes(needle));
+  });
+  const emojiNeedle = emojiSearch.trim().toLowerCase();
+  const visibleEmojiGroups = [
+    { label: "Recientes", icon: "↺", items: recentEmojis },
+    ...EMOJI_GROUPS,
+  ].map((group) => ({
+    ...group,
+    items: emojiNeedle ? group.items.filter((emoji) => emoji.includes(emojiNeedle)) : group.items,
+  })).filter((group) => group.items.length);
   const dashboardTotals = dashboardOverview?.totals || {};
   const dashboardFunnel = dashboardOverview?.funnel || [];
   const dashboardActivity = dashboardOverview?.activity || [];
@@ -267,20 +321,22 @@ function App() {
   const clearComposerAttachment = () => {
     if (attachmentPreview) URL.revokeObjectURL(attachmentPreview);
     setAttachmentFile(null);
+    setAttachmentKind("");
     setAttachmentPreview("");
     if (composerFileRef.current) composerFileRef.current.value = "";
   };
 
-  const setComposerAttachment = (file) => {
+  const setComposerAttachment = (file, forcedKind = "") => {
     if (!file) return;
     clearComposerAttachment();
     setAttachmentFile(file);
+    setAttachmentKind(forcedKind || mediaKindFromMime(file.type));
     setAttachmentPreview(URL.createObjectURL(file));
   };
 
   const clearWorkspaceState = () => {
     setConversations([]); setSelectedConversation(null); setMessages([]); setReplyText("");
-    clearComposerAttachment(); setEmojiOpen(false); setIsRecording(false); setRecordingSeconds(0); setRecordingLevels(EMPTY_WAVEFORM);
+    clearComposerAttachment(); setEmojiOpen(false); setAttachMenuOpen(false); setInboxChannelFilter("all"); setInboxSearch(""); setIsRecording(false); setRecordingSeconds(0); setRecordingLevels(EMPTY_WAVEFORM);
     setIntegrations([]); setWebhooks([]); setWebhookEvents([]); setBillingOverview(null); setBillingPlans([]); setLastWebhookSecret(null);
     setWhatsappPhones([]); setPhoneRegisterForm({ phone_number_id: "", pin: "" });
   };
@@ -333,11 +389,12 @@ function App() {
     } catch (err) { showStatus(String(err.message || err), "error"); }
   };
 
-  const loadMessages = async (conversation) => {
+  const loadMessages = async (conversation, options = {}) => {
     if (!conversation?.id) return;
     try {
       const data = await apiCall(`/saas/v1/conversations/${encodeURIComponent(conversation.id)}/messages`);
-      setSelectedConversation(conversation); setMessages(data?.messages || []); setReplyText(""); clearComposerAttachment(); setEmojiOpen(false);
+      setSelectedConversation(conversation); setMessages(data?.messages || []);
+      if (!options.preserveComposer) { setReplyText(""); clearComposerAttachment(); setEmojiOpen(false); setAttachMenuOpen(false); }
     } catch (err) { showStatus(String(err.message || err), "error"); }
   };
 
@@ -346,8 +403,15 @@ function App() {
     try {
       const data = await apiCall("/saas/v1/conversations?limit=100");
       const items = data?.conversations || [];
+      const nextUnread = items.reduce((sum, item) => sum + Number(item.unread_count || 0), 0);
+      if (lastUnreadTotalRef.current && nextUnread > lastUnreadTotalRef.current && notificationSoundEnabled) playIncomingSound();
+      lastUnreadTotalRef.current = nextUnread;
       setConversations(items);
       if (items.length && !selectedConversation) await loadMessages(items[0]);
+      if (items.length && selectedConversation?.id) {
+        const updatedSelected = items.find((item) => item.id === selectedConversation.id);
+        if (updatedSelected) await loadMessages({ ...selectedConversation, ...updatedSelected }, { preserveComposer: true });
+      }
       if (!items.length) { setSelectedConversation(null); setMessages([]); setReplyText(""); clearComposerAttachment(); }
     } catch (err) { showStatus(String(err.message || err), "error"); }
   };
@@ -373,11 +437,38 @@ function App() {
   }, [accessToken, activeView]);
 
   useEffect(() => {
+    if (!accessToken || activeView !== "inbox") return undefined;
+    const timer = window.setInterval(() => loadInbox(), 6000);
+    return () => window.clearInterval(timer);
+  }, [accessToken, activeView, selectedConversation?.id, notificationSoundEnabled]);
+
+  useEffect(() => {
     if (!featureLoaded || activeViewAllowed) return;
     const label = NAV_ITEMS.find((item) => item.key === activeView)?.label || "modulo";
     setActiveView("dashboard");
     showStatus(`${label} no esta activo para este plan o empresa.`, "neutral");
   }, [featureLoaded, activeViewAllowed, activeView]);
+
+  useEffect(() => {
+    if (!selectedConversation?.id) {
+      setCrmDraft({});
+      return;
+    }
+    setCrmDraft({
+      display_name: selectedConversation.display_name || "",
+      first_name: selectedConversation.first_name || "",
+      last_name: selectedConversation.last_name || "",
+      city: selectedConversation.city || "",
+      customer_type: selectedConversation.customer_type || "",
+      interests: selectedConversation.interests || "",
+      tags: selectedConversation.tags || "",
+      notes: selectedConversation.notes || "",
+      payment_status: selectedConversation.payment_status || "",
+      crm_stage: selectedConversation.crm_stage || "",
+      intent: selectedConversation.intent || "",
+      takeover: Boolean(selectedConversation.takeover),
+    });
+  }, [selectedConversation?.id]);
 
   const submitLogin = async (event) => {
     event.preventDefault();
@@ -483,6 +574,72 @@ function App() {
   const rotateWebhookSignature = async (endpoint) => { try { const data = await apiCall(`/saas/v1/webhooks/endpoints/${encodeURIComponent(endpoint.id)}/rotate-signature`, { method: "POST" }); setLastWebhookSecret(data); showStatus("Firma HMAC rotada", "ok"); await loadWebhooks(); } catch (err) { showStatus(String(err.message || err), "error"); } };
   const processWebhookEvents = async () => { try { const data = await apiCall("/saas/v1/webhooks/events/process", { method: "POST" }); showStatus(`Procesados: ${data?.result?.processed || 0}`, "ok"); await loadWebhooks(); } catch (err) { showStatus(String(err.message || err), "error"); } };
   const markSelectedConversationRead = async () => { if (!selectedConversation?.id) return; try { await apiCall(`/saas/v1/conversations/${selectedConversation.id}/read`, { method: "POST" }); showStatus("Conversacion marcada como leida", "ok"); await loadInbox(); } catch (err) { showStatus(String(err.message || err), "error"); } };
+  const playIncomingSound = () => {
+    try {
+      const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+      if (!AudioContextCtor) return;
+      const audio = new AudioContextCtor();
+      const gain = audio.createGain();
+      const first = audio.createOscillator();
+      const second = audio.createOscillator();
+      gain.gain.setValueAtTime(0.0001, audio.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.06, audio.currentTime + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, audio.currentTime + 0.34);
+      first.frequency.setValueAtTime(740, audio.currentTime);
+      second.frequency.setValueAtTime(990, audio.currentTime + 0.11);
+      first.connect(gain); second.connect(gain); gain.connect(audio.destination);
+      first.start(audio.currentTime); first.stop(audio.currentTime + 0.16);
+      second.start(audio.currentTime + 0.12); second.stop(audio.currentTime + 0.34);
+      window.setTimeout(() => audio.close().catch(() => {}), 500);
+    } catch {
+      // Browsers may block audio until the first user interaction.
+    }
+  };
+  const appendEmoji = (emoji) => {
+    setReplyText((prev) => `${prev}${emoji}`);
+    setRecentEmojis((prev) => {
+      const next = [emoji, ...prev.filter((item) => item !== emoji)].slice(0, 24);
+      localStorage.setItem(RECENT_EMOJIS_KEY, JSON.stringify(next));
+      return next;
+    });
+  };
+  const openAttachmentPicker = (kind) => {
+    setAttachMenuOpen(false);
+    if (kind === "catalog") {
+      showStatus("Catalogo disponible cuando conectemos WooCommerce o Shopify en integraciones.", "neutral");
+      return;
+    }
+    const acceptMap = {
+      image: "image/*",
+      video: "video/*",
+      audio: "audio/*",
+      document: ".pdf,.doc,.docx,.xls,.xlsx,.txt,application/pdf,text/plain",
+    };
+    if (composerFileRef.current) {
+      composerFileRef.current.dataset.kind = kind;
+      composerFileRef.current.accept = acceptMap[kind] || "image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.txt";
+      composerFileRef.current.click();
+    }
+  };
+  const updateCrmDraft = (key, value) => setCrmDraft((prev) => ({ ...prev, [key]: value }));
+  const saveSelectedCrm = async () => {
+    if (!selectedConversation?.id || savingCrm) return;
+    setSavingCrm(true);
+    try {
+      const data = await apiCall(`/saas/v1/customers/${encodeURIComponent(selectedConversation.id)}`, {
+        method: "PATCH",
+        body: JSON.stringify(crmDraft),
+      });
+      const customer = data?.customer || {};
+      setSelectedConversation((prev) => ({ ...(prev || {}), ...customer }));
+      setConversations((prev) => prev.map((item) => item.id === selectedConversation.id ? { ...item, ...customer } : item));
+      showStatus("Ficha CRM guardada", "ok");
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    } finally {
+      setSavingCrm(false);
+    }
+  };
   const localMediaUrl = (mediaId) => mediaId && accessToken ? `${API_BASE}/saas/v1/media/${encodeURIComponent(mediaId)}?token=${encodeURIComponent(accessToken)}` : "";
   const whatsappMediaUrl = (mediaId) => mediaId && accessToken ? `${API_BASE}/saas/v1/media/whatsapp/${encodeURIComponent(mediaId)}?token=${encodeURIComponent(accessToken)}` : "";
   const messageMediaUrl = (message) => {
@@ -540,7 +697,7 @@ function App() {
       if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") mediaRecorderRef.current.stop();
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const mime = ["audio/ogg;codecs=opus", "audio/ogg", "audio/webm;codecs=opus", "audio/webm"].find((item) => window.MediaRecorder.isTypeSupported(item));
-      const recorder = mime ? new window.MediaRecorder(stream, { mimeType: mime }) : new window.MediaRecorder(stream);
+      const recorder = mime ? new window.MediaRecorder(stream, { mimeType: mime, audioBitsPerSecond: 32000 }) : new window.MediaRecorder(stream, { audioBitsPerSecond: 32000 });
       mediaStreamRef.current = stream;
       mediaRecorderRef.current = recorder;
       recordingChunksRef.current = [];
@@ -615,7 +772,7 @@ function App() {
       let mimeType = "";
       let filename = "";
       if (attachmentFile) {
-        msgType = mediaKindFromMime(attachmentFile.type);
+        msgType = attachmentKind || mediaKindFromMime(attachmentFile.type);
         mimeType = attachmentFile.type || "";
         filename = attachmentFile.name || "";
         const formData = new FormData();
@@ -629,8 +786,9 @@ function App() {
         body: JSON.stringify({ text: replyText, msg_type: msgType, media_id: mediaId, mime_type: mimeType, filename }),
       });
       const dispatch = data?.dispatch || {};
+      const outboundError = dispatch.last_error || data?.outbound_status?.error || "";
       if (Number(dispatch.failed || 0) > 0 || Number(dispatch.blocked || 0) > 0) {
-        showStatus("Mensaje guardado, pero Meta no lo envio. Revisa integracion, plan o logs de outbound.", "error");
+        showStatus(outboundError ? `Meta no envio el mensaje: ${outboundError}` : "Mensaje guardado, pero Meta no lo envio. Revisa integracion, plan o logs de outbound.", "error");
       } else if (Number(dispatch.sent || 0) > 0 && whatsappDispatchMode === "stub") {
         showStatus("Mensaje procesado en modo prueba. Cambia Canales a Meta Cloud para enviarlo al telefono.", "neutral");
       } else if (Number(dispatch.sent || 0) > 0) {
@@ -693,7 +851,7 @@ function App() {
       <aside className="sidebar glass-panel">
         <div className="brand"><span className="brand-mark">S</span><div><strong>Scentra +AI</strong><small>Sales intelligence cockpit</small></div></div>
         <nav>
-          {navItems.map(({ key, label }) => <button key={key} className={"nav-item " + (activeView === key ? "active" : "")} onClick={() => setActiveView(key)}>{label}</button>)}
+          {navItems.map(({ key, label, icon }) => <button key={key} className={"nav-item " + (activeView === key ? "active" : "")} onClick={() => setActiveView(key)}><span className="nav-icon">{icon}</span><span>{label}</span></button>)}
         </nav>
         <div className="company-card"><span>Empresa activa</span><strong>{activeCompany?.tenant_name || activeCompany?.name || me.tenant_id}</strong><small>{me.role} / plan {billingPlan.display_name || billingPlan.plan_code || activeCompany?.plan_code || "starter"}</small><span className={`mini-badge ${String(lifecycleStatus).toLowerCase()}`}>{lifecycleLabel(lifecycleStatus)}{trialEndLabel ? ` hasta ${trialEndLabel}` : ""}</span></div>
       </aside>
@@ -725,27 +883,40 @@ function App() {
             </section>
           </section>
         ) : activeView === "inbox" ? (
-          <section className="inbox-grid">
+          <section className={`inbox-grid ${crmPanelOpen ? "crm-open" : "crm-closed"}`}>
             <div className="panel glass-card inbox-list">
-              <div className="panel-head"><h2>Conversaciones</h2><button type="button" onClick={loadInbox}>Refrescar</button></div>
+              <div className="panel-head inbox-list-head"><h2>Inbox</h2><span>{filteredConversations.length}</span></div>
+              <div className="inbox-filters">
+                <button type="button" className={inboxChannelFilter === "all" ? "active" : ""} onClick={() => setInboxChannelFilter("all")}>Todos</button>
+                {availableInboxChannels.map((channel) => <button type="button" key={channel} className={inboxChannelFilter === channel ? "active" : ""} onClick={() => setInboxChannelFilter(channel)}>{channelLabel(channel)}</button>)}
+                <input value={inboxSearch} onChange={(event) => setInboxSearch(event.target.value)} placeholder="Buscar telefono, nombre o preview..." />
+                <button type="button" onClick={() => { setInboxSearch(""); setInboxChannelFilter("all"); }}>Limpiar</button>
+              </div>
               <div className="conversation-list">
-                {conversations.map((conversation) => (
+                {filteredConversations.map((conversation) => (
                   <button type="button" className={`conversation-item ${selectedConversation?.id === conversation.id ? "active" : ""}`} key={conversation.id} onClick={() => loadMessages(conversation)}>
                     <strong>{conversation.display_name || conversation.phone || conversation.external_contact_id}</strong>
-                    <span>{conversation.channel} / {conversation.unread_count || 0} sin leer</span>
+                    <span><b>{channelLabel(conversation.channel)}</b> / {conversation.unread_count || 0} sin leer</span>
                     <small>{conversation.last_message_text || "-"}</small>
                   </button>
                 ))}
-                {conversations.length === 0 ? <div className="empty">Sin conversaciones todavia.</div> : null}
+                {filteredConversations.length === 0 ? <div className="empty">Sin conversaciones para este filtro.</div> : null}
               </div>
             </div>
             <div className="panel glass-card inbox-thread">
-              <div className="panel-head">
-                <div>
-                  <h2>{selectedConversation ? selectedConversation.display_name || selectedConversation.external_contact_id : "Mensajes"}</h2>
-                  {selectedConversation ? <span>{selectedConversation.phone || selectedConversation.external_contact_id}</span> : null}
+              <div className="panel-head inbox-thread-head">
+                <div className="thread-title">
+                  <span className="thread-avatar">{selectedConversation ? String(selectedConversation.display_name || selectedConversation.phone || selectedConversation.external_contact_id || "?").slice(0, 2).toUpperCase() : "SC"}</span>
+                  <div>
+                    <h2>{selectedConversation ? selectedConversation.display_name || selectedConversation.external_contact_id : "Mensajes"}</h2>
+                    {selectedConversation ? <span>Canal: {channelLabel(selectedConversation.channel)} / {selectedConversation.phone || selectedConversation.external_contact_id}</span> : null}
+                  </div>
                 </div>
-                {selectedConversation ? <button type="button" onClick={markSelectedConversationRead}>Marcar leido</button> : null}
+                <div className="thread-actions">
+                  {selectedConversation ? <button type="button" onClick={markSelectedConversationRead}>Leido</button> : null}
+                  <button type="button" onClick={() => setNotificationSoundEnabled((prev) => !prev)}>{notificationSoundEnabled ? "Sonido ON" : "Sonido OFF"}</button>
+                  <button type="button" onClick={() => setCrmPanelOpen((prev) => !prev)}>{crmPanelOpen ? "Ocultar CRM" : "CRM"}</button>
+                </div>
               </div>
               <div className="messages">
                 {messages.map((message) => (
@@ -763,33 +934,74 @@ function App() {
                     <div className="attachment-preview">
                       <div>
                         <strong>{attachmentFile.name}</strong>
-                        <span>{mediaKindFromMime(attachmentFile.type)} / {Math.round((attachmentFile.size || 0) / 1024)} KB</span>
+                        <span>{attachmentKind || mediaKindFromMime(attachmentFile.type)} / {Math.round((attachmentFile.size || 0) / 1024)} KB</span>
                       </div>
                       {attachmentFile.type.startsWith("image/") ? <img src={attachmentPreview} alt="Vista previa adjunto" /> : null}
                       {attachmentFile.type.startsWith("video/") ? <video src={attachmentPreview} controls playsInline /> : null}
-                      {attachmentFile.type.startsWith("audio/") ? <div className="audio-message compact"><div className="audio-wave" aria-hidden="true">{EMPTY_WAVEFORM.map((height, idx) => <span key={idx} style={{ height: `${height}px` }} />)}</div><audio src={attachmentPreview} controls /></div> : null}
+                      {attachmentFile.type.startsWith("audio/") ? <div className="audio-message compact outgoing-preview"><div className="audio-wave" aria-hidden="true">{EMPTY_WAVEFORM.slice(0, 22).map((height, idx) => <span key={idx} style={{ height: `${height}px` }} />)}</div><audio src={attachmentPreview} controls /></div> : null}
                       <button type="button" onClick={clearComposerAttachment}>Quitar</button>
                     </div>
                   ) : null}
                   {isRecording ? (
                     <div className="recording-panel">
-                      <strong>Grabando {formatDuration(recordingSeconds)}</strong>
-                      <div className="recording-wave" aria-hidden="true">{recordingLevels.map((height, idx) => <span key={idx} style={{ height: `${height}px` }} />)}</div>
+                      <strong>{formatDuration(recordingSeconds)}</strong>
+                      <div className="recording-wave" aria-hidden="true">{recordingLevels.slice(-24).map((height, idx) => <span key={idx} style={{ height: `${height}px` }} />)}</div>
                       <button type="button" className="primary" onClick={stopVoiceRecording}>Listo</button>
                       <button type="button" onClick={cancelVoiceRecording}>Cancelar</button>
                     </div>
                   ) : null}
-                  <input ref={composerFileRef} className="composer-file-input" type="file" accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.txt" onChange={(event) => setComposerAttachment(event.target.files?.[0])} />
-                  <button type="button" className="composer-icon" onClick={() => composerFileRef.current?.click()} title="Adjuntar archivo">+</button>
+                  <input ref={composerFileRef} className="composer-file-input" type="file" accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.txt" onChange={(event) => setComposerAttachment(event.target.files?.[0], event.currentTarget.dataset.kind || "")} />
+                  <div className="attach-wrap">
+                    <button type="button" className="composer-icon" onClick={() => setAttachMenuOpen((prev) => !prev)} title="Adjuntar">＋</button>
+                    {attachMenuOpen ? (
+                      <div className="attach-menu">
+                        <button type="button" onClick={() => openAttachmentPicker("image")}>Imagen</button>
+                        <button type="button" onClick={() => openAttachmentPicker("video")}>Video</button>
+                        <button type="button" onClick={() => openAttachmentPicker("document")}>Documento</button>
+                        <button type="button" onClick={() => openAttachmentPicker("audio")}>Audio</button>
+                        <button type="button" onClick={() => openAttachmentPicker("catalog")}>Producto (Catalogo)</button>
+                      </div>
+                    ) : null}
+                  </div>
+                  <button type="button" className={`composer-icon mic-button ${isRecording ? "active" : ""}`} onClick={isRecording ? stopVoiceRecording : startVoiceRecording} title="Grabar nota de voz">♩</button>
+                  <input value={replyText} onChange={(event) => setReplyText(event.target.value)} placeholder="Escribe un mensaje..." />
                   <button type="button" className="composer-icon" onClick={() => setEmojiOpen((prev) => !prev)} title="Emojis">☺</button>
-                  <button type="button" className="composer-icon catalog-button" onClick={() => showStatus("Catalogo disponible cuando conectemos WooCommerce o Shopify en integraciones.", "neutral")} title="Catalogo">Cat</button>
-                  <input value={replyText} onChange={(event) => setReplyText(event.target.value)} placeholder="Escribe una respuesta..." />
-                  <button type="button" className={`composer-icon mic-button ${isRecording ? "active" : ""}`} onClick={isRecording ? stopVoiceRecording : startVoiceRecording} title="Grabar nota de voz">Mic</button>
-                  <button type="submit" className="primary" disabled={composerSending || (!replyText.trim() && !attachmentFile)}>{composerSending ? "Enviando..." : "Enviar"}</button>
-                  {emojiOpen ? <div className="emoji-panel">{CHAT_EMOJIS.map((emoji) => <button key={emoji} type="button" onClick={() => setReplyText((prev) => `${prev}${emoji}`)}>{emoji}</button>)}</div> : null}
+                  <button type="submit" className="primary send-button" disabled={composerSending || (!replyText.trim() && !attachmentFile)}>{composerSending ? "..." : "➤"}</button>
+                  {emojiOpen ? (
+                    <div className="emoji-panel whatsapp-emoji-panel">
+                      <input value={emojiSearch} onChange={(event) => setEmojiSearch(event.target.value)} placeholder="Buscar emoji..." />
+                      {visibleEmojiGroups.map((group) => (
+                        <div className="emoji-group" key={group.label}>
+                          <strong>{group.icon} {group.label}</strong>
+                          <div>{group.items.map((emoji, idx) => <button key={`${group.label}-${emoji}-${idx}`} type="button" onClick={() => appendEmoji(emoji)}>{emoji}</button>)}</div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
                 </form>
               ) : null}
             </div>
+            {crmPanelOpen ? (
+              <aside className="panel glass-card inbox-crm">
+                <div className="panel-head"><h2>CRM - Cliente</h2><button type="button" onClick={() => setCrmPanelOpen(false)}>×</button></div>
+                {selectedConversation ? (
+                  <div className="crm-mini-form">
+                    <div className="crm-snapshot"><span>Telefono</span><strong>{selectedConversation.phone || selectedConversation.external_contact_id}</strong><span>Canal</span><strong>{channelLabel(selectedConversation.channel)}</strong></div>
+                    <label>Nombre<input value={crmDraft.first_name || ""} onChange={(event) => updateCrmDraft("first_name", event.target.value)} placeholder="Ej: Juan" /></label>
+                    <label>Apellido<input value={crmDraft.last_name || ""} onChange={(event) => updateCrmDraft("last_name", event.target.value)} placeholder="Ej: Perez" /></label>
+                    <label>Ciudad<input value={crmDraft.city || ""} onChange={(event) => updateCrmDraft("city", event.target.value)} /></label>
+                    <label>Tipo<select value={crmDraft.customer_type || ""} onChange={(event) => updateCrmDraft("customer_type", event.target.value)}><option value="">Sin definir</option><option value="minorista">Minorista</option><option value="mayorista">Mayorista</option><option value="vip">VIP</option></select></label>
+                    <label>Etapa<select value={crmDraft.crm_stage || ""} onChange={(event) => updateCrmDraft("crm_stage", event.target.value)}><option value="">Sin etapa</option><option value="contactado">Contactado</option><option value="interes">Interes</option><option value="intencion_compra">Intencion compra</option><option value="pago_pendiente">Pago pendiente</option><option value="pago_confirmado">Pago confirmado</option></select></label>
+                    <label>Pago<select value={crmDraft.payment_status || ""} onChange={(event) => updateCrmDraft("payment_status", event.target.value)}><option value="">Sin estado</option><option value="pending">Pendiente</option><option value="paid">Pagado</option><option value="failed">Fallido</option></select></label>
+                    <label>Intereses<input value={crmDraft.interests || ""} onChange={(event) => updateCrmDraft("interests", event.target.value)} placeholder="dulces, frescos..." /></label>
+                    <label>Etiquetas<input value={crmDraft.tags || ""} onChange={(event) => updateCrmDraft("tags", event.target.value)} placeholder="vip, pago pendiente..." /></label>
+                    <label>Notas<textarea rows={4} value={crmDraft.notes || ""} onChange={(event) => updateCrmDraft("notes", event.target.value)} /></label>
+                    <label className="check-row"><input type="checkbox" checked={Boolean(crmDraft.takeover)} onChange={(event) => updateCrmDraft("takeover", event.target.checked)} /> Takeover humano</label>
+                    <button type="button" className="primary" onClick={saveSelectedCrm} disabled={savingCrm}>{savingCrm ? "Guardando..." : "Guardar ficha"}</button>
+                  </div>
+                ) : <div className="empty">Selecciona una conversacion para ver la ficha CRM.</div>}
+              </aside>
+            ) : null}
           </section>
         ) : activeView === "customers" ? (
           <CrmPanel apiCall={apiCall} showStatus={showStatus} onOpenInbox={(customer) => { setActiveView("inbox"); loadMessages(customer); }} />
