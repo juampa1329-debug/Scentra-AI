@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+﻿import React, { useEffect, useMemo, useRef, useState } from "react";
 import CrmPanel from "./CrmPanel.jsx";
 import LabelsPanel from "./LabelsPanel.jsx";
 import CampaignsPanel from "./CampaignsPanel.jsx";
@@ -136,7 +136,10 @@ function App() {
   const [billingOverview, setBillingOverview] = useState(null);
   const [billingPlans, setBillingPlans] = useState([]);
   const [dashboardOverview, setDashboardOverview] = useState(null);
-  const [integrationForm, setIntegrationForm] = useState({ provider: "meta", channel: "whatsapp", status: "connected", dispatch_mode: "stub", phone_number_id: "", business_account_id: "", graph_api_version: "v24.0", access_token_env: "SCENTRA_META_ACCESS_TOKEN" });
+  const [whatsappPhones, setWhatsappPhones] = useState([]);
+  const [phoneRegisterForm, setPhoneRegisterForm] = useState({ phone_number_id: "", pin: "" });
+  const [phoneSyncing, setPhoneSyncing] = useState(false);
+  const [integrationForm, setIntegrationForm] = useState({ provider: "meta", channel: "whatsapp", status: "connected", dispatch_mode: "stub", phone_number_id: "", business_account_id: "", app_id: "", graph_api_version: "v24.0", access_token_env: "SCENTRA_META_ACCESS_TOKEN" });
   const [aiConfig, setAiConfig] = useState(defaultAiConfig);
   const [aiTesterOpen, setAiTesterOpen] = useState(false);
   const [aiTest, setAiTest] = useState({ phone: "", message: "" });
@@ -226,6 +229,7 @@ function App() {
   const clearWorkspaceState = () => {
     setConversations([]); setSelectedConversation(null); setMessages([]); setReplyText("");
     setIntegrations([]); setWebhooks([]); setWebhookEvents([]); setBillingOverview(null); setBillingPlans([]); setLastWebhookSecret(null);
+    setWhatsappPhones([]); setPhoneRegisterForm({ phone_number_id: "", pin: "" });
   };
 
   const clearTokens = () => {
@@ -362,12 +366,50 @@ function App() {
     const dispatchMode = (integrationForm.dispatch_mode || "stub").trim();
     if (dispatchMode !== "stub" && !phoneNumberId) return showStatus("Phone Number ID requerido para Meta Cloud real.", "error");
     try {
-      const configJson = { dispatch_mode: dispatchMode, phone_number_id: phoneNumberId, business_account_id: (integrationForm.business_account_id || "").trim(), graph_api_version: (integrationForm.graph_api_version || "v24.0").trim(), access_token_env: accessTokenEnv };
+      const configJson = { dispatch_mode: dispatchMode, phone_number_id: phoneNumberId, business_account_id: (integrationForm.business_account_id || "").trim(), app_id: (integrationForm.app_id || "").trim(), graph_api_version: (integrationForm.graph_api_version || "v24.0").trim(), access_token_env: accessTokenEnv };
       if (accessToken) configJson.access_token = accessToken;
       await apiCall("/saas/v1/integrations", { method: "POST", body: JSON.stringify({ provider: integrationForm.provider, channel: integrationForm.channel, status: integrationForm.status, secret_ref: accessToken ? "tenant:meta:whatsapp" : dispatchMode === "stub" ? "" : `env:${accessTokenEnv}`, config_json: configJson }) });
       if (metaAccessTokenRef.current) metaAccessTokenRef.current.value = "";
       showStatus("Integracion guardada", "ok"); await loadIntegrations(); await loadBilling();
     } catch (err) { showStatus(String(err.message || err), "error"); }
+  };
+
+  const syncWhatsappPhones = async () => {
+    setPhoneSyncing(true);
+    try {
+      const data = await apiCall("/saas/v1/integrations/meta/whatsapp/phone-numbers");
+      const phones = Array.isArray(data?.phone_numbers) ? data.phone_numbers : [];
+      setWhatsappPhones(phones);
+      showStatus(`Telefonos sincronizados: ${phones.length}`, "ok");
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    } finally {
+      setPhoneSyncing(false);
+    }
+  };
+
+  const registerWhatsappPhone = async (event) => {
+    event.preventDefault();
+    const phoneNumberId = phoneRegisterForm.phone_number_id.trim();
+    const pin = phoneRegisterForm.pin.trim();
+    if (!phoneNumberId) return showStatus("Selecciona o escribe un Phone Number ID.", "error");
+    if (!/^\d{6}$/.test(pin)) return showStatus("El PIN debe tener exactamente 6 digitos.", "error");
+    setPhoneSyncing(true);
+    try {
+      await apiCall("/saas/v1/integrations/meta/whatsapp/register-phone", {
+        method: "POST",
+        body: JSON.stringify({ phone_number_id: phoneNumberId, pin }),
+      });
+      setIntegrationForm((prev) => ({ ...prev, phone_number_id: phoneNumberId, dispatch_mode: "meta_cloud" }));
+      setPhoneRegisterForm({ phone_number_id: "", pin: "" });
+      showStatus("Numero registrado/verificado en Meta", "ok");
+      await loadIntegrations();
+      await syncWhatsappPhones();
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    } finally {
+      setPhoneSyncing(false);
+    }
   };
 
   const copyText = async (value, label = "Texto") => {
@@ -477,7 +519,172 @@ function App() {
           <section className="settings-page">
             <div className="settings-tabs glass-card">{[["ia","IA"],["channels","Canales"],["apis","APIs"],["users","Usuarios"],["profile","Perfil"],["security","Seguridad"],["plan","Plan"]].map(([key,label]) => <button key={key} type="button" className={settingsTab === key ? "active" : ""} onClick={() => setSettingsTab(key)}>{label}</button>)}</div>
             {settingsTab === "ia" ? <div className="settings-grid"><article className="panel glass-card"><div className="panel-head"><h2>Ajustes IA</h2><span>modelo y comportamiento</span></div><label className="check-row"><input type="checkbox" checked={aiConfig.enabled} onChange={(event) => setAiConfig((prev) => ({ ...prev, enabled: event.target.checked }))} /> IA habilitada</label><div className="form-grid two"><label>Provider<select value={aiConfig.provider} onChange={(event) => setAiConfig((prev) => ({ ...prev, provider: event.target.value }))}><option value="google">Google / Gemini</option><option value="groq">Groq</option><option value="mistral">Mistral</option><option value="openrouter">OpenRouter</option></select></label><label>Modelo<input value={aiConfig.model} onChange={(event) => setAiConfig((prev) => ({ ...prev, model: event.target.value }))} /></label></div><label>System prompt<textarea rows={7} value={aiConfig.systemPrompt} onChange={(event) => setAiConfig((prev) => ({ ...prev, systemPrompt: event.target.value }))} /></label><div className="form-grid two"><label>Max tokens<input value={aiConfig.maxTokens} onChange={(event) => setAiConfig((prev) => ({ ...prev, maxTokens: event.target.value }))} /></label><label>Temperatura<input value={aiConfig.temperature} onChange={(event) => setAiConfig((prev) => ({ ...prev, temperature: event.target.value }))} /></label><label>Fallback provider<input value={aiConfig.fallbackProvider} onChange={(event) => setAiConfig((prev) => ({ ...prev, fallbackProvider: event.target.value }))} /></label><label>Fallback model<input value={aiConfig.fallbackModel} onChange={(event) => setAiConfig((prev) => ({ ...prev, fallbackModel: event.target.value }))} /></label></div><div className="panel-actions"><button type="button" className="primary" onClick={saveAiLocal}>Guardar ajustes</button><button type="button" onClick={() => setAiTesterOpen(true)}>Probar IA</button></div></article><article className="panel glass-card"><div className="panel-head"><h2>Voz / TTS WhatsApp</h2><span>humanizacion</span></div><label className="check-row"><input type="checkbox" checked={aiConfig.voiceEnabled} onChange={(event) => setAiConfig((prev) => ({ ...prev, voiceEnabled: event.target.checked }))} /> Voz habilitada</label><label className="check-row"><input type="checkbox" checked={aiConfig.preferVoice} onChange={(event) => setAiConfig((prev) => ({ ...prev, preferVoice: event.target.checked }))} /> Preferir nota de voz</label><div className="form-grid two"><label>Proveedor TTS<select value={aiConfig.ttsProvider} onChange={(event) => setAiConfig((prev) => ({ ...prev, ttsProvider: event.target.value }))}><option value="google">Google Cloud TTS</option><option value="elevenlabs">ElevenLabs</option><option value="piper">Piper local</option></select></label><label>Voice ID<input value={aiConfig.voiceId} onChange={(event) => setAiConfig((prev) => ({ ...prev, voiceId: event.target.value }))} /></label><label>Voz<input value={aiConfig.voiceName} onChange={(event) => setAiConfig((prev) => ({ ...prev, voiceName: event.target.value }))} /></label><label>Modelo<input value={aiConfig.voiceModel} onChange={(event) => setAiConfig((prev) => ({ ...prev, voiceModel: event.target.value }))} /></label></div><label>Prompt de voz<textarea rows={4} value={aiConfig.voicePrompt} onChange={(event) => setAiConfig((prev) => ({ ...prev, voicePrompt: event.target.value }))} /></label></article><article className="panel glass-card"><div className="panel-head"><h2>Knowledge Base</h2><span>fuentes</span></div><div className="inline-form compact"><select><option>Mostrar: Todos</option></select><button type="button">Refrescar</button></div><label>Notas<input placeholder="ej: catalogo 2026, politicas de envio..." /></label><div className="upload-zone">Arrastra PDF/TXT aqui o elige archivo</div><h3>Fuentes Web</h3><label>URL<input placeholder="https://tutienda.com/pagina-o-blog" /></label><button type="button">Anadir fuente web</button></article></div> : null}
-            {settingsTab === "channels" ? <div className="settings-stack"><article className="panel glass-card"><div className="panel-head"><h2>Integraciones</h2><button type="button" onClick={loadIntegrations}>Refrescar</button></div><form className="inline-form integrations-form" onSubmit={saveIntegration}><select value={integrationForm.provider} onChange={(event) => setIntegrationForm((prev) => ({ ...prev, provider: event.target.value }))}><option value="meta">Meta</option><option value="whatsapp">WhatsApp</option><option value="instagram">Instagram</option><option value="facebook">Facebook</option><option value="stripe">Stripe</option></select><select value={integrationForm.channel} onChange={(event) => setIntegrationForm((prev) => ({ ...prev, channel: event.target.value }))}><option value="whatsapp">WhatsApp</option><option value="instagram">Instagram</option><option value="facebook">Facebook</option><option value="billing">Billing</option></select><select value={integrationForm.status} onChange={(event) => setIntegrationForm((prev) => ({ ...prev, status: event.target.value }))}><option value="connected">Connected</option><option value="disconnected">Disconnected</option><option value="paused">Paused</option></select><select value={integrationForm.dispatch_mode} onChange={(event) => setIntegrationForm((prev) => ({ ...prev, dispatch_mode: event.target.value }))}><option value="stub">Stub local</option><option value="meta_cloud">Meta Cloud real</option></select><input placeholder="Phone Number ID" value={integrationForm.phone_number_id} onChange={(event) => setIntegrationForm((prev) => ({ ...prev, phone_number_id: event.target.value }))} /><input placeholder="WhatsApp Business Account ID / WABA ID" value={integrationForm.business_account_id} onChange={(event) => setIntegrationForm((prev) => ({ ...prev, business_account_id: event.target.value }))} /><input placeholder="Graph API version ej: v24.0" value={integrationForm.graph_api_version} onChange={(event) => setIntegrationForm((prev) => ({ ...prev, graph_api_version: event.target.value }))} /><input ref={metaAccessTokenRef} type="password" placeholder="Access token permanente de Meta" autoComplete="off" spellCheck={false} /><input placeholder="Token env var (solo admin)" value={integrationForm.access_token_env} onChange={(event) => setIntegrationForm((prev) => ({ ...prev, access_token_env: event.target.value }))} /><button type="submit" className="primary">Guardar</button></form><p className="soft-copy">El cliente puede pegar aqui su token permanente de Meta. Scentra lo cifra en backend y luego lo muestra como guardado, nunca como texto completo.</p><div className="table">{integrations.map((integration) => { const config = integration.config_json || {}; return <div className="row integration-row" key={integration.id}><span>{integration.provider}</span><span>{integration.channel}</span><span>{integration.status}</span><span>{config.dispatch_mode || "stub"}</span><span>{config.phone_number_id || "-"}</span><span>{config.has_access_token ? `token ${config.access_token_hint || "guardado"}` : config.access_token_env || "-"}</span></div>; })}{integrations.length === 0 ? <div className="empty">Sin integraciones configuradas.</div> : null}</div></article><article className="panel glass-card"><div className="panel-head"><h2>Webhooks</h2><button type="button" onClick={loadWebhooks}>Refrescar</button></div><div className="inline-form"><select value={webhookProvider} onChange={(event) => setWebhookProvider(event.target.value)}><option value="whatsapp">WhatsApp</option><option value="meta">Meta</option><option value="instagram">Instagram</option><option value="facebook">Facebook</option><option value="stripe">Stripe</option></select><label className="check-row"><input type="checkbox" checked={webhookSignatureRequired} onChange={(event) => setWebhookSignatureRequired(event.target.checked)} /> Requerir firma HMAC</label><button type="button" className="primary" onClick={createWebhook}>Crear endpoint</button></div>{lastWebhookSecret ? <div className="secret-box"><strong>Valores para Meta (visibles una sola vez)</strong><span>Callback URL para Meta</span><div className="copy-line"><code>{fullWebhookUrl(lastWebhookSecret.url_path)}</code><button type="button" onClick={() => copyText(fullWebhookUrl(lastWebhookSecret.url_path), "Callback URL")}>Copiar</button></div>{lastWebhookSecret.verify_token_once ? <><span>Verify token para Meta</span><div className="copy-line"><code>{lastWebhookSecret.verify_token_once}</code><button type="button" onClick={() => copyText(lastWebhookSecret.verify_token_once, "Verify token")}>Copiar</button></div></> : null}{lastWebhookSecret.signature_secret_once ? <><span>Firma HMAC opcional</span><div className="copy-line"><code>{lastWebhookSecret.signature_secret_once}</code><button type="button" onClick={() => copyText(lastWebhookSecret.signature_secret_once, "Firma HMAC")}>Copiar</button></div></> : null}<small>Meta pide el Verify token al verificar el webhook. Este valor no es el token permanente de WhatsApp Cloud API.</small></div> : <div className="secret-box muted-secret"><strong>Verify token de Meta</strong><span>Si no guardaste el token visible una sola vez, pulsa Rotar token en el endpoint y copia el nuevo valor en Meta Developers.</span></div>}<div className="table">{webhooks.map((endpoint) => <div className="row six" key={endpoint.id}><span>{endpoint.provider}</span><span className="copy-line compact"><code>{fullWebhookUrl(endpoint.url_path)}</code><button type="button" onClick={() => copyText(fullWebhookUrl(endpoint.url_path), "Callback URL")}>Copiar</button></span><span>{endpoint.signature_required ? "firma requerida" : "token o firma"}</span><span>{endpoint.is_active ? "activo" : "pausado"}</span><span>{endpoint.last_seen_at || "-"}</span><span className="row-actions"><button type="button" onClick={() => updateWebhookEndpoint(endpoint, { signature_required: !endpoint.signature_required })}>{endpoint.signature_required ? "Permitir token" : "Exigir firma"}</button><button type="button" onClick={() => rotateWebhookToken(endpoint)}>Rotar token</button><button type="button" onClick={() => rotateWebhookSignature(endpoint)}>Rotar firma</button></span></div>)}{webhooks.length === 0 ? <div className="empty">Sin endpoints webhook.</div> : null}</div><div className="panel-actions"><button type="button" onClick={processWebhookEvents}>Procesar eventos pendientes</button></div></article></div> : null}
+            {settingsTab === "channels" ? (
+              <div className="settings-stack channels-settings">
+                <article className="panel glass-card integration-card">
+                  <div className="panel-head">
+                    <div>
+                      <h2>Meta WhatsApp Cloud</h2>
+                      <span>credenciales cifradas, WABA y numero activo</span>
+                    </div>
+                    <button type="button" onClick={loadIntegrations}>Refrescar</button>
+                  </div>
+                  <p className="soft-copy">Pega el token permanente una sola vez. Scentra lo cifra en backend y luego solo muestra una pista, nunca el token completo en el navegador.</p>
+                  <form className="meta-grid" onSubmit={saveIntegration}>
+                    <label>Proveedor
+                      <select value={integrationForm.provider} onChange={(event) => setIntegrationForm((prev) => ({ ...prev, provider: event.target.value }))}>
+                        <option value="meta">Meta</option>
+                        <option value="whatsapp">WhatsApp</option>
+                        <option value="instagram">Instagram</option>
+                        <option value="facebook">Facebook</option>
+                        <option value="stripe">Stripe</option>
+                      </select>
+                    </label>
+                    <label>Canal
+                      <select value={integrationForm.channel} onChange={(event) => setIntegrationForm((prev) => ({ ...prev, channel: event.target.value }))}>
+                        <option value="whatsapp">WhatsApp</option>
+                        <option value="instagram">Instagram</option>
+                        <option value="facebook">Facebook</option>
+                        <option value="billing">Billing</option>
+                      </select>
+                    </label>
+                    <label>Estado
+                      <select value={integrationForm.status} onChange={(event) => setIntegrationForm((prev) => ({ ...prev, status: event.target.value }))}>
+                        <option value="connected">Connected</option>
+                        <option value="disconnected">Disconnected</option>
+                        <option value="paused">Paused</option>
+                      </select>
+                    </label>
+                    <label>Modo envio
+                      <select value={integrationForm.dispatch_mode} onChange={(event) => setIntegrationForm((prev) => ({ ...prev, dispatch_mode: event.target.value }))}>
+                        <option value="stub">Stub local</option>
+                        <option value="meta_cloud">Meta Cloud real</option>
+                      </select>
+                    </label>
+                    <label>Phone Number ID
+                      <input placeholder="Ej: 731040572984317" value={integrationForm.phone_number_id} onChange={(event) => setIntegrationForm((prev) => ({ ...prev, phone_number_id: event.target.value }))} />
+                    </label>
+                    <label>WABA ID
+                      <input placeholder="WhatsApp Business Account ID" value={integrationForm.business_account_id} onChange={(event) => setIntegrationForm((prev) => ({ ...prev, business_account_id: event.target.value }))} />
+                    </label>
+                    <label>Meta App ID
+                      <input placeholder="ID de la app en Meta" value={integrationForm.app_id} onChange={(event) => setIntegrationForm((prev) => ({ ...prev, app_id: event.target.value }))} />
+                    </label>
+                    <label>Graph API
+                      <input placeholder="v24.0" value={integrationForm.graph_api_version} onChange={(event) => setIntegrationForm((prev) => ({ ...prev, graph_api_version: event.target.value }))} />
+                    </label>
+                    <label className="token-field">Token permanente de Meta
+                      <input ref={metaAccessTokenRef} type="password" placeholder="Pegar token permanente" autoComplete="off" spellCheck={false} />
+                    </label>
+                    <button type="submit" className="primary">Guardar integracion</button>
+                  </form>
+                  <div className="integration-cards">
+                    {integrations.map((integration) => {
+                      const config = integration.config_json || {};
+                      const tokenLabel = config.has_access_token ? `Token guardado ${config.access_token_hint || ""}` : (config.access_token_env ? `Env ${config.access_token_env}` : "Sin token");
+                      return (
+                        <div className="integration-card-row" key={integration.id}>
+                          <div>
+                            <strong>{integration.provider} / {integration.channel}</strong>
+                            <span>{integration.status} / {config.dispatch_mode || "stub"}</span>
+                          </div>
+                          <div><span>Phone Number ID</span><strong>{config.phone_number_id || "-"}</strong></div>
+                          <div><span>WABA ID</span><strong>{config.business_account_id || "-"}</strong></div>
+                          <div><span>Meta App ID</span><strong>{config.app_id || "-"}</strong></div>
+                          <mark>{tokenLabel}</mark>
+                        </div>
+                      );
+                    })}
+                    {integrations.length === 0 ? <div className="empty">Sin integraciones configuradas.</div> : null}
+                  </div>
+                </article>
+
+                <article className="panel glass-card">
+                  <div className="panel-head">
+                    <div>
+                      <h2>Verificar numero WhatsApp</h2>
+                      <span>sincroniza WABA y registra el Phone Number ID</span>
+                    </div>
+                    <button type="button" disabled={phoneSyncing} onClick={syncWhatsappPhones}>{phoneSyncing ? "Sincronizando..." : "Sincronizar numeros"}</button>
+                  </div>
+                  <p className="soft-copy">Scentra consulta los numeros conectados a tu WABA y puede registrar el numero usando el PIN de verificacion en dos pasos configurado en Meta.</p>
+                  <form className="inline-form phone-register-form" onSubmit={registerWhatsappPhone}>
+                    <select value={phoneRegisterForm.phone_number_id} onChange={(event) => setPhoneRegisterForm((prev) => ({ ...prev, phone_number_id: event.target.value }))}>
+                      <option value="">Selecciona un numero sincronizado...</option>
+                      {whatsappPhones.map((phone) => <option key={phone.id} value={phone.id}>{phone.display_phone_number || phone.verified_name || phone.id} / {phone.id}</option>)}
+                    </select>
+                    <input type="password" placeholder="PIN de 6 digitos" inputMode="numeric" autoComplete="one-time-code" maxLength={6} value={phoneRegisterForm.pin} onChange={(event) => setPhoneRegisterForm((prev) => ({ ...prev, pin: event.target.value.replace(/\D/g, "").slice(0, 6) }))} />
+                    <button type="submit" className="primary" disabled={phoneSyncing}>Registrar/verificar</button>
+                  </form>
+                  <div className="phone-grid">
+                    {whatsappPhones.map((phone) => (
+                      <div className="phone-card" key={phone.id}>
+                        <strong>{phone.display_phone_number || phone.verified_name || phone.id}</strong>
+                        <span>ID: {phone.id}</span>
+                        <span>Nombre verificado: {phone.verified_name || "-"}</span>
+                        <span>Calidad: {phone.quality_rating || "-"}</span>
+                        <mark>{phone.code_verification_status || phone.name_status || "sin estado"}</mark>
+                      </div>
+                    ))}
+                    {whatsappPhones.length === 0 ? <div className="empty">Aun no hay numeros sincronizados. Guarda WABA ID y token permanente, luego pulsa Sincronizar numeros.</div> : null}
+                  </div>
+                </article>
+
+                <article className="panel glass-card webhook-panel">
+                  <div className="panel-head">
+                    <div>
+                      <h2>Webhooks</h2>
+                      <span>callback URL y verify token para Meta Developers</span>
+                    </div>
+                    <button type="button" onClick={loadWebhooks}>Refrescar</button>
+                  </div>
+                  <div className="inline-form webhook-create-form">
+                    <select value={webhookProvider} onChange={(event) => setWebhookProvider(event.target.value)}>
+                      <option value="whatsapp">WhatsApp</option>
+                      <option value="meta">Meta</option>
+                      <option value="instagram">Instagram</option>
+                      <option value="facebook">Facebook</option>
+                      <option value="stripe">Stripe</option>
+                    </select>
+                    <label className="check-row"><input type="checkbox" checked={webhookSignatureRequired} onChange={(event) => setWebhookSignatureRequired(event.target.checked)} /> Requerir firma HMAC</label>
+                    <button type="button" className="primary" onClick={createWebhook}>Crear endpoint</button>
+                  </div>
+                  {lastWebhookSecret ? (
+                    <div className="secret-box">
+                      <strong>Valores para Meta (visibles una sola vez)</strong>
+                      <span>Callback URL para Meta</span>
+                      <div className="secret-value-row"><code>{fullWebhookUrl(lastWebhookSecret.url_path)}</code><button type="button" onClick={() => copyText(fullWebhookUrl(lastWebhookSecret.url_path), "Callback URL")}>Copiar URL</button></div>
+                      {lastWebhookSecret.verify_token_once ? <><span>Verify token para Meta</span><div className="secret-value-row"><code>{lastWebhookSecret.verify_token_once}</code><button type="button" onClick={() => copyText(lastWebhookSecret.verify_token_once, "Verify token")}>Copiar token</button></div></> : null}
+                      {lastWebhookSecret.signature_secret_once ? <><span>Firma HMAC opcional</span><div className="secret-value-row"><code>{lastWebhookSecret.signature_secret_once}</code><button type="button" onClick={() => copyText(lastWebhookSecret.signature_secret_once, "Firma HMAC")}>Copiar firma</button></div></> : null}
+                      <small>El Verify token lo genera Scentra aleatoriamente. No es el token permanente de WhatsApp Cloud API.</small>
+                    </div>
+                  ) : (
+                    <div className="secret-box muted-secret">
+                      <strong>Verify token de Meta</strong>
+                      <span>Scentra lo genera automaticamente al crear o rotar un endpoint. Si lo perdiste, pulsa Rotar token y copia el nuevo valor en Meta Developers.</span>
+                    </div>
+                  )}
+                  <div className="webhook-cards">
+                    {webhooks.map((endpoint) => (
+                      <div className="webhook-card" key={endpoint.id}>
+                        <div className="webhook-card-head">
+                          <div><strong>{endpoint.provider}</strong><span>{endpoint.is_active ? "activo" : "pausado"} / {endpoint.signature_required ? "firma requerida" : "verify token"}</span></div>
+                          <span>{endpoint.last_seen_at || "sin eventos"}</span>
+                        </div>
+                        <div className="callback-box"><code>{fullWebhookUrl(endpoint.url_path)}</code><button type="button" onClick={() => copyText(fullWebhookUrl(endpoint.url_path), "Callback URL")}>Copiar URL</button></div>
+                        <div className="row-actions">
+                          <button type="button" onClick={() => updateWebhookEndpoint(endpoint, { signature_required: !endpoint.signature_required })}>{endpoint.signature_required ? "Permitir token" : "Exigir firma"}</button>
+                          <button type="button" onClick={() => rotateWebhookToken(endpoint)}>Rotar token</button>
+                          <button type="button" onClick={() => rotateWebhookSignature(endpoint)}>Rotar firma</button>
+                        </div>
+                      </div>
+                    ))}
+                    {webhooks.length === 0 ? <div className="empty">Sin endpoints webhook.</div> : null}
+                  </div>
+                  <div className="panel-actions"><button type="button" onClick={processWebhookEvents}>Procesar eventos pendientes</button></div>
+                </article>
+              </div>
+            ) : null}
             {settingsTab === "apis" ? <div className="settings-stack">
               <article className="panel glass-card api-console">
                 <div className="panel-head"><h2>Proveedores IA</h2><span>LLM / modelos</span></div>
@@ -542,3 +749,4 @@ function App() {
 }
 
 export default App;
+

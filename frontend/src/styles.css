@@ -249,6 +249,120 @@ nav { display: grid; gap: 8px; }
 .copy-line.compact { align-items: start; }
 .copy-line code { min-width: 0; }
 .copy-line button { min-height: 32px; border-radius: 11px; font-size: 12px; }
+.channels-settings { gap: 18px; }
+.integration-card { overflow: hidden; }
+.meta-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(170px, 1fr));
+  gap: 12px;
+  align-items: end;
+  margin: 14px 0;
+}
+.meta-grid label,
+.phone-register-form label {
+  min-width: 0;
+}
+.meta-grid .token-field {
+  grid-column: span 2;
+}
+.integration-cards,
+.webhook-cards,
+.phone-grid {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+.integration-card-row,
+.webhook-card,
+.phone-card {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: rgba(255,255,255,0.052);
+  padding: 14px;
+}
+.integration-card-row {
+  display: grid;
+  grid-template-columns: 1.2fr repeat(3, minmax(130px, 1fr)) auto;
+  gap: 12px;
+  align-items: center;
+}
+.integration-card-row strong,
+.integration-card-row span,
+.phone-card strong,
+.phone-card span,
+.webhook-card strong,
+.webhook-card span {
+  display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.integration-card-row span,
+.phone-card span,
+.webhook-card span {
+  color: var(--muted);
+  font-size: 12px;
+}
+.integration-card-row mark,
+.phone-card mark {
+  justify-self: start;
+  border: 1px solid rgba(94,234,212,0.32);
+  border-radius: 999px;
+  background: rgba(20,184,166,0.12);
+  color: var(--soft);
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 800;
+}
+.phone-register-form {
+  grid-template-columns: minmax(220px, 1fr) minmax(140px, 220px) auto;
+}
+.phone-grid {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+.phone-card {
+  display: grid;
+  gap: 6px;
+}
+.webhook-create-form {
+  grid-template-columns: minmax(180px, 260px) minmax(170px, 1fr) auto;
+}
+.secret-value-row,
+.callback-box {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(0,0,0,0.18);
+  padding: 10px;
+}
+.secret-value-row code,
+.callback-box code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.secret-value-row button,
+.callback-box button {
+  min-height: 32px;
+  border-radius: 11px;
+  font-size: 12px;
+}
+.webhook-card {
+  display: grid;
+  gap: 12px;
+}
+.webhook-card-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+.webhook-card .row-actions {
+  margin: 0;
+}
 .code-block { display: block; padding: 16px; border: 1px solid var(--line); border-radius: 18px; background: rgba(0,0,0,0.24); }
 .code-list { display: grid; gap: 10px; }
 .code-list code { display: block; padding: 12px; border: 1px solid var(--line); border-radius: 14px; background: rgba(0,0,0,0.18); }
@@ -299,7 +413,10 @@ nav { display: grid; gap: 8px; }
   .topbar, .hero-card { align-items: stretch; flex-direction: column; }
   .top-actions, .metric-grid, .settings-grid, .inbox-grid, .plan-cards, .feature-grid, .channel-list, .form-grid.two, .plan-summary { grid-template-columns: 1fr; min-width: 0; }
   .top-actions { display: grid; }
-  .inline-form, .integrations-form, .composer, .usage-line, .row, .row.four, .row.six, .integration-row { grid-template-columns: 1fr; }
+  .inline-form, .integrations-form, .composer, .usage-line, .row, .row.four, .row.six, .integration-row,
+  .meta-grid, .meta-grid .token-field, .integration-card-row, .phone-register-form, .webhook-create-form,
+  .secret-value-row, .callback-box { grid-template-columns: 1fr; grid-column: auto; }
+  .webhook-card-head { display: grid; }
 }
 
 /* Legibilidad de controles nativos en tema oscuro */
