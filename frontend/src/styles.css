@@ -314,6 +314,15 @@ nav { display: grid; gap: 8px; }
   font-size: 12px;
   font-weight: 800;
 }
+.integration-marks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+.integration-marks mark {
+  justify-self: auto;
+}
 .phone-register-form {
   grid-template-columns: minmax(220px, 1fr) minmax(140px, 220px) auto;
 }

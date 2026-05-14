@@ -11,6 +11,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from app_saas.db import db_session, set_tenant_context
+from app_saas.shared.secrets import decrypt_secret
 from app_saas.shared.security import (
     AuthContext,
     derive_webhook_signature_secret,
@@ -30,6 +31,9 @@ from app_saas.webhooks.schemas import (
 from app_saas.workers.ingest import process_due_webhook_events
 
 router = APIRouter(prefix="/webhooks", tags=["saas-webhooks"])
+
+META_WEBHOOK_PROVIDERS = {"meta", "whatsapp", "facebook", "instagram"}
+META_WEBHOOK_OBJECTS = {"whatsapp_business_account", "page", "instagram"}
 
 
 def _normalize_provider(value: str) -> str:
@@ -65,6 +69,15 @@ def _safe_json(raw: bytes) -> dict[str, Any]:
     except Exception:
         return {}
     return parsed if isinstance(parsed, dict) else {"value": parsed}
+
+
+def _is_meta_webhook_payload(provider: str, payload: dict[str, Any]) -> bool:
+    if provider not in META_WEBHOOK_PROVIDERS:
+        return False
+    if str(payload.get("object") or "").strip().lower() in META_WEBHOOK_OBJECTS:
+        return True
+    entries = payload.get("entry")
+    return isinstance(entries, list) and bool(entries)
 
 
 def _extract_event_id(provider: str, payload: dict[str, Any], raw_sha256: str) -> str:
@@ -129,6 +142,53 @@ def _verify_endpoint_signature(endpoint: dict, raw: bytes, request: Request) -> 
         secret_value=signature_secret,
         raw_body=raw,
         signature_header=_signature_header(request),
+    )
+
+
+def _load_meta_app_secret(conn, tenant_id: str) -> str:
+    rows = conn.execute(
+        text(
+            """
+            SELECT config_json
+            FROM saas_integrations
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND (
+                provider IN ('meta', 'whatsapp', 'facebook', 'instagram')
+                OR channel IN ('whatsapp', 'facebook', 'instagram')
+              )
+            ORDER BY
+              CASE WHEN provider = 'meta' THEN 0 ELSE 1 END,
+              updated_at DESC NULLS LAST
+            LIMIT 10
+            """
+        ),
+        {"tenant_id": tenant_id},
+    ).mappings().all()
+    for row in rows:
+        config = dict(row["config_json"] or {})
+        for key in ("app_secret", "meta_app_secret", "client_secret"):
+            value = decrypt_secret(str(config.get(key) or "").strip())
+            if value:
+                return value
+    return ""
+
+
+def _verify_meta_app_signature(conn, endpoint: dict, raw: bytes, request: Request) -> tuple[bool, bool]:
+    if str(endpoint.get("provider") or "").lower() not in META_WEBHOOK_PROVIDERS:
+        return False, False
+    signature = _signature_header(request)
+    app_secret = _load_meta_app_secret(conn, str(endpoint["tenant_id"]))
+    if not app_secret:
+        return False, False
+    if not signature:
+        return False, True
+    return (
+        verify_hmac_sha256_signature(
+            secret_value=app_secret,
+            raw_body=raw,
+            signature_header=signature,
+        ),
+        True,
     )
 
 
@@ -485,6 +545,7 @@ async def receive_webhook(provider: str, endpoint_key: str, request: Request):
     raw_sha256 = hashlib.sha256(raw or b"").hexdigest()
     payload = _safe_json(raw)
     event_id = _extract_event_id(provider_clean, payload, raw_sha256)
+    meta_post_ok = _is_meta_webhook_payload(provider_clean, payload)
     supplied_token = str(
         request.headers.get("x-scentra-webhook-token")
         or request.headers.get("x-verane-webhook-token")
@@ -495,9 +556,14 @@ async def receive_webhook(provider: str, endpoint_key: str, request: Request):
         endpoint = _load_endpoint(conn, provider_clean, key_clean)
         token_ok = verify_secret(supplied_token, endpoint["verify_token_hash"])
         signature_ok = _verify_endpoint_signature(endpoint, raw, request)
+        meta_app_secret_configured = False
+        if not signature_ok:
+            meta_signature_ok, meta_app_secret_configured = _verify_meta_app_signature(conn, endpoint, raw, request)
+            signature_ok = meta_signature_ok
         if bool(endpoint.get("signature_required")) and not signature_ok:
-            raise HTTPException(status_code=403, detail="invalid_webhook_signature")
-        if not bool(endpoint.get("signature_required")) and not (token_ok or signature_ok):
+            if not (meta_post_ok and not meta_app_secret_configured):
+                raise HTTPException(status_code=403, detail="invalid_webhook_signature")
+        if not bool(endpoint.get("signature_required")) and not (token_ok or signature_ok or meta_post_ok):
             raise HTTPException(status_code=403, detail="invalid_webhook_auth")
 
         set_tenant_context(conn, endpoint["tenant_id"])
@@ -563,10 +629,18 @@ async def receive_webhook(provider: str, endpoint_key: str, request: Request):
                 {"tenant_id": endpoint["tenant_id"], "period": _period_yyyymm()},
             )
 
+    process_result: dict[str, Any] = {}
+    if inserted:
+        try:
+            process_result = process_due_webhook_events(limit=10, tenant_id=endpoint["tenant_id"])
+        except Exception as exc:
+            process_result = {"errors": 1, "error": str(exc)[:300]}
+
     return {
         "ok": True,
         "tenant_id": endpoint["tenant_id"],
         "provider": provider_clean,
         "event_id": event_id,
         "duplicate": not inserted,
+        "process_result": process_result,
     }

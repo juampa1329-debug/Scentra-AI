@@ -118,6 +118,7 @@ const lifecycleLabel = (status) => ({
 
 function App() {
   const metaAccessTokenRef = useRef(null);
+  const metaAppSecretRef = useRef(null);
   const [accessToken, setAccessToken] = useState(() => localStorage.getItem(TOKEN_KEY) || "");
   const [refreshToken, setRefreshToken] = useState(() => localStorage.getItem(REFRESH_KEY) || "");
   const [mode, setMode] = useState("login");
@@ -362,14 +363,17 @@ function App() {
     event.preventDefault();
     const accessTokenEnv = (integrationForm.access_token_env || "SCENTRA_META_ACCESS_TOKEN").trim();
     const accessToken = (metaAccessTokenRef.current?.value || "").trim();
+    const appSecret = (metaAppSecretRef.current?.value || "").trim();
     const phoneNumberId = (integrationForm.phone_number_id || "").trim();
     const dispatchMode = (integrationForm.dispatch_mode || "stub").trim();
     if (dispatchMode !== "stub" && !phoneNumberId) return showStatus("Phone Number ID requerido para Meta Cloud real.", "error");
     try {
       const configJson = { dispatch_mode: dispatchMode, phone_number_id: phoneNumberId, business_account_id: (integrationForm.business_account_id || "").trim(), app_id: (integrationForm.app_id || "").trim(), graph_api_version: (integrationForm.graph_api_version || "v24.0").trim(), access_token_env: accessTokenEnv };
       if (accessToken) configJson.access_token = accessToken;
+      if (appSecret) configJson.app_secret = appSecret;
       await apiCall("/saas/v1/integrations", { method: "POST", body: JSON.stringify({ provider: integrationForm.provider, channel: integrationForm.channel, status: integrationForm.status, secret_ref: accessToken ? "tenant:meta:whatsapp" : dispatchMode === "stub" ? "" : `env:${accessTokenEnv}`, config_json: configJson }) });
       if (metaAccessTokenRef.current) metaAccessTokenRef.current.value = "";
+      if (metaAppSecretRef.current) metaAppSecretRef.current.value = "";
       showStatus("Integracion guardada", "ok"); await loadIntegrations(); await loadBilling();
     } catch (err) { showStatus(String(err.message || err), "error"); }
   };
@@ -570,6 +574,9 @@ function App() {
                     <label>Meta App ID
                       <input placeholder="ID de la app en Meta" value={integrationForm.app_id} onChange={(event) => setIntegrationForm((prev) => ({ ...prev, app_id: event.target.value }))} />
                     </label>
+                    <label className="token-field">Meta App Secret
+                      <input ref={metaAppSecretRef} type="password" placeholder="Opcional: valida x-hub-signature-256" autoComplete="off" spellCheck={false} />
+                    </label>
                     <label>Graph API
                       <input placeholder="v24.0" value={integrationForm.graph_api_version} onChange={(event) => setIntegrationForm((prev) => ({ ...prev, graph_api_version: event.target.value }))} />
                     </label>
@@ -582,6 +589,7 @@ function App() {
                     {integrations.map((integration) => {
                       const config = integration.config_json || {};
                       const tokenLabel = config.has_access_token ? `Token guardado ${config.access_token_hint || ""}` : (config.access_token_env ? `Env ${config.access_token_env}` : "Sin token");
+                      const appSecretLabel = config.has_app_secret ? `App secret ${config.app_secret_hint || "guardado"}` : "Sin app secret";
                       return (
                         <div className="integration-card-row" key={integration.id}>
                           <div>
@@ -591,7 +599,7 @@ function App() {
                           <div><span>Phone Number ID</span><strong>{config.phone_number_id || "-"}</strong></div>
                           <div><span>WABA ID</span><strong>{config.business_account_id || "-"}</strong></div>
                           <div><span>Meta App ID</span><strong>{config.app_id || "-"}</strong></div>
-                          <mark>{tokenLabel}</mark>
+                          <div className="integration-marks"><mark>{tokenLabel}</mark><mark>{appSecretLabel}</mark></div>
                         </div>
                       );
                     })}

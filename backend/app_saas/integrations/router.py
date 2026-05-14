@@ -19,7 +19,7 @@ from app_saas.shared.secrets import decrypt_secret, encrypt_secret, is_masked_se
 
 router = APIRouter(prefix="/integrations", tags=["saas-integrations"])
 
-SENSITIVE_CONFIG_KEYS = {"access_token", "token", "permanent_token", "app_secret"}
+SENSITIVE_CONFIG_KEYS = {"access_token", "token", "permanent_token", "app_secret", "meta_app_secret", "client_secret"}
 DEFAULT_ACCESS_TOKEN_ENV = "SCENTRA_META_ACCESS_TOKEN"
 ENV_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,}$")
 
