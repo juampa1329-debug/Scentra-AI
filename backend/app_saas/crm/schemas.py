@@ -4,8 +4,12 @@ from pydantic import BaseModel, Field
 
 
 class SendMessageIn(BaseModel):
-    text: str = Field(min_length=1, max_length=4096)
+    text: str = Field(default="", max_length=4096)
     channel: str = ""
+    msg_type: str = Field(default="text", max_length=40)
+    media_id: str = Field(default="", max_length=240)
+    mime_type: str = Field(default="", max_length=160)
+    filename: str = Field(default="", max_length=240)
 
 
 class CustomerUpdateIn(BaseModel):

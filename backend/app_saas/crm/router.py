@@ -905,8 +905,13 @@ def send_message(
     ctx: AuthContext = Depends(require_role("owner", "admin", "supervisor", "agent")),
 ):
     body_text = payload.text.strip()
-    if not body_text:
-        raise HTTPException(status_code=400, detail="message_text_required")
+    requested_media_id = payload.media_id.strip()
+    requested_type = payload.msg_type.strip().lower() or ("file" if requested_media_id else "text")
+    allowed_types = {"text", "image", "video", "audio", "document", "file"}
+    if requested_type not in allowed_types:
+        raise HTTPException(status_code=400, detail="unsupported_message_type")
+    if not body_text and not requested_media_id:
+        raise HTTPException(status_code=400, detail="message_content_required")
 
     with db_session() as conn:
         set_tenant_context(conn, ctx.tenant_id)
@@ -931,11 +936,43 @@ def send_message(
 
         ensure_monthly_message_quota(conn, ctx.tenant_id, requested=1)
 
+        media_id = ""
+        mime_type = payload.mime_type.strip()
+        filename = payload.filename.strip()
+        message_type = requested_type
+        if requested_media_id:
+            asset = conn.execute(
+                text(
+                    """
+                    SELECT id::text, kind, filename, content_type, byte_size
+                    FROM saas_media_assets
+                    WHERE tenant_id = CAST(:tenant_id AS uuid)
+                      AND id::text = :media_id
+                    LIMIT 1
+                    """
+                ),
+                {"tenant_id": ctx.tenant_id, "media_id": requested_media_id},
+            ).mappings().first()
+            if not asset:
+                raise HTTPException(status_code=404, detail="media_not_found")
+            media_id = asset["id"]
+            mime_type = mime_type or str(asset["content_type"] or "")
+            filename = filename or str(asset["filename"] or "")
+            if requested_type in {"text", "file"}:
+                asset_kind = str(asset["kind"] or "file").lower()
+                message_type = asset_kind if asset_kind in allowed_types else "file"
+            if message_type == "file":
+                message_type = "document"
+
         local_external_id = f"local:out:{uuid4().hex}"
         message_payload = {
             "source": "saas_console",
             "actor_user_id": ctx.user_id,
             "dispatch_status": "queued",
+            "message_type": message_type,
+            "media_id": media_id,
+            "mime_type": mime_type,
+            "filename": filename,
         }
         message = conn.execute(
             text(
@@ -948,6 +985,8 @@ def send_message(
                     direction,
                     msg_type,
                     text,
+                    media_id,
+                    mime_type,
                     payload_json
                 )
                 VALUES (
@@ -956,8 +995,10 @@ def send_message(
                     :channel,
                     :external_message_id,
                     'out',
-                    'text',
+                    :msg_type,
                     :body_text,
+                    :media_id,
+                    :mime_type,
                     CAST(:payload_json AS jsonb)
                 )
                 RETURNING
@@ -977,7 +1018,10 @@ def send_message(
                 "conversation_id": conversation_id,
                 "channel": channel,
                 "external_message_id": local_external_id,
+                "msg_type": message_type,
                 "body_text": body_text,
+                "media_id": media_id,
+                "mime_type": mime_type,
                 "payload_json": json.dumps(message_payload),
             },
         ).mappings().first()
@@ -1013,10 +1057,18 @@ def send_message(
                 "channel": channel,
                 "recipient_external_id": str(conversation["external_contact_id"] or conversation["phone"] or ""),
                 "body_text": body_text,
-                "payload_json": json.dumps({"local_external_message_id": local_external_id}),
+                "payload_json": json.dumps({
+                    "local_external_message_id": local_external_id,
+                    "source": "saas_console",
+                    "message_type": message_type,
+                    "media_id": media_id,
+                    "mime_type": mime_type,
+                    "filename": filename,
+                }),
             },
         ).mappings().first()
 
+        last_preview = body_text or f"[{message_type}]"
         conn.execute(
             text(
                 """
@@ -1029,7 +1081,7 @@ def send_message(
                   AND id = CAST(:conversation_id AS uuid)
                 """
             ),
-            {"tenant_id": ctx.tenant_id, "conversation_id": conversation_id, "body_text": body_text},
+            {"tenant_id": ctx.tenant_id, "conversation_id": conversation_id, "body_text": last_preview},
         )
         conn.execute(
             text(
@@ -1052,11 +1104,17 @@ def send_message(
             event_kind="sent",
         )
 
+    try:
+        dispatch_result = process_due_outbound_messages(limit=5, tenant_id=ctx.tenant_id)
+    except Exception as exc:
+        dispatch_result = {"picked": 0, "sent": 0, "blocked": 0, "failed": 1, "error": str(exc)[:300]}
+
     return {
         "ok": True,
         "tenant_id": ctx.tenant_id,
         "message": dict(message),
         "outbound": dict(outbound),
+        "dispatch": dispatch_result,
         "triggers": trigger_result,
     }
 

@@ -203,12 +203,18 @@ def tenant_entitlements(conn: Connection, tenant_id: str) -> dict[str, Any]:
     features = {**DEFAULT_FEATURE_FLAGS, **plan_features}
     feature_sources = {key: "default" for key in DEFAULT_FEATURE_FLAGS}
     feature_sources.update({key: "plan" for key in plan_features})
+    tenant_status = str(limits.get("tenant_status") or "").lower()
+
+    if tenant_status == "trial":
+        for key in ("triggers", "remarketing"):
+            if key not in overrides:
+                features[key] = True
+                feature_sources[key] = "trial"
 
     for key, row in overrides.items():
         features[key] = bool(row.get("is_enabled"))
         feature_sources[key] = str(row.get("source") or "admin")
 
-    tenant_status = str(limits.get("tenant_status") or "").lower()
     return {
         "tenant_id": tenant_id,
         "tenant_status": tenant_status,

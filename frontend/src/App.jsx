@@ -115,10 +115,38 @@ const lifecycleLabel = (status) => ({
   paused: "Pausado",
   none: "Sin suscripcion",
 }[String(status || "").toLowerCase()] || String(status || "Activo"));
+const CHAT_EMOJIS = [
+  "😀", "😃", "😄", "😁", "😅", "😂", "🙂", "😉", "😊", "😍", "😘", "😎",
+  "🤔", "😮", "😢", "😭", "😡", "🙏", "👏", "🙌", "👍", "👎", "💪", "🔥",
+  "✨", "💎", "🎁", "🚚", "✅", "❌", "⏰", "📌", "📦", "💳", "💰", "🛍️",
+  "🌸", "💐", "💬", "📲", "🤝", "🥰", "😇", "🤣", "😋", "👌", "🫶", "🎉",
+];
+const EMPTY_WAVEFORM = Array.from({ length: 32 }, (_, idx) => 8 + ((idx * 7) % 18));
+const formatDuration = (seconds) => {
+  const safe = Math.max(0, Number(seconds || 0));
+  const min = Math.floor(safe / 60).toString().padStart(2, "0");
+  const sec = Math.floor(safe % 60).toString().padStart(2, "0");
+  return `${min}:${sec}`;
+};
+const mediaKindFromMime = (type) => {
+  const mime = String(type || "").toLowerCase();
+  if (mime.startsWith("image/")) return "image";
+  if (mime.startsWith("video/")) return "video";
+  if (mime.startsWith("audio/")) return "audio";
+  return "document";
+};
 
 function App() {
   const metaAccessTokenRef = useRef(null);
   const metaAppSecretRef = useRef(null);
+  const composerFileRef = useRef(null);
+  const mediaRecorderRef = useRef(null);
+  const mediaStreamRef = useRef(null);
+  const recordingChunksRef = useRef([]);
+  const recordingCancelledRef = useRef(false);
+  const recordingTimerRef = useRef(null);
+  const recordingAnimationRef = useRef(null);
+  const audioContextRef = useRef(null);
   const [accessToken, setAccessToken] = useState(() => localStorage.getItem(TOKEN_KEY) || "");
   const [refreshToken, setRefreshToken] = useState(() => localStorage.getItem(REFRESH_KEY) || "");
   const [mode, setMode] = useState("login");
@@ -151,6 +179,13 @@ function App() {
   const [selectedConversation, setSelectedConversation] = useState(null);
   const [messages, setMessages] = useState([]);
   const [replyText, setReplyText] = useState("");
+  const [attachmentFile, setAttachmentFile] = useState(null);
+  const [attachmentPreview, setAttachmentPreview] = useState("");
+  const [emojiOpen, setEmojiOpen] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [recordingLevels, setRecordingLevels] = useState(EMPTY_WAVEFORM);
+  const [composerSending, setComposerSending] = useState(false);
   const [status, setStatus] = useState("");
   const [statusTone, setStatusTone] = useState("neutral");
 
@@ -188,6 +223,8 @@ function App() {
   const unreadTotal = conversations.reduce((sum, item) => sum + Number(item.unread_count || 0), 0);
   const connectedIntegrations = integrations.filter((item) => item.status !== "disconnected").length;
   const activeWebhooks = webhooks.filter((item) => item.is_active).length;
+  const activeWhatsappIntegration = integrations.find((item) => item.channel === "whatsapp" && item.status === "connected");
+  const whatsappDispatchMode = String(activeWhatsappIntegration?.config_json?.dispatch_mode || "stub").toLowerCase();
   const dashboardTotals = dashboardOverview?.totals || {};
   const dashboardFunnel = dashboardOverview?.funnel || [];
   const dashboardActivity = dashboardOverview?.activity || [];
@@ -227,8 +264,23 @@ function App() {
     if (nextRefresh) localStorage.setItem(REFRESH_KEY, nextRefresh);
   };
 
+  const clearComposerAttachment = () => {
+    if (attachmentPreview) URL.revokeObjectURL(attachmentPreview);
+    setAttachmentFile(null);
+    setAttachmentPreview("");
+    if (composerFileRef.current) composerFileRef.current.value = "";
+  };
+
+  const setComposerAttachment = (file) => {
+    if (!file) return;
+    clearComposerAttachment();
+    setAttachmentFile(file);
+    setAttachmentPreview(URL.createObjectURL(file));
+  };
+
   const clearWorkspaceState = () => {
     setConversations([]); setSelectedConversation(null); setMessages([]); setReplyText("");
+    clearComposerAttachment(); setEmojiOpen(false); setIsRecording(false); setRecordingSeconds(0); setRecordingLevels(EMPTY_WAVEFORM);
     setIntegrations([]); setWebhooks([]); setWebhookEvents([]); setBillingOverview(null); setBillingPlans([]); setLastWebhookSecret(null);
     setWhatsappPhones([]); setPhoneRegisterForm({ phone_number_id: "", pin: "" });
   };
@@ -285,7 +337,7 @@ function App() {
     if (!conversation?.id) return;
     try {
       const data = await apiCall(`/saas/v1/conversations/${encodeURIComponent(conversation.id)}/messages`);
-      setSelectedConversation(conversation); setMessages(data?.messages || []); setReplyText("");
+      setSelectedConversation(conversation); setMessages(data?.messages || []); setReplyText(""); clearComposerAttachment(); setEmojiOpen(false);
     } catch (err) { showStatus(String(err.message || err), "error"); }
   };
 
@@ -296,7 +348,7 @@ function App() {
       const items = data?.conversations || [];
       setConversations(items);
       if (items.length && !selectedConversation) await loadMessages(items[0]);
-      if (!items.length) { setSelectedConversation(null); setMessages([]); setReplyText(""); }
+      if (!items.length) { setSelectedConversation(null); setMessages([]); setReplyText(""); clearComposerAttachment(); }
     } catch (err) { showStatus(String(err.message || err), "error"); }
   };
 
@@ -431,7 +483,172 @@ function App() {
   const rotateWebhookSignature = async (endpoint) => { try { const data = await apiCall(`/saas/v1/webhooks/endpoints/${encodeURIComponent(endpoint.id)}/rotate-signature`, { method: "POST" }); setLastWebhookSecret(data); showStatus("Firma HMAC rotada", "ok"); await loadWebhooks(); } catch (err) { showStatus(String(err.message || err), "error"); } };
   const processWebhookEvents = async () => { try { const data = await apiCall("/saas/v1/webhooks/events/process", { method: "POST" }); showStatus(`Procesados: ${data?.result?.processed || 0}`, "ok"); await loadWebhooks(); } catch (err) { showStatus(String(err.message || err), "error"); } };
   const markSelectedConversationRead = async () => { if (!selectedConversation?.id) return; try { await apiCall(`/saas/v1/conversations/${selectedConversation.id}/read`, { method: "POST" }); showStatus("Conversacion marcada como leida", "ok"); await loadInbox(); } catch (err) { showStatus(String(err.message || err), "error"); } };
-  const sendSelectedMessage = async (event) => { event.preventDefault(); if (!selectedConversation?.id || !replyText.trim()) return; try { await apiCall(`/saas/v1/conversations/${encodeURIComponent(selectedConversation.id)}/messages`, { method: "POST", body: JSON.stringify({ text: replyText }) }); showStatus("Mensaje encolado para envio", "ok"); setReplyText(""); await loadMessages(selectedConversation); await loadInbox(); } catch (err) { showStatus(String(err.message || err), "error"); } };
+  const localMediaUrl = (mediaId) => mediaId && accessToken ? `${API_BASE}/saas/v1/media/${encodeURIComponent(mediaId)}?token=${encodeURIComponent(accessToken)}` : "";
+  const whatsappMediaUrl = (mediaId) => mediaId && accessToken ? `${API_BASE}/saas/v1/media/whatsapp/${encodeURIComponent(mediaId)}?token=${encodeURIComponent(accessToken)}` : "";
+  const messageMediaUrl = (message) => {
+    const id = String(message?.media_id || "").trim();
+    if (!id) return "";
+    return message.direction === "in" ? whatsappMediaUrl(id) : localMediaUrl(id);
+  };
+  const messageLabel = (message) => {
+    const type = String(message?.msg_type || "text").toLowerCase();
+    if (type === "image") return "imagen";
+    if (type === "video") return "video";
+    if (type === "audio") return "nota de voz";
+    if (type === "document" || type === "file") return "documento";
+    return type;
+  };
+  const waveformBars = (seed = "") => EMPTY_WAVEFORM.map((base, idx) => 7 + ((base + seed.length * 3 + idx * 11) % 34));
+  const renderMessageContent = (message) => {
+    const type = String(message?.msg_type || "text").toLowerCase();
+    const url = messageMediaUrl(message);
+    const label = messageLabel(message);
+    return (
+      <>
+        {type === "image" && url ? <img className="chat-media image" src={url} alt={message.text || "Imagen recibida"} loading="lazy" /> : null}
+        {type === "video" && url ? <video className="chat-media video" src={url} controls playsInline /> : null}
+        {type === "audio" && url ? (
+          <div className="audio-message">
+            <div className="audio-wave" aria-hidden="true">{waveformBars(message.id || message.created_at).map((height, idx) => <span key={idx} style={{ height: `${height}px` }} />)}</div>
+            <audio src={url} controls preload="metadata" />
+          </div>
+        ) : null}
+        {(type === "document" || type === "file") && url ? <a className="document-chip" href={url} target="_blank" rel="noreferrer">Abrir {label}</a> : null}
+        {message.text && !/^\[(image|video|audio|document|file)\]$/i.test(message.text) ? <p>{message.text}</p> : !url ? <p>[{label}]</p> : null}
+      </>
+    );
+  };
+  const stopRecordingMeters = () => {
+    if (recordingTimerRef.current) window.clearInterval(recordingTimerRef.current);
+    if (recordingAnimationRef.current) window.cancelAnimationFrame(recordingAnimationRef.current);
+    recordingTimerRef.current = null;
+    recordingAnimationRef.current = null;
+    if (audioContextRef.current) {
+      audioContextRef.current.close().catch(() => {});
+      audioContextRef.current = null;
+    }
+  };
+  const stopRecordingStream = () => {
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach((track) => track.stop());
+      mediaStreamRef.current = null;
+    }
+  };
+  const startVoiceRecording = async () => {
+    try {
+      if (!window.MediaRecorder || !navigator.mediaDevices?.getUserMedia) throw new Error("Este navegador no soporta grabacion de voz.");
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") mediaRecorderRef.current.stop();
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mime = ["audio/ogg;codecs=opus", "audio/ogg", "audio/webm;codecs=opus", "audio/webm"].find((item) => window.MediaRecorder.isTypeSupported(item));
+      const recorder = mime ? new window.MediaRecorder(stream, { mimeType: mime }) : new window.MediaRecorder(stream);
+      mediaStreamRef.current = stream;
+      mediaRecorderRef.current = recorder;
+      recordingChunksRef.current = [];
+      recordingCancelledRef.current = false;
+      setRecordingLevels(EMPTY_WAVEFORM);
+      setRecordingSeconds(0);
+      setIsRecording(true);
+      recorder.ondataavailable = (event) => { if (event.data?.size) recordingChunksRef.current.push(event.data); };
+      recorder.onstop = () => {
+        const blobType = recorder.mimeType || mime || "audio/webm";
+        const blob = new Blob(recordingChunksRef.current, { type: blobType });
+        recordingChunksRef.current = [];
+        stopRecordingMeters();
+        stopRecordingStream();
+        setIsRecording(false);
+        if (!recordingCancelledRef.current && blob.size) {
+          const extension = blobType.includes("ogg") ? "ogg" : "webm";
+          setComposerAttachment(new File([blob], `nota-voz-${Date.now()}.${extension}`, { type: blobType }));
+          showStatus("Nota de voz lista para enviar", "ok");
+        }
+        recordingCancelledRef.current = false;
+      };
+      recorder.start();
+      recordingTimerRef.current = window.setInterval(() => setRecordingSeconds((prev) => prev + 1), 1000);
+      const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+      if (AudioContextCtor) {
+        const audioContext = new AudioContextCtor();
+        audioContextRef.current = audioContext;
+        const source = audioContext.createMediaStreamSource(stream);
+        const analyser = audioContext.createAnalyser();
+        analyser.fftSize = 256;
+        source.connect(analyser);
+        const data = new Uint8Array(analyser.frequencyBinCount);
+        const tick = () => {
+          analyser.getByteTimeDomainData(data);
+          let total = 0;
+          data.forEach((value) => { const centered = value - 128; total += centered * centered; });
+          const rms = Math.sqrt(total / data.length) / 128;
+          const height = Math.max(7, Math.min(44, Math.round(rms * 110)));
+          setRecordingLevels((prev) => [...prev.slice(1), height]);
+          recordingAnimationRef.current = window.requestAnimationFrame(tick);
+        };
+        tick();
+      }
+    } catch (err) {
+      stopRecordingMeters();
+      stopRecordingStream();
+      setIsRecording(false);
+      showStatus(String(err.message || err), "error");
+    }
+  };
+  const stopVoiceRecording = () => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") mediaRecorderRef.current.stop();
+  };
+  const cancelVoiceRecording = () => {
+    recordingCancelledRef.current = true;
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") mediaRecorderRef.current.stop();
+    else {
+      stopRecordingMeters();
+      stopRecordingStream();
+      setIsRecording(false);
+    }
+  };
+  const sendSelectedMessage = async (event) => {
+    event.preventDefault();
+    if (!selectedConversation?.id || composerSending) return;
+    if (!replyText.trim() && !attachmentFile) return;
+    setComposerSending(true);
+    try {
+      let mediaId = "";
+      let msgType = "text";
+      let mimeType = "";
+      let filename = "";
+      if (attachmentFile) {
+        msgType = mediaKindFromMime(attachmentFile.type);
+        mimeType = attachmentFile.type || "";
+        filename = attachmentFile.name || "";
+        const formData = new FormData();
+        formData.append("kind", msgType);
+        formData.append("file", attachmentFile);
+        const upload = await apiCall("/saas/v1/media/upload", { method: "POST", body: formData });
+        mediaId = upload?.media_id || upload?.media?.id || "";
+      }
+      const data = await apiCall(`/saas/v1/conversations/${encodeURIComponent(selectedConversation.id)}/messages`, {
+        method: "POST",
+        body: JSON.stringify({ text: replyText, msg_type: msgType, media_id: mediaId, mime_type: mimeType, filename }),
+      });
+      const dispatch = data?.dispatch || {};
+      if (Number(dispatch.failed || 0) > 0 || Number(dispatch.blocked || 0) > 0) {
+        showStatus("Mensaje guardado, pero Meta no lo envio. Revisa integracion, plan o logs de outbound.", "error");
+      } else if (Number(dispatch.sent || 0) > 0 && whatsappDispatchMode === "stub") {
+        showStatus("Mensaje procesado en modo prueba. Cambia Canales a Meta Cloud para enviarlo al telefono.", "neutral");
+      } else if (Number(dispatch.sent || 0) > 0) {
+        showStatus("Mensaje enviado por WhatsApp", "ok");
+      } else {
+        showStatus("Mensaje encolado para envio", "ok");
+      }
+      setReplyText("");
+      clearComposerAttachment();
+      setEmojiOpen(false);
+      await loadMessages(selectedConversation);
+      await loadInbox();
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    } finally {
+      setComposerSending(false);
+    }
+  };
   const changePlanDev = async (planCode) => { try { const data = await apiCall("/saas/v1/billing/dev/change-plan", { method: "POST", body: JSON.stringify({ plan_code: planCode }) }); setBillingOverview(data); showStatus(`Plan actualizado a ${planCode}`, "ok"); await loadSession(); } catch (err) { showStatus(String(err.message || err), "error"); } };
   const saveAiLocal = () => showStatus("Ajustes IA guardados localmente. Falta conectar endpoint persistente.", "ok");
   const saveProfileLocal = () => showStatus("Perfil preparado. Falta conectar persistencia de usuario y foto.", "ok");
@@ -508,7 +725,72 @@ function App() {
             </section>
           </section>
         ) : activeView === "inbox" ? (
-          <section className="inbox-grid"><div className="panel glass-card inbox-list"><div className="panel-head"><h2>Conversaciones</h2><button type="button" onClick={loadInbox}>Refrescar</button></div><div className="conversation-list">{conversations.map((conversation) => <button type="button" className={`conversation-item ${selectedConversation?.id === conversation.id ? "active" : ""}`} key={conversation.id} onClick={() => loadMessages(conversation)}><strong>{conversation.display_name || conversation.phone || conversation.external_contact_id}</strong><span>{conversation.channel} / {conversation.unread_count || 0} sin leer</span><small>{conversation.last_message_text || "-"}</small></button>)}{conversations.length === 0 ? <div className="empty">Sin conversaciones todavia.</div> : null}</div></div><div className="panel glass-card inbox-thread"><div className="panel-head"><h2>{selectedConversation ? selectedConversation.display_name || selectedConversation.external_contact_id : "Mensajes"}</h2>{selectedConversation ? <button type="button" onClick={markSelectedConversationRead}>Marcar leido</button> : null}</div><div className="messages">{messages.map((message) => <div className={`message ${message.direction === "out" ? "out" : "in"}`} key={message.id}><span>{message.msg_type}</span><p>{message.text || `[${message.msg_type}]`}</p><small>{message.created_at}</small></div>)}{messages.length === 0 ? <div className="empty">Selecciona una conversacion.</div> : null}</div>{selectedConversation ? <form className="composer" onSubmit={sendSelectedMessage}><input value={replyText} onChange={(event) => setReplyText(event.target.value)} placeholder="Escribe una respuesta..." /><button type="submit" className="primary">Enviar</button></form> : null}</div></section>
+          <section className="inbox-grid">
+            <div className="panel glass-card inbox-list">
+              <div className="panel-head"><h2>Conversaciones</h2><button type="button" onClick={loadInbox}>Refrescar</button></div>
+              <div className="conversation-list">
+                {conversations.map((conversation) => (
+                  <button type="button" className={`conversation-item ${selectedConversation?.id === conversation.id ? "active" : ""}`} key={conversation.id} onClick={() => loadMessages(conversation)}>
+                    <strong>{conversation.display_name || conversation.phone || conversation.external_contact_id}</strong>
+                    <span>{conversation.channel} / {conversation.unread_count || 0} sin leer</span>
+                    <small>{conversation.last_message_text || "-"}</small>
+                  </button>
+                ))}
+                {conversations.length === 0 ? <div className="empty">Sin conversaciones todavia.</div> : null}
+              </div>
+            </div>
+            <div className="panel glass-card inbox-thread">
+              <div className="panel-head">
+                <div>
+                  <h2>{selectedConversation ? selectedConversation.display_name || selectedConversation.external_contact_id : "Mensajes"}</h2>
+                  {selectedConversation ? <span>{selectedConversation.phone || selectedConversation.external_contact_id}</span> : null}
+                </div>
+                {selectedConversation ? <button type="button" onClick={markSelectedConversationRead}>Marcar leido</button> : null}
+              </div>
+              <div className="messages">
+                {messages.map((message) => (
+                  <div className={`message ${message.direction === "out" ? "out" : "in"} ${message.msg_type || "text"}`} key={message.id}>
+                    <span className="message-type">{message.direction === "out" ? "tu" : "cliente"} / {messageLabel(message)}</span>
+                    {renderMessageContent(message)}
+                    <small>{message.created_at}</small>
+                  </div>
+                ))}
+                {messages.length === 0 ? <div className="empty">Selecciona una conversacion.</div> : null}
+              </div>
+              {selectedConversation ? (
+                <form className="composer rich-composer" onSubmit={sendSelectedMessage}>
+                  {attachmentFile ? (
+                    <div className="attachment-preview">
+                      <div>
+                        <strong>{attachmentFile.name}</strong>
+                        <span>{mediaKindFromMime(attachmentFile.type)} / {Math.round((attachmentFile.size || 0) / 1024)} KB</span>
+                      </div>
+                      {attachmentFile.type.startsWith("image/") ? <img src={attachmentPreview} alt="Vista previa adjunto" /> : null}
+                      {attachmentFile.type.startsWith("video/") ? <video src={attachmentPreview} controls playsInline /> : null}
+                      {attachmentFile.type.startsWith("audio/") ? <div className="audio-message compact"><div className="audio-wave" aria-hidden="true">{EMPTY_WAVEFORM.map((height, idx) => <span key={idx} style={{ height: `${height}px` }} />)}</div><audio src={attachmentPreview} controls /></div> : null}
+                      <button type="button" onClick={clearComposerAttachment}>Quitar</button>
+                    </div>
+                  ) : null}
+                  {isRecording ? (
+                    <div className="recording-panel">
+                      <strong>Grabando {formatDuration(recordingSeconds)}</strong>
+                      <div className="recording-wave" aria-hidden="true">{recordingLevels.map((height, idx) => <span key={idx} style={{ height: `${height}px` }} />)}</div>
+                      <button type="button" className="primary" onClick={stopVoiceRecording}>Listo</button>
+                      <button type="button" onClick={cancelVoiceRecording}>Cancelar</button>
+                    </div>
+                  ) : null}
+                  <input ref={composerFileRef} className="composer-file-input" type="file" accept="image/*,video/*,audio/*,.pdf,.doc,.docx,.xls,.xlsx,.txt" onChange={(event) => setComposerAttachment(event.target.files?.[0])} />
+                  <button type="button" className="composer-icon" onClick={() => composerFileRef.current?.click()} title="Adjuntar archivo">+</button>
+                  <button type="button" className="composer-icon" onClick={() => setEmojiOpen((prev) => !prev)} title="Emojis">☺</button>
+                  <button type="button" className="composer-icon catalog-button" onClick={() => showStatus("Catalogo disponible cuando conectemos WooCommerce o Shopify en integraciones.", "neutral")} title="Catalogo">Cat</button>
+                  <input value={replyText} onChange={(event) => setReplyText(event.target.value)} placeholder="Escribe una respuesta..." />
+                  <button type="button" className={`composer-icon mic-button ${isRecording ? "active" : ""}`} onClick={isRecording ? stopVoiceRecording : startVoiceRecording} title="Grabar nota de voz">Mic</button>
+                  <button type="submit" className="primary" disabled={composerSending || (!replyText.trim() && !attachmentFile)}>{composerSending ? "Enviando..." : "Enviar"}</button>
+                  {emojiOpen ? <div className="emoji-panel">{CHAT_EMOJIS.map((emoji) => <button key={emoji} type="button" onClick={() => setReplyText((prev) => `${prev}${emoji}`)}>{emoji}</button>)}</div> : null}
+                </form>
+              ) : null}
+            </div>
+          </section>
         ) : activeView === "customers" ? (
           <CrmPanel apiCall={apiCall} showStatus={showStatus} onOpenInbox={(customer) => { setActiveView("inbox"); loadMessages(customer); }} />
         ) : activeView === "labels" ? (

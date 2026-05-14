@@ -241,6 +241,185 @@ def _post_json(url: str, payload: dict[str, Any], access_token: str, timeout_sec
         raise DispatchTransientError(f"meta_network_error:{exc.reason}") from exc
 
 
+def _post_multipart(
+    url: str,
+    *,
+    fields: dict[str, Any],
+    file_name: str,
+    file_content_type: str,
+    file_bytes: bytes,
+    access_token: str,
+    timeout_sec: int,
+) -> dict[str, Any]:
+    boundary = f"----scentra{uuid4().hex}"
+    chunks: list[bytes] = []
+    for name, value in fields.items():
+        chunks.append(f"--{boundary}\r\n".encode("utf-8"))
+        chunks.append(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("utf-8"))
+        chunks.append(str(value).encode("utf-8"))
+        chunks.append(b"\r\n")
+    safe_name = (file_name or f"media-{uuid4().hex}").replace("\\", "_").replace('"', "_").replace("\r", "_").replace("\n", "_")[:240]
+    chunks.append(f"--{boundary}\r\n".encode("utf-8"))
+    chunks.append(
+        (
+            f'Content-Disposition: form-data; name="file"; filename="{safe_name}"\r\n'
+            f"Content-Type: {file_content_type or 'application/octet-stream'}\r\n\r\n"
+        ).encode("utf-8")
+    )
+    chunks.append(file_bytes)
+    chunks.append(b"\r\n")
+    chunks.append(f"--{boundary}--\r\n".encode("utf-8"))
+    body = b"".join(chunks)
+    request = urllib.request.Request(
+        url,
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "Content-Length": str(len(body)),
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_sec) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+            return json.loads(raw or "{}")
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace")
+        try:
+            parsed = json.loads(raw or "{}")
+        except Exception:
+            parsed = {"error": raw}
+        message = json.dumps(parsed, ensure_ascii=True)[:500]
+        if exc.code == 429 or exc.code >= 500:
+            raise DispatchTransientError(f"meta_upload_http_{exc.code}:{message}") from exc
+        raise DispatchPermanentError(f"meta_upload_http_{exc.code}:{message}") from exc
+    except urllib.error.URLError as exc:
+        raise DispatchTransientError(f"meta_upload_network_error:{exc.reason}") from exc
+
+
+def _load_local_media_asset(conn, tenant_id: str, media_id: str) -> dict[str, Any]:
+    row = conn.execute(
+        text(
+            """
+            SELECT id::text, kind, filename, content_type, byte_size, data
+            FROM saas_media_assets
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND id::text = :media_id
+            LIMIT 1
+            """
+        ),
+        {"tenant_id": tenant_id, "media_id": str(media_id or "").strip()},
+    ).mappings().first()
+    if not row:
+        raise DispatchPermanentError("media_asset_not_found")
+    return dict(row)
+
+
+def _media_message_type(kind: str, content_type: str) -> str:
+    clean_kind = str(kind or "").strip().lower()
+    if clean_kind in {"image", "video", "audio", "document"}:
+        return clean_kind
+    mime = str(content_type or "").strip().lower()
+    if mime.startswith("image/"):
+        return "image"
+    if mime.startswith("video/"):
+        return "video"
+    if mime.startswith("audio/"):
+        return "audio"
+    return "document"
+
+
+def _upload_meta_media(config: dict[str, Any], access_token: str, asset: dict[str, Any]) -> dict[str, Any]:
+    phone_number_id = str(config.get("phone_number_id") or "").strip()
+    if not phone_number_id:
+        raise DispatchPermanentError("meta_phone_number_id_required")
+    base_url = str(config.get("graph_base_url") or "https://graph.facebook.com").rstrip("/")
+    version = _meta_graph_version(config)
+    timeout_sec = int(config.get("timeout_sec") or os.getenv("SCENTRA_META_TIMEOUT_SEC") or "30")
+    content_type = str(asset.get("content_type") or "application/octet-stream").strip()
+    url = f"{base_url}/{version}/{phone_number_id}/media"
+    response = _post_multipart(
+        url,
+        fields={"messaging_product": "whatsapp", "type": content_type},
+        file_name=str(asset.get("filename") or ""),
+        file_content_type=content_type,
+        file_bytes=bytes(asset.get("data") or b""),
+        access_token=access_token,
+        timeout_sec=timeout_sec,
+    )
+    provider_media_id = str(response.get("id") or "")
+    if not provider_media_id:
+        raise DispatchPermanentError("meta_media_upload_missing_id")
+    return {"provider_media_id": provider_media_id, "upload_response": response}
+
+
+def _send_meta_cloud_media(conn, integration: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
+    config = _integration_config(integration)
+    phone_number_id = str(config.get("phone_number_id") or "").strip()
+    if not phone_number_id:
+        raise DispatchPermanentError("meta_phone_number_id_required")
+
+    access_token = _secret_from_env(config, integration)
+    if not access_token:
+        raise DispatchPermanentError("meta_access_token_missing")
+
+    payload_json = _job_payload(job)
+    local_media_id = str(payload_json.get("media_id") or "").strip()
+    provider_media_id = str(payload_json.get("provider_media_id") or "").strip()
+    if not local_media_id and not provider_media_id:
+        raise DispatchPermanentError("media_id_required")
+
+    asset: dict[str, Any] | None = None
+    if local_media_id:
+        asset = _load_local_media_asset(conn, str(job["tenant_id"]), local_media_id)
+    if not provider_media_id:
+        upload = _upload_meta_media(config, access_token, asset or {})
+        provider_media_id = upload["provider_media_id"]
+    else:
+        upload = {"provider_media_id": provider_media_id, "upload_response": {}}
+
+    recipient = _normalize_recipient(str(job.get("recipient_external_id") or ""))
+    body_text = str(job.get("body_text") or "").strip()
+    content_type = str((asset or {}).get("content_type") or payload_json.get("mime_type") or "").strip()
+    message_type = str(payload_json.get("message_type") or payload_json.get("type") or "").strip().lower()
+    if message_type == "file":
+        message_type = "document"
+    if message_type not in {"image", "video", "audio", "document"}:
+        message_type = _media_message_type(str((asset or {}).get("kind") or ""), content_type)
+
+    media_payload: dict[str, Any] = {"id": provider_media_id}
+    if message_type in {"image", "video", "document"} and body_text:
+        media_payload["caption"] = body_text[:1024]
+    filename = str(payload_json.get("filename") or (asset or {}).get("filename") or "").strip()
+    if message_type == "document" and filename:
+        media_payload["filename"] = filename[:240]
+
+    base_url = str(config.get("graph_base_url") or "https://graph.facebook.com").rstrip("/")
+    version = _meta_graph_version(config)
+    timeout_sec = int(config.get("timeout_sec") or os.getenv("SCENTRA_META_TIMEOUT_SEC") or "15")
+    url = f"{base_url}/{version}/{phone_number_id}/messages"
+    payload = {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": recipient,
+        "type": message_type,
+        message_type: media_payload,
+    }
+    response = _post_json(url, payload, access_token, timeout_sec)
+    messages = response.get("messages") if isinstance(response, dict) else None
+    provider_message_id = ""
+    if isinstance(messages, list) and messages:
+        provider_message_id = str((messages[0] or {}).get("id") or "")
+    return {
+        "provider_message_id": provider_message_id,
+        "provider_response": response,
+        "request_type": message_type,
+        "provider_media_id": provider_media_id,
+        "upload_response": upload.get("upload_response") or {},
+    }
+
+
 def _send_meta_cloud_text(integration: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
     config = _integration_config(integration)
     phone_number_id = str(config.get("phone_number_id") or "").strip()
@@ -421,7 +600,9 @@ def _dispatch_one(conn, job: dict[str, Any]) -> str:
         try:
             payload_json = _job_payload(job)
             message_type = str(payload_json.get("message_type") or payload_json.get("type") or "").strip().lower()
-            if message_type == "template" or payload_json.get("meta_template_name") or payload_json.get("template_name"):
+            if message_type in {"image", "video", "audio", "document", "file"} or payload_json.get("media_id"):
+                result = _send_meta_cloud_media(conn, integration, job)
+            elif message_type == "template" or payload_json.get("meta_template_name") or payload_json.get("template_name"):
                 result = _send_meta_cloud_template(integration, job)
             else:
                 result = _send_meta_cloud_text(integration, job)
@@ -438,6 +619,9 @@ def _dispatch_one(conn, job: dict[str, Any]) -> str:
             provider=str(integration["provider"]),
             provider_response={
                 "provider_message_id": provider_message_id,
+                "request_type": result.get("request_type") or "text",
+                "provider_media_id": result.get("provider_media_id") or "",
+                "upload_response": result.get("upload_response") or {},
                 **(result.get("provider_response") or {}),
             },
         )

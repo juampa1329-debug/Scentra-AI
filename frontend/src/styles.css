@@ -219,7 +219,31 @@ nav { display: grid; gap: 8px; }
 .message { width: min(720px, 88%); border: 1px solid var(--line); border-radius: 20px; background: rgba(255,255,255,0.07); padding: 13px; }
 .message.out { justify-self: end; border-color: rgba(52,211,153,0.28); background: rgba(20,184,166,0.16); }
 .message p { margin: 5px 0 7px; overflow-wrap: anywhere; }
+.message-type { text-transform: uppercase; letter-spacing: 0.08em; }
+.chat-media { display: block; max-width: min(100%, 520px); border-radius: 18px; border: 1px solid rgba(255,255,255,0.14); background: rgba(0,0,0,0.18); box-shadow: 0 18px 42px rgba(0,0,0,0.18); }
+.chat-media.image { max-height: 440px; object-fit: contain; }
+.chat-media.video { width: min(100%, 520px); max-height: 440px; }
+.audio-message { display: grid; grid-template-columns: minmax(130px, 220px) minmax(180px, 1fr); gap: 12px; align-items: center; margin: 8px 0; padding: 10px; border-radius: 999px; background: rgba(4, 20, 22, 0.35); border: 1px solid rgba(94,234,212,0.16); }
+.audio-message.compact { grid-template-columns: minmax(120px, 1fr); border-radius: 18px; width: min(100%, 520px); }
+.audio-message audio { width: 100%; min-width: 170px; }
+.audio-wave, .recording-wave { display: flex; align-items: center; gap: 3px; min-height: 46px; }
+.audio-wave span, .recording-wave span { display: block; width: 4px; border-radius: 999px; background: linear-gradient(180deg, var(--mint), var(--blue)); box-shadow: 0 0 16px rgba(52,211,153,0.18); }
+.document-chip { display: inline-flex; align-items: center; gap: 8px; width: fit-content; margin: 8px 0; padding: 12px 14px; border-radius: 16px; border: 1px solid rgba(94,234,212,0.26); background: rgba(94,234,212,0.10); color: var(--ink); font-weight: 800; }
 .composer { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+.rich-composer { position: relative; grid-template-columns: auto auto auto minmax(0, 1fr) auto auto; align-items: center; }
+.composer-file-input { display: none; }
+.composer-icon { width: 44px; min-height: 44px; padding: 0; border-radius: 16px; font-weight: 900; }
+.catalog-button { width: 56px; font-size: 12px; }
+.mic-button.active { border-color: rgba(248,113,113,0.55); color: #fecaca; background: rgba(248,113,113,0.16); }
+.emoji-panel { position: absolute; left: 58px; bottom: calc(100% + 10px); z-index: 12; display: grid; grid-template-columns: repeat(8, 36px); gap: 6px; max-width: min(420px, 92vw); padding: 12px; border: 1px solid rgba(94,234,212,0.25); border-radius: 20px; background: rgba(8,22,27,0.96); backdrop-filter: blur(18px) saturate(130%); box-shadow: var(--shadow); }
+.emoji-panel button { min-height: 34px; padding: 0; border-radius: 11px; font-size: 18px; }
+.attachment-preview, .recording-panel { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 12px; border: 1px solid rgba(94,234,212,0.22); border-radius: 20px; background: rgba(94,234,212,0.08); }
+.attachment-preview strong, .attachment-preview span { display: block; }
+.attachment-preview span { color: var(--muted); font-size: 12px; margin-top: 4px; }
+.attachment-preview img, .attachment-preview video { max-width: min(240px, 100%); max-height: 160px; border-radius: 14px; border: 1px solid rgba(255,255,255,0.16); }
+.attachment-preview .audio-message { grid-column: 1 / -1; }
+.recording-panel { grid-template-columns: auto minmax(180px, 1fr) auto auto; background: linear-gradient(135deg, rgba(20,184,166,0.16), rgba(96,165,250,0.12)); }
+.recording-panel strong { white-space: nowrap; }
 .settings-tabs { position: sticky; top: 18px; z-index: 4; display: flex; flex-wrap: wrap; gap: 8px; border-radius: 24px; padding: 10px; }
 .settings-tabs button { min-height: 42px; border-radius: 16px; }
 .settings-tabs button.active { background: linear-gradient(135deg, rgba(52,211,153,0.88), rgba(20,184,166,0.72)); color: #04231d; font-weight: 900; }
@@ -425,6 +449,9 @@ nav { display: grid; gap: 8px; }
   .inline-form, .integrations-form, .composer, .usage-line, .row, .row.four, .row.six, .integration-row,
   .meta-grid, .meta-grid .token-field, .integration-card-row, .phone-register-form, .webhook-create-form,
   .secret-value-row, .callback-box { grid-template-columns: 1fr; grid-column: auto; }
+  .rich-composer, .attachment-preview, .recording-panel, .audio-message { grid-template-columns: 1fr; }
+  .emoji-panel { left: 0; right: 0; grid-template-columns: repeat(6, 1fr); }
+  .composer-icon, .catalog-button { width: 100%; }
   .webhook-card-head { display: grid; }
 }
 
