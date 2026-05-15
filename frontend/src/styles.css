@@ -521,6 +521,32 @@ nav { display: grid; gap: 8px; width: 100%; }
 .modal-backdrop { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 20px; background: rgba(2, 8, 10, 0.58); backdrop-filter: blur(18px) saturate(140%); animation: fade-in 180ms ease-out; }
 .modal-window { width: min(100%, 620px); border-radius: 30px; padding: 22px; animation: pop-in 220ms ease-out; }
 .modal-form { display: grid; gap: 14px; }
+.catalog-modal { width: min(100%, 860px); max-height: min(86vh, 760px); overflow: auto; }
+.catalog-search { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; margin-bottom: 14px; }
+.catalog-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
+.catalog-product-card {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-height: 246px;
+  padding: 12px;
+  text-align: left;
+  border-radius: 20px;
+  background: rgba(255,255,255,0.055);
+}
+.catalog-product-card img,
+.catalog-image-placeholder {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  border-radius: 16px;
+  object-fit: cover;
+  border: 1px solid rgba(255,255,255,0.12);
+  background: rgba(0,0,0,0.16);
+}
+.catalog-image-placeholder { display: grid; place-items: center; color: var(--muted); font-size: 12px; font-weight: 900; text-transform: uppercase; }
+.catalog-product-card strong { color: var(--ink); line-height: 1.25; }
+.catalog-product-card span { color: var(--ok); font-weight: 900; }
+.catalog-product-card small { color: var(--muted); overflow-wrap: anywhere; }
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes pop-in { from { opacity: 0; transform: translateY(18px) scale(0.96); } to { opacity: 1; transform: translateY(0) scale(1); } }
 @media (max-width: 1180px) { .metric-grid, .settings-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .dashboard-layout { grid-template-columns: 1fr; } }
@@ -549,6 +575,8 @@ nav { display: grid; gap: 8px; width: 100%; }
   .crm-mini-form label, .crm-mini-form .check-row, .crm-mini-form button.primary, .crm-snapshot, .crm-mini-form label:nth-of-type(n) { grid-column: auto; }
   .emoji-panel { left: 0; right: 0; grid-template-columns: repeat(6, 1fr); }
   .whatsapp-emoji-panel { width: min(100%, 360px); }
+  .catalog-search { grid-template-columns: 1fr; }
+  .catalog-grid { grid-template-columns: 1fr; }
   .composer-icon { width: 36px; }
   .webhook-card-head { display: grid; }
 }

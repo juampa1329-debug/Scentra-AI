@@ -333,6 +333,11 @@ function App() {
   const [attachmentKind, setAttachmentKind] = useState("");
   const [attachmentPreview, setAttachmentPreview] = useState("");
   const [attachmentWaveform, setAttachmentWaveform] = useState(EMPTY_WAVEFORM);
+  const [catalogOpen, setCatalogOpen] = useState(false);
+  const [catalogSearch, setCatalogSearch] = useState("");
+  const [catalogProducts, setCatalogProducts] = useState([]);
+  const [catalogLoading, setCatalogLoading] = useState(false);
+  const [catalogError, setCatalogError] = useState("");
   const [emojiOpen, setEmojiOpen] = useState(false);
   const [emojiSearch, setEmojiSearch] = useState("");
   const [recentEmojis, setRecentEmojis] = useState(() => {
@@ -385,6 +390,7 @@ function App() {
   const activeWhatsappIntegration = integrations.find((item) => item.channel === "whatsapp" && item.status === "connected");
   const whatsappDispatchMode = String(activeWhatsappIntegration?.config_json?.dispatch_mode || "stub").toLowerCase();
   const credentialByKey = useMemo(() => Object.fromEntries(apiCredentials.map((item) => [item.credential_key, item])), [apiCredentials]);
+  const commerceCredentialsReady = ["WC_BASE_URL", "WC_CONSUMER_KEY", "WC_CONSUMER_SECRET"].every((key) => credentialByKey[key]?.has_secret);
   const selectedAiProvider = AI_API_PROVIDERS.find((provider) => provider.code === aiConfig.provider) || AI_API_PROVIDERS[0];
   const selectedAiCredential = credentialByKey[selectedAiProvider?.env] || {};
   const selectedFallbackProvider = AI_API_PROVIDERS.find((provider) => provider.code === aiConfig.fallbackProvider) || null;
@@ -887,10 +893,47 @@ function App() {
       return next;
     });
   };
+  const loadCatalogProducts = async (search = catalogSearch) => {
+    setCatalogLoading(true);
+    setCatalogError("");
+    try {
+      const params = new URLSearchParams({ limit: "24" });
+      if (String(search || "").trim()) params.set("search", String(search).trim());
+      const data = await apiCall(`/saas/v1/commerce/products?${params.toString()}`);
+      setCatalogProducts(data?.products || []);
+      setCatalogOpen(true);
+      showStatus((data?.products || []).length ? "Catalogo WooCommerce cargado." : "WooCommerce respondió, pero no devolvió productos para esa búsqueda.", "ok");
+    } catch (err) {
+      const message = String(err.message || err);
+      setCatalogError(message);
+      setCatalogOpen(true);
+      showStatus(message, "error");
+    } finally {
+      setCatalogLoading(false);
+    }
+  };
+  const openCatalogPicker = () => {
+    if (!commerceCredentialsReady) {
+      showStatus("Conecta WC_BASE_URL, WC_CONSUMER_KEY y WC_CONSUMER_SECRET en Ajustes > APIs para usar el catalogo.", "neutral");
+      setActiveView("settings");
+      setSettingsTab("apis");
+      return;
+    }
+    loadCatalogProducts("");
+  };
+  const insertCatalogProduct = (product) => {
+    const price = product.price ? ` - ${product.price}` : "";
+    const sku = product.sku ? `\nSKU: ${product.sku}` : "";
+    const url = product.permalink ? `\n${product.permalink}` : "";
+    const text = `${product.name || "Producto"}${price}${sku}${url}`;
+    setReplyText((prev) => `${prev}${prev.trim() ? "\n\n" : ""}${text}`);
+    setCatalogOpen(false);
+    showStatus("Producto insertado en el mensaje. Cuando activemos mensajes de catalogo nativos, saldra como tarjeta interactiva.", "ok");
+  };
   const openAttachmentPicker = (kind) => {
     setAttachMenuOpen(false);
     if (kind === "catalog") {
-      showStatus("Catalogo disponible cuando conectemos WooCommerce o Shopify en integraciones.", "neutral");
+      openCatalogPicker();
       return;
     }
     const acceptMap = {
@@ -1810,6 +1853,29 @@ function App() {
               <label>Nuevo valor<input type="password" autoFocus placeholder="Pegar API key / token / secreto" value={credentialModal.value || ""} onChange={(event) => setCredentialModal((prev) => ({ ...(prev || {}), value: event.target.value }))} /></label>
               <div className="panel-actions"><button type="submit" className="primary" disabled={credentialSaving}>{credentialSaving ? "Guardando..." : "Guardar cifrado"}</button><button type="button" onClick={() => setCredentialModal(null)}>Cancelar</button></div>
             </form>
+          </section>
+        </div>
+      ) : null}
+      {catalogOpen ? (
+        <div className="modal-backdrop" role="presentation" onMouseDown={() => setCatalogOpen(false)}>
+          <section className="modal-window glass-card catalog-modal" role="dialog" aria-modal="true" aria-label="Catalogo WooCommerce" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="panel-head"><div><h2>Catalogo WooCommerce</h2><span>Selecciona un producto para insertarlo en la respuesta</span></div><button type="button" onClick={() => setCatalogOpen(false)}>Cerrar</button></div>
+            <form className="catalog-search" onSubmit={(event) => { event.preventDefault(); loadCatalogProducts(catalogSearch); }}>
+              <input value={catalogSearch} onChange={(event) => setCatalogSearch(event.target.value)} placeholder="Buscar producto por nombre o SKU..." />
+              <button type="submit" className="primary" disabled={catalogLoading}>{catalogLoading ? "Buscando..." : "Buscar"}</button>
+            </form>
+            {catalogError ? <div className="status error">{catalogError}</div> : null}
+            <div className="catalog-grid">
+              {catalogProducts.map((product) => (
+                <button type="button" className="catalog-product-card" key={product.id || product.permalink || product.name} onClick={() => insertCatalogProduct(product)}>
+                  {product.image_url ? <img src={product.image_url} alt={product.name} /> : <span className="catalog-image-placeholder">Producto</span>}
+                  <strong>{product.name}</strong>
+                  <span>{product.price ? `$ ${product.price}` : "Sin precio visible"}</span>
+                  <small>{product.stock_status || "stock"}{product.sku ? ` / SKU ${product.sku}` : ""}</small>
+                </button>
+              ))}
+              {!catalogLoading && catalogProducts.length === 0 ? <div className="empty">Sin productos para mostrar. Prueba otra busqueda o revisa que WooCommerce tenga productos publicados.</div> : null}
+            </div>
           </section>
         </div>
       ) : null}

@@ -14,6 +14,7 @@ from app_saas.auth.router import router as auth_router
 from app_saas.billing.router import router as billing_router
 from app_saas.broadcasts.router import router as broadcasts_router
 from app_saas.campaigns.router import router as campaigns_router
+from app_saas.commerce.router import router as commerce_router
 from app_saas.config import settings
 from app_saas.crm.router import router as crm_router
 from app_saas.health.router import router as health_router
@@ -137,6 +138,7 @@ app.include_router(auth_router, prefix="/saas/v1")
 app.include_router(tenants_router, prefix="/saas/v1")
 app.include_router(crm_router, prefix="/saas/v1")
 app.include_router(campaigns_router, prefix="/saas/v1")
+app.include_router(commerce_router, prefix="/saas/v1")
 app.include_router(broadcasts_router, prefix="/saas/v1")
 app.include_router(ads_router, prefix="/saas/v1")
 app.include_router(integrations_router, prefix="/saas/v1")
