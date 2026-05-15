@@ -611,6 +611,34 @@ select optgroup {
 .model-loader .row-actions {
   margin: 0;
 }
+.linked-model-card {
+  display: grid;
+  align-content: center;
+  min-height: 74px;
+  border: 1px solid rgba(148,163,184,0.22);
+  border-radius: 18px;
+  background: linear-gradient(135deg, rgba(8, 47, 73, 0.28), rgba(20, 184, 166, 0.10));
+  padding: 12px 14px;
+}
+.linked-model-card.ready {
+  border-color: rgba(52,211,153,0.40);
+  box-shadow: inset 0 0 0 1px rgba(45,212,191,0.06), 0 14px 40px rgba(20,184,166,0.10);
+}
+.linked-model-card.missing {
+  border-color: rgba(251,191,36,0.26);
+  background: linear-gradient(135deg, rgba(120, 53, 15, 0.16), rgba(15, 23, 42, 0.16));
+}
+.linked-model-card span,
+.linked-model-card small {
+  color: var(--muted);
+  font-size: 12px;
+}
+.linked-model-card strong {
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+  color: var(--ink);
+  font-size: 15px;
+}
 .api-card strong,
 .api-card span,
 .api-card small {

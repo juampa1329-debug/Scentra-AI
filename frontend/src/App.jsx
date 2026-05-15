@@ -257,6 +257,7 @@ function App() {
   const audioContextRef = useRef(null);
   const attachmentSignatureRef = useRef("");
   const lastUnreadTotalRef = useRef(0);
+  const refreshPromiseRef = useRef(null);
   const [accessToken, setAccessToken] = useState(() => localStorage.getItem(TOKEN_KEY) || "");
   const [refreshToken, setRefreshToken] = useState(() => localStorage.getItem(REFRESH_KEY) || "");
   const [mode, setMode] = useState("login");
@@ -316,12 +317,6 @@ function App() {
   const [status, setStatus] = useState("");
   const [statusTone, setStatusTone] = useState("neutral");
 
-  const headers = useMemo(() => {
-    const base = { "Content-Type": "application/json" };
-    if (accessToken) base.Authorization = `Bearer ${accessToken}`;
-    return base;
-  }, [accessToken]);
-
   const activeCompany = tenants.find((company) => company.tenant_id === me?.tenant_id);
   const currentUserName = userDisplayName(me);
   const billingPlan = billingOverview?.plan || {};
@@ -354,6 +349,15 @@ function App() {
   const activeWhatsappIntegration = integrations.find((item) => item.channel === "whatsapp" && item.status === "connected");
   const whatsappDispatchMode = String(activeWhatsappIntegration?.config_json?.dispatch_mode || "stub").toLowerCase();
   const credentialByKey = useMemo(() => Object.fromEntries(apiCredentials.map((item) => [item.credential_key, item])), [apiCredentials]);
+  const selectedAiProvider = AI_API_PROVIDERS.find((provider) => provider.code === aiConfig.provider) || AI_API_PROVIDERS[0];
+  const selectedAiCredential = credentialByKey[selectedAiProvider?.env] || {};
+  const selectedFallbackProvider = AI_API_PROVIDERS.find((provider) => provider.code === aiConfig.fallbackProvider) || null;
+  const selectedFallbackCredential = selectedFallbackProvider ? credentialByKey[selectedFallbackProvider.env] || {} : {};
+  const selectedTtsProvider = TTS_API_PROVIDERS.find((provider) => provider.code === aiConfig.ttsProvider) || TTS_API_PROVIDERS[0];
+  const selectedTtsCredential = credentialByKey[selectedTtsProvider?.env] || {};
+  const activeAiModel = selectedAiCredential.selected_model || "";
+  const activeFallbackModel = selectedFallbackCredential.selected_model || "";
+  const activeTtsModel = selectedTtsCredential.selected_model || "";
   const availableInboxChannels = Array.from(new Set([
     ...integrations.filter((item) => item.status === "connected").map((item) => String(item.channel || "").toLowerCase()),
     ...conversations.map((item) => String(item.channel || "").toLowerCase()),
@@ -399,16 +403,55 @@ function App() {
   };
 
   const showStatus = (text, tone = "neutral") => { setStatus(text); setStatusTone(tone); };
+
+  const refreshAccessToken = async () => {
+    if (!API_BASE) throw new Error("VITE_API_BASE requerido");
+    const storedRefreshToken = refreshToken || localStorage.getItem(REFRESH_KEY) || "";
+    if (!storedRefreshToken) throw new Error("session_refresh_missing");
+    if (!refreshPromiseRef.current) {
+      refreshPromiseRef.current = fetch(`${API_BASE}/saas/v1/auth/refresh`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ refresh_token: storedRefreshToken, tenant_id: me?.tenant_id || "" }),
+      })
+        .then(async (res) => {
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(formatApiError(data, `HTTP ${res.status}`));
+          setTokens(data);
+          return data?.access_token || "";
+        })
+        .finally(() => { refreshPromiseRef.current = null; });
+    }
+    return refreshPromiseRef.current;
+  };
+
   const apiCall = async (path, options = {}) => {
     if (!API_BASE) throw new Error("VITE_API_BASE requerido");
-    const requestHeaders = { ...headers, ...(options.headers || {}) };
-    if (options.body instanceof FormData) delete requestHeaders["Content-Type"];
-    const res = await fetch(`${API_BASE}${path}`, { ...options, headers: requestHeaders });
-    const data = await res.json().catch(() => ({}));
+    const skipAuthRefreshPath = ["/saas/v1/auth/login", "/saas/v1/auth/register", "/saas/v1/auth/refresh"].some((prefix) => String(path || "").startsWith(prefix));
+    const runFetch = async (tokenOverride = null) => {
+      const requestHeaders = { "Content-Type": "application/json", ...(options.headers || {}) };
+      const bearer = tokenOverride ?? accessToken;
+      if (bearer) requestHeaders.Authorization = `Bearer ${bearer}`;
+      if (options.body instanceof FormData) delete requestHeaders["Content-Type"];
+      const response = await fetch(`${API_BASE}${path}`, { ...options, headers: requestHeaders });
+      const payload = await response.json().catch(() => ({}));
+      return { response, payload };
+    };
+
+    let { response: res, payload: data } = await runFetch();
+    if (res.status === 401 && !skipAuthRefreshPath && !options.skipAuthRefresh) {
+      try {
+        const nextAccessToken = await refreshAccessToken();
+        if (nextAccessToken) ({ response: res, payload: data } = await runFetch(nextAccessToken));
+      } catch {
+        clearTokens();
+        throw new Error("Sesion vencida. Ingresa nuevamente para continuar.");
+      }
+    }
+    if (res.status === 401 && !skipAuthRefreshPath) clearTokens();
     if (!res.ok) throw new Error(formatApiError(data, `HTTP ${res.status}`));
     return data;
   };
-
   const setTokens = (data) => {
     const nextAccess = data?.access_token || "";
     const nextRefresh = data?.refresh_token || refreshToken || "";
@@ -971,7 +1014,7 @@ function App() {
     }
   };
   const changePlanDev = async (planCode) => { try { const data = await apiCall("/saas/v1/billing/dev/change-plan", { method: "POST", body: JSON.stringify({ plan_code: planCode }) }); setBillingOverview(data); showStatus(`Plan actualizado a ${planCode}`, "ok"); await loadSession(); } catch (err) { showStatus(String(err.message || err), "error"); } };
-  const saveAiLocal = () => showStatus("Ajustes IA guardados localmente. Falta conectar endpoint persistente.", "ok");
+  const saveAiLocal = () => showStatus("Ajustes IA guardados. Credenciales y modelos se administran desde Ajustes > APIs.", "ok");
   const saveProfileLocal = () => showStatus("Perfil preparado. Falta conectar persistencia de usuario y foto.", "ok");
   const saveSecurityLocal = () => showStatus("Seguridad preparada. Cambio de clave y 2FA requieren endpoints backend.", "neutral");
   const openCredentialModal = (provider, credentialKey = provider.env) => {
@@ -1289,7 +1332,72 @@ function App() {
         ) : (
           <section className="settings-page">
             <div className="settings-tabs glass-card">{[["ia","IA"],["channels","Canales"],["apis","APIs"],["users","Usuarios"],["profile","Perfil"],["security","Seguridad"],["plan","Plan"]].map(([key,label]) => <button key={key} type="button" className={settingsTab === key ? "active" : ""} onClick={() => setSettingsTab(key)}>{label}</button>)}</div>
-            {settingsTab === "ia" ? <div className="settings-grid"><article className="panel glass-card"><div className="panel-head"><h2>Ajustes IA</h2><span>modelo y comportamiento</span></div><label className="check-row"><input type="checkbox" checked={aiConfig.enabled} onChange={(event) => setAiConfig((prev) => ({ ...prev, enabled: event.target.checked }))} /> IA habilitada</label><div className="form-grid two"><label>Provider<select value={aiConfig.provider} onChange={(event) => setAiConfig((prev) => ({ ...prev, provider: event.target.value }))}><option value="google">Google / Gemini</option><option value="groq">Groq</option><option value="mistral">Mistral</option><option value="openrouter">OpenRouter</option></select></label><label>Modelo<input value={aiConfig.model} onChange={(event) => setAiConfig((prev) => ({ ...prev, model: event.target.value }))} /></label></div><label>System prompt<textarea rows={7} value={aiConfig.systemPrompt} onChange={(event) => setAiConfig((prev) => ({ ...prev, systemPrompt: event.target.value }))} /></label><div className="form-grid two"><label>Max tokens<input value={aiConfig.maxTokens} onChange={(event) => setAiConfig((prev) => ({ ...prev, maxTokens: event.target.value }))} /></label><label>Temperatura<input value={aiConfig.temperature} onChange={(event) => setAiConfig((prev) => ({ ...prev, temperature: event.target.value }))} /></label><label>Fallback provider<input value={aiConfig.fallbackProvider} onChange={(event) => setAiConfig((prev) => ({ ...prev, fallbackProvider: event.target.value }))} /></label><label>Fallback model<input value={aiConfig.fallbackModel} onChange={(event) => setAiConfig((prev) => ({ ...prev, fallbackModel: event.target.value }))} /></label></div><div className="panel-actions"><button type="button" className="primary" onClick={saveAiLocal}>Guardar ajustes</button><button type="button" onClick={() => setAiTesterOpen(true)}>Probar IA</button></div></article><article className="panel glass-card"><div className="panel-head"><h2>Voz / TTS WhatsApp</h2><span>humanizacion</span></div><label className="check-row"><input type="checkbox" checked={aiConfig.voiceEnabled} onChange={(event) => setAiConfig((prev) => ({ ...prev, voiceEnabled: event.target.checked }))} /> Voz habilitada</label><label className="check-row"><input type="checkbox" checked={aiConfig.preferVoice} onChange={(event) => setAiConfig((prev) => ({ ...prev, preferVoice: event.target.checked }))} /> Preferir nota de voz</label><div className="form-grid two"><label>Proveedor TTS<select value={aiConfig.ttsProvider} onChange={(event) => setAiConfig((prev) => ({ ...prev, ttsProvider: event.target.value }))}><option value="google">Google Cloud TTS</option><option value="elevenlabs">ElevenLabs</option><option value="piper">Piper local</option></select></label><label>Voice ID<input value={aiConfig.voiceId} onChange={(event) => setAiConfig((prev) => ({ ...prev, voiceId: event.target.value }))} /></label><label>Voz<input value={aiConfig.voiceName} onChange={(event) => setAiConfig((prev) => ({ ...prev, voiceName: event.target.value }))} /></label><label>Modelo<input value={aiConfig.voiceModel} onChange={(event) => setAiConfig((prev) => ({ ...prev, voiceModel: event.target.value }))} /></label></div><label>Prompt de voz<textarea rows={4} value={aiConfig.voicePrompt} onChange={(event) => setAiConfig((prev) => ({ ...prev, voicePrompt: event.target.value }))} /></label></article><article className="panel glass-card"><div className="panel-head"><h2>Knowledge Base</h2><span>fuentes</span></div><div className="inline-form compact"><select><option>Mostrar: Todos</option></select><button type="button">Refrescar</button></div><label>Notas<input placeholder="ej: catalogo 2026, politicas de envio..." /></label><div className="upload-zone">Arrastra PDF/TXT aqui o elige archivo</div><h3>Fuentes Web</h3><label>URL<input placeholder="https://tutienda.com/pagina-o-blog" /></label><button type="button">Anadir fuente web</button></article></div> : null}
+            {settingsTab === "ia" ? (
+              <div className="settings-grid">
+                <article className="panel glass-card">
+                  <div className="panel-head"><h2>Ajustes IA</h2><span>modelo vinculado desde APIs</span></div>
+                  <label className="check-row"><input type="checkbox" checked={aiConfig.enabled} onChange={(event) => setAiConfig((prev) => ({ ...prev, enabled: event.target.checked }))} /> IA habilitada</label>
+                  <div className="form-grid two">
+                    <label>Proveedor
+                      <select value={aiConfig.provider} onChange={(event) => setAiConfig((prev) => ({ ...prev, provider: event.target.value }))}>
+                        {AI_API_PROVIDERS.map((provider) => <option key={provider.code} value={provider.code}>{provider.name}</option>)}
+                      </select>
+                    </label>
+                    <div className={`linked-model-card ${activeAiModel ? "ready" : "missing"}`}>
+                      <span>Modelo activo</span>
+                      <strong>{activeAiModel || "Sin modelo seleccionado"}</strong>
+                      <small>{selectedAiCredential.has_secret ? `API guardada ${selectedAiCredential.secret_hint || "cifrada"}` : `Agrega la API key de ${selectedAiProvider?.name || "IA"} en Ajustes > APIs`}</small>
+                    </div>
+                  </div>
+                  <label>System prompt<textarea rows={7} value={aiConfig.systemPrompt} onChange={(event) => setAiConfig((prev) => ({ ...prev, systemPrompt: event.target.value }))} /></label>
+                  <div className="form-grid two">
+                    <label>Max tokens<input value={aiConfig.maxTokens} onChange={(event) => setAiConfig((prev) => ({ ...prev, maxTokens: event.target.value }))} /></label>
+                    <label>Temperatura<input value={aiConfig.temperature} onChange={(event) => setAiConfig((prev) => ({ ...prev, temperature: event.target.value }))} /></label>
+                    <label>Fallback provider
+                      <select value={aiConfig.fallbackProvider} onChange={(event) => setAiConfig((prev) => ({ ...prev, fallbackProvider: event.target.value }))}>
+                        {AI_API_PROVIDERS.map((provider) => <option key={provider.code} value={provider.code}>{provider.name}</option>)}
+                      </select>
+                    </label>
+                    <div className={`linked-model-card ${activeFallbackModel ? "ready" : "missing"}`}>
+                      <span>Modelo fallback</span>
+                      <strong>{activeFallbackModel || "Sin modelo fallback"}</strong>
+                      <small>{selectedFallbackCredential.has_secret ? `API guardada ${selectedFallbackCredential.secret_hint || "cifrada"}` : "Configura el proveedor fallback en APIs si quieres respaldo automatico."}</small>
+                    </div>
+                  </div>
+                  <p className="soft-copy">Los modelos se eligen en Ajustes &gt; APIs con Cargar modelos y Guardar modelo. Aqui solo se selecciona el proveedor y el comportamiento.</p>
+                  <div className="panel-actions"><button type="button" className="primary" onClick={saveAiLocal}>Guardar ajustes</button><button type="button" onClick={() => setAiTesterOpen(true)}>Probar IA</button></div>
+                </article>
+                <article className="panel glass-card">
+                  <div className="panel-head"><h2>Voz / TTS WhatsApp</h2><span>humanizacion</span></div>
+                  <label className="check-row"><input type="checkbox" checked={aiConfig.voiceEnabled} onChange={(event) => setAiConfig((prev) => ({ ...prev, voiceEnabled: event.target.checked }))} /> Voz habilitada</label>
+                  <label className="check-row"><input type="checkbox" checked={aiConfig.preferVoice} onChange={(event) => setAiConfig((prev) => ({ ...prev, preferVoice: event.target.checked }))} /> Preferir nota de voz</label>
+                  <div className="form-grid two">
+                    <label>Proveedor TTS
+                      <select value={aiConfig.ttsProvider} onChange={(event) => setAiConfig((prev) => ({ ...prev, ttsProvider: event.target.value }))}>
+                        {TTS_API_PROVIDERS.map((provider) => <option key={provider.code} value={provider.code}>{provider.name}</option>)}
+                      </select>
+                    </label>
+                    <div className={`linked-model-card ${activeTtsModel ? "ready" : "missing"}`}>
+                      <span>Voz/modelo activo</span>
+                      <strong>{activeTtsModel || "Sin voz seleccionada"}</strong>
+                      <small>{selectedTtsCredential.has_secret ? `Credencial guardada ${selectedTtsCredential.secret_hint || "cifrada"}` : `Agrega ${selectedTtsProvider?.name || "TTS"} en Ajustes > APIs`}</small>
+                    </div>
+                    <label>Voice ID manual opcional<input value={aiConfig.voiceId} onChange={(event) => setAiConfig((prev) => ({ ...prev, voiceId: event.target.value }))} /></label>
+                    <label>Nombre visible de voz<input value={aiConfig.voiceName} onChange={(event) => setAiConfig((prev) => ({ ...prev, voiceName: event.target.value }))} /></label>
+                  </div>
+                  <label>Prompt de voz<textarea rows={4} value={aiConfig.voicePrompt} onChange={(event) => setAiConfig((prev) => ({ ...prev, voicePrompt: event.target.value }))} /></label>
+                </article>
+                <article className="panel glass-card">
+                  <div className="panel-head"><h2>Knowledge Base</h2><span>fuentes</span></div>
+                  <div className="inline-form compact"><select><option>Mostrar: Todos</option></select><button type="button">Refrescar</button></div>
+                  <label>Notas<input placeholder="ej: catalogo 2026, politicas de envio..." /></label>
+                  <div className="upload-zone">Arrastra PDF/TXT aqui o elige archivo</div>
+                  <h3>Fuentes Web</h3>
+                  <label>URL<input placeholder="https://tutienda.com/pagina-o-blog" /></label>
+                  <button type="button">Anadir fuente web</button>
+                </article>
+              </div>
+            ) : null}
             {settingsTab === "channels" ? (
               <div className="settings-stack channels-settings">
                 <article className="panel glass-card integration-card">
@@ -1524,9 +1632,8 @@ function App() {
           <section className="modal-window glass-card" role="dialog" aria-modal="true" aria-label="Actualizar credencial" onMouseDown={(event) => event.stopPropagation()}>
             <div className="panel-head"><div><h2>{credentialModal.name}</h2><span>{credentialModal.credential_key}</span></div><button type="button" onClick={() => setCredentialModal(null)}>Cerrar</button></div>
             <form onSubmit={saveCredentialModal} className="modal-form">
-              <p className="soft-copy">Pega el valor completo solo aqui. Al guardar se cifra en backend y desaparece del navegador; luego solo veras una pista.</p>
+              <p className="soft-copy">Pega el valor completo solo aqui. Al guardar se cifra en backend y desaparece del navegador; luego solo veras una pista. Los modelos se eligen despues con Cargar modelos.</p>
               <label>Nuevo valor<input type="password" autoFocus placeholder="Pegar API key / token / secreto" value={credentialModal.value || ""} onChange={(event) => setCredentialModal((prev) => ({ ...(prev || {}), value: event.target.value }))} /></label>
-              <label>Modelo preferido opcional<input placeholder="ej: gemini-2.5-flash" value={credentialModal.selected_model || ""} onChange={(event) => setCredentialModal((prev) => ({ ...(prev || {}), selected_model: event.target.value }))} /></label>
               <div className="panel-actions"><button type="submit" className="primary" disabled={credentialSaving}>{credentialSaving ? "Guardando..." : "Guardar cifrado"}</button><button type="button" onClick={() => setCredentialModal(null)}>Cancelar</button></div>
             </form>
           </section>
