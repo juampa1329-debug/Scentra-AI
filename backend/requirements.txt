@@ -8,3 +8,4 @@ PyJWT==2.9.0
 argon2-cffi==23.1.0
 python-multipart==0.0.12
 cryptography==42.0.8
+imageio-ffmpeg==0.5.1

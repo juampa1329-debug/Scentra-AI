@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import urllib.error
@@ -16,6 +17,11 @@ from sqlalchemy import text
 from app_saas.billing.limits import tenant_entitlements
 from app_saas.db import db_session, set_tenant_context
 from app_saas.shared.secrets import decrypt_secret
+
+try:
+    import imageio_ffmpeg
+except Exception:  # pragma: no cover - optional runtime fallback
+    imageio_ffmpeg = None
 
 
 class DispatchPermanentError(Exception):
@@ -337,6 +343,23 @@ def _meta_upload_mime(content_type: str) -> str:
     return str(content_type or "application/octet-stream").split(";", 1)[0].strip().lower() or "application/octet-stream"
 
 
+def _ffmpeg_executable() -> str:
+    configured = str(os.getenv("FFMPEG_BINARY") or "").strip()
+    if configured:
+        return configured
+    system_binary = shutil.which("ffmpeg")
+    if system_binary:
+        return system_binary
+    if imageio_ffmpeg is not None:
+        try:
+            bundled = str(imageio_ffmpeg.get_ffmpeg_exe() or "").strip()
+            if bundled:
+                return bundled
+        except Exception:
+            return ""
+    return ""
+
+
 def _prepare_audio_asset_for_meta(asset: dict[str, Any]) -> dict[str, Any]:
     content_type = _meta_upload_mime(str(asset.get("content_type") or ""))
     if not content_type.startswith("audio/"):
@@ -351,6 +374,9 @@ def _prepare_audio_asset_for_meta(asset: dict[str, Any]) -> dict[str, Any]:
         raise DispatchPermanentError("audio_file_empty")
 
     suffix = ".webm" if "webm" in content_type else ".audio"
+    ffmpeg_binary = _ffmpeg_executable()
+    if not ffmpeg_binary:
+        raise DispatchPermanentError("audio_transcode_unavailable_ffmpeg_required")
     try:
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / f"input{suffix}"
@@ -358,7 +384,7 @@ def _prepare_audio_asset_for_meta(asset: dict[str, Any]) -> dict[str, Any]:
             source.write_bytes(raw)
             subprocess.run(
                 [
-                    "ffmpeg",
+                    ffmpeg_binary,
                     "-y",
                     "-i",
                     str(source),

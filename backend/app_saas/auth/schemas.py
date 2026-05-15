@@ -49,6 +49,7 @@ class TokenOut(BaseModel):
 class MeOut(BaseModel):
     user_id: str
     email: str
+    full_name: str = ""
     tenant_id: str
     role: str
     tenants: list[TenantMembershipOut] = []

@@ -24,6 +24,17 @@ class NormalizedMessage:
     display_name: str = ""
 
 
+@dataclass
+class NormalizedStatus:
+    channel: str
+    provider_message_id: str
+    status: str
+    timestamp: str = ""
+    recipient_id: str = ""
+    error: str = ""
+    payload: dict[str, Any] | None = None
+
+
 def _as_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
@@ -72,6 +83,26 @@ def _contact_name(value: dict[str, Any], sender: str) -> str:
     return ""
 
 
+def _status_timestamp(value: Any) -> str:
+    raw = _clean(value, 40)
+    if not raw:
+        return ""
+    if raw.isdigit():
+        try:
+            return datetime.fromtimestamp(int(raw), tz=timezone.utc).isoformat()
+        except Exception:
+            return raw
+    return raw
+
+
+def _status_error(status_payload: dict[str, Any]) -> str:
+    errors = _as_list(status_payload.get("errors"))
+    if not errors:
+        return ""
+    first = _as_dict(errors[0])
+    return _clean(first.get("message") or first.get("title") or first.get("code") or errors[0], 500)
+
+
 def _normalize_whatsapp_payload(provider: str, payload: dict[str, Any], fallback_event_id: str) -> list[NormalizedMessage]:
     out: list[NormalizedMessage] = []
     for entry in _as_list(payload.get("entry")):
@@ -95,6 +126,30 @@ def _normalize_whatsapp_payload(provider: str, payload: dict[str, Any], fallback
                         media_id=media_id,
                         mime_type=mime_type,
                         display_name=_contact_name(value, sender),
+                    )
+                )
+    return out
+
+
+def _normalize_whatsapp_statuses(provider: str, payload: dict[str, Any]) -> list[NormalizedStatus]:
+    out: list[NormalizedStatus] = []
+    for entry in _as_list(payload.get("entry")):
+        for change in _as_list(_as_dict(entry).get("changes")):
+            value = _as_dict(_as_dict(change).get("value"))
+            for status_payload in _as_list(value.get("statuses")):
+                item = _as_dict(status_payload)
+                provider_message_id = _clean(item.get("id"), 240)
+                if not provider_message_id:
+                    continue
+                out.append(
+                    NormalizedStatus(
+                        channel="whatsapp" if provider in {"whatsapp", "meta"} else provider,
+                        provider_message_id=provider_message_id,
+                        status=_clean(item.get("status") or "sent", 40).lower(),
+                        timestamp=_status_timestamp(item.get("timestamp")),
+                        recipient_id=_clean(item.get("recipient_id"), 120),
+                        error=_status_error(item),
+                        payload=item,
                     )
                 )
     return out
@@ -132,6 +187,27 @@ def normalize_event(provider: str, payload: dict[str, Any], fallback_event_id: s
     if messages:
         return messages
     return _normalize_generic_payload(provider_clean, payload, fallback_event_id)
+
+
+def normalize_status_events(provider: str, payload: dict[str, Any]) -> list[NormalizedStatus]:
+    provider_clean = _clean(provider, 50).lower()
+    if provider_clean in {"whatsapp", "meta", "facebook", "instagram"}:
+        return _normalize_whatsapp_statuses(provider_clean, payload)
+    provider_message_id = _clean(payload.get("message_id") or payload.get("wa_message_id") or payload.get("id"), 240)
+    status = _clean(payload.get("status"), 40).lower()
+    if provider_message_id and status in {"sent", "delivered", "read", "failed"}:
+        return [
+            NormalizedStatus(
+                channel=provider_clean,
+                provider_message_id=provider_message_id,
+                status=status,
+                timestamp=_status_timestamp(payload.get("timestamp")),
+                recipient_id=_clean(payload.get("recipient_id") or payload.get("to"), 120),
+                error=_status_error(payload),
+                payload=payload,
+            )
+        ]
+    return []
 
 
 def _period_yyyymm() -> str:
@@ -236,11 +312,118 @@ def _upsert_message(conn, tenant_id: str, event_id: str, payload: dict[str, Any]
     }
 
 
+def _apply_delivery_status(conn, tenant_id: str, status_event: NormalizedStatus) -> int:
+    status = status_event.status if status_event.status in {"sent", "delivered", "read", "failed"} else "sent"
+    patch = {
+        "delivery_status": status,
+        "delivery_timestamp": status_event.timestamp,
+        "delivery_error": status_event.error,
+        "delivery_provider_payload": status_event.payload or {},
+    }
+    rows = conn.execute(
+        text(
+            """
+            WITH outbound_matches AS (
+                SELECT message_id
+                FROM saas_outbound_messages
+                WHERE tenant_id = CAST(:tenant_id AS uuid)
+                  AND message_id IS NOT NULL
+                  AND (
+                    payload_json->'provider_response'->>'provider_message_id' = :provider_message_id
+                    OR payload_json->'provider_response'->>'id' = :provider_message_id
+                    OR payload_json->'provider_response'->'messages'->0->>'id' = :provider_message_id
+                  )
+            ),
+            updated AS (
+                UPDATE saas_messages
+                SET payload_json = payload_json || CAST(:patch_json AS jsonb)
+                WHERE tenant_id = CAST(:tenant_id AS uuid)
+                  AND direction = 'out'
+                  AND (
+                    payload_json->>'provider_message_id' = :provider_message_id
+                    OR external_message_id = :provider_message_id
+                    OR id IN (SELECT message_id FROM outbound_matches)
+                  )
+                RETURNING id
+            )
+            SELECT id::text FROM updated
+            """
+        ),
+        {
+            "tenant_id": tenant_id,
+            "provider_message_id": status_event.provider_message_id,
+            "patch_json": json.dumps(patch),
+        },
+    ).mappings().all()
+    message_ids = [str(row["id"]) for row in rows]
+
+    conn.execute(
+        text(
+            """
+            UPDATE saas_outbound_messages
+            SET status = :status,
+                error = CASE WHEN :status = 'failed' THEN :error ELSE error END,
+                payload_json = payload_json || CAST(:patch_json AS jsonb),
+                updated_at = NOW()
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND (
+                message_id = ANY(CAST(:message_ids AS uuid[]))
+                OR payload_json->'provider_response'->>'provider_message_id' = :provider_message_id
+                OR payload_json->'provider_response'->>'id' = :provider_message_id
+                OR payload_json->'provider_response'->'messages'->0->>'id' = :provider_message_id
+              )
+            """
+        ),
+        {
+            "tenant_id": tenant_id,
+            "status": status,
+            "error": status_event.error[:500],
+            "provider_message_id": status_event.provider_message_id,
+            "message_ids": message_ids,
+            "patch_json": json.dumps(patch),
+        },
+    )
+    conn.execute(
+        text(
+            """
+            UPDATE saas_broadcast_recipients
+            SET status = :status,
+                error = CASE WHEN :status = 'failed' THEN :error ELSE error END,
+                updated_at = NOW()
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND (
+                provider_message_id = :provider_message_id
+                OR outbound_id IN (
+                    SELECT id
+                    FROM saas_outbound_messages
+                    WHERE tenant_id = CAST(:tenant_id AS uuid)
+                      AND (
+                        message_id = ANY(CAST(:message_ids AS uuid[]))
+                        OR payload_json->'provider_response'->>'provider_message_id' = :provider_message_id
+                        OR payload_json->'provider_response'->>'id' = :provider_message_id
+                        OR payload_json->'provider_response'->'messages'->0->>'id' = :provider_message_id
+                      )
+                )
+              )
+            """
+        ),
+        {
+            "tenant_id": tenant_id,
+            "status": status,
+            "error": status_event.error[:500],
+            "provider_message_id": status_event.provider_message_id,
+            "message_ids": message_ids,
+        },
+    )
+    return len(message_ids)
+
+
 def process_due_webhook_events(limit: int = 25, tenant_id: str | None = None) -> dict[str, int]:
     processed = 0
     ignored = 0
     errors = 0
     messages_inserted = 0
+    statuses_updated = 0
     triggers_matched = 0
     trigger_errors = 0
 
@@ -275,7 +458,8 @@ def process_due_webhook_events(limit: int = 25, tenant_id: str | None = None) ->
 
             try:
                 messages = normalize_event(provider, payload, source_event_id)
-                if not messages:
+                statuses = normalize_status_events(provider, payload)
+                if not messages and not statuses:
                     conn.execute(
                         text(
                             """
@@ -290,6 +474,7 @@ def process_due_webhook_events(limit: int = 25, tenant_id: str | None = None) ->
                     continue
 
                 inserted_for_event = 0
+                updated_statuses_for_event = 0
                 for message in messages:
                     saved = _upsert_message(conn, tenant_id, source_event_id, payload, message)
                     if saved["inserted"]:
@@ -305,6 +490,8 @@ def process_due_webhook_events(limit: int = 25, tenant_id: str | None = None) ->
                             triggers_matched += 1
                         if trigger_result.get("ok") is not True:
                             trigger_errors += 1
+                for status_event in statuses:
+                    updated_statuses_for_event += _apply_delivery_status(conn, tenant_id, status_event)
 
                 conn.execute(
                     text(
@@ -334,6 +521,7 @@ def process_due_webhook_events(limit: int = 25, tenant_id: str | None = None) ->
 
                 processed += 1
                 messages_inserted += inserted_for_event
+                statuses_updated += updated_statuses_for_event
             except Exception as exc:
                 conn.execute(
                     text(
@@ -352,6 +540,7 @@ def process_due_webhook_events(limit: int = 25, tenant_id: str | None = None) ->
         "ignored": ignored,
         "errors": errors,
         "messages_inserted": messages_inserted,
+        "statuses_updated": statuses_updated,
         "triggers_matched": triggers_matched,
         "trigger_errors": trigger_errors,
     }

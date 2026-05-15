@@ -896,6 +896,7 @@ def list_messages(
                     text,
                     media_id,
                     mime_type,
+                    payload_json,
                     created_at::text
                 FROM saas_messages
                 WHERE tenant_id = CAST(:tenant_id AS uuid)

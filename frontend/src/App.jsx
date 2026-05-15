@@ -151,17 +151,111 @@ const channelLabel = (channel) => ({
   meta: "Meta",
 }[String(channel || "").toLowerCase()] || String(channel || "Canal"));
 
+const asObject = (value) => {
+  if (value && typeof value === "object" && !Array.isArray(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+  return {};
+};
+
+const messageDeliveryState = (message) => {
+  if (String(message?.direction || "").toLowerCase() !== "out") return null;
+  const payload = asObject(message?.payload_json);
+  const raw = String(payload.delivery_status || payload.dispatch_status || "queued").toLowerCase();
+  if (raw === "read") return { key: "read", label: "Leido", mark: "✓✓" };
+  if (raw === "delivered") return { key: "delivered", label: "Entregado", mark: "✓✓" };
+  if (raw === "sent") return { key: "sent", label: "Enviado", mark: "✓" };
+  if (["failed", "blocked"].includes(raw)) return { key: "failed", label: payload.delivery_error || payload.error || "No enviado", mark: "!" };
+  return { key: "queued", label: "En cola", mark: "•" };
+};
+
+const userDisplayName = (user) => {
+  const fullName = String(user?.full_name || "").trim();
+  if (fullName) return fullName;
+  const email = String(user?.email || "").trim();
+  const local = email.split("@")[0] || "";
+  return local || email || "Scentra";
+};
+
+const waveformFromSeed = (seed = "", count = 32) => {
+  const text = String(seed || "scentra");
+  let hash = 0;
+  for (let idx = 0; idx < text.length; idx += 1) hash = (hash * 31 + text.charCodeAt(idx)) >>> 0;
+  return Array.from({ length: count }, (_, idx) => {
+    hash = (hash * 1664525 + 1013904223) >>> 0;
+    const pulse = Math.abs(Math.sin((idx + 1) * 0.72 + text.length));
+    return 8 + Math.round(((hash % 100) / 100) * 22 + pulse * 12);
+  });
+};
+
+const waveformFromAudioBuffer = (audioBuffer, count = 32) => {
+  if (!audioBuffer?.length) return EMPTY_WAVEFORM.slice(0, count);
+  const data = audioBuffer.getChannelData(0);
+  const blockSize = Math.max(1, Math.floor(data.length / count));
+  const raw = Array.from({ length: count }, (_, idx) => {
+    const start = idx * blockSize;
+    const end = Math.min(data.length, start + blockSize);
+    let total = 0;
+    for (let pos = start; pos < end; pos += 1) total += data[pos] * data[pos];
+    return Math.sqrt(total / Math.max(1, end - start));
+  });
+  const max = Math.max(...raw, 0.001);
+  return raw.map((value) => Math.max(7, Math.min(46, Math.round(7 + (value / max) * 39))));
+};
+
+const analyzeAudioBlobWaveform = async (blob, count = 32) => {
+  const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextCtor || !blob?.size) return EMPTY_WAVEFORM.slice(0, count);
+  const audioContext = new AudioContextCtor();
+  try {
+    const buffer = await blob.arrayBuffer();
+    const audioBuffer = await audioContext.decodeAudioData(buffer.slice(0));
+    return waveformFromAudioBuffer(audioBuffer, count);
+  } finally {
+    audioContext.close?.().catch(() => {});
+  }
+};
+
+function AudioWaveform({ src, seed = "", levels = null }) {
+  const fallback = useMemo(() => (Array.isArray(levels) && levels.length ? levels : waveformFromSeed(seed)), [levels, seed]);
+  const [bars, setBars] = useState(fallback);
+
+  useEffect(() => { setBars(fallback); }, [fallback]);
+  useEffect(() => {
+    if (!src) return undefined;
+    let cancelled = false;
+    fetch(src)
+      .then((res) => (res.ok ? res.blob() : Promise.reject(new Error("audio_fetch_failed"))))
+      .then((blob) => analyzeAudioBlobWaveform(blob))
+      .then((nextBars) => { if (!cancelled && nextBars?.length) setBars(nextBars); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [src]);
+
+  return <div className="audio-wave" aria-hidden="true">{bars.map((height, idx) => <span key={idx} style={{ height: `${height}px` }} />)}</div>;
+}
+
 function App() {
   const metaAccessTokenRef = useRef(null);
   const metaAppSecretRef = useRef(null);
   const composerFileRef = useRef(null);
+  const messagesPanelRef = useRef(null);
+  const messagesEndRef = useRef(null);
   const mediaRecorderRef = useRef(null);
   const mediaStreamRef = useRef(null);
   const recordingChunksRef = useRef([]);
+  const recordingLevelsRef = useRef(EMPTY_WAVEFORM);
   const recordingCancelledRef = useRef(false);
   const recordingTimerRef = useRef(null);
   const recordingAnimationRef = useRef(null);
   const audioContextRef = useRef(null);
+  const attachmentSignatureRef = useRef("");
   const lastUnreadTotalRef = useRef(0);
   const [accessToken, setAccessToken] = useState(() => localStorage.getItem(TOKEN_KEY) || "");
   const [refreshToken, setRefreshToken] = useState(() => localStorage.getItem(REFRESH_KEY) || "");
@@ -198,6 +292,7 @@ function App() {
   const [attachmentFile, setAttachmentFile] = useState(null);
   const [attachmentKind, setAttachmentKind] = useState("");
   const [attachmentPreview, setAttachmentPreview] = useState("");
+  const [attachmentWaveform, setAttachmentWaveform] = useState(EMPTY_WAVEFORM);
   const [emojiOpen, setEmojiOpen] = useState(false);
   const [emojiSearch, setEmojiSearch] = useState("");
   const [recentEmojis, setRecentEmojis] = useState(() => {
@@ -225,6 +320,7 @@ function App() {
   }, [accessToken]);
 
   const activeCompany = tenants.find((company) => company.tenant_id === me?.tenant_id);
+  const currentUserName = userDisplayName(me);
   const billingPlan = billingOverview?.plan || {};
   const billingLimits = billingPlan?.limits || {};
   const billingUsage = billingOverview?.usage || {};
@@ -323,20 +419,34 @@ function App() {
     setAttachmentFile(null);
     setAttachmentKind("");
     setAttachmentPreview("");
+    setAttachmentWaveform(EMPTY_WAVEFORM);
+    attachmentSignatureRef.current = "";
     if (composerFileRef.current) composerFileRef.current.value = "";
   };
 
-  const setComposerAttachment = (file, forcedKind = "") => {
+  const setComposerAttachment = (file, forcedKind = "", knownWaveform = null) => {
     if (!file) return;
     clearComposerAttachment();
+    const kind = forcedKind || mediaKindFromMime(file.type);
+    const signature = `${file.name || "archivo"}:${file.size || 0}:${file.lastModified || Date.now()}`;
+    attachmentSignatureRef.current = signature;
     setAttachmentFile(file);
-    setAttachmentKind(forcedKind || mediaKindFromMime(file.type));
+    setAttachmentKind(kind);
     setAttachmentPreview(URL.createObjectURL(file));
+    setAttachmentWaveform(Array.isArray(knownWaveform) && knownWaveform.length ? knownWaveform : waveformFromSeed(signature));
+    if (kind === "audio") {
+      analyzeAudioBlobWaveform(file)
+        .then((bars) => {
+          if (attachmentSignatureRef.current === signature && bars?.length) setAttachmentWaveform(bars);
+        })
+        .catch(() => {});
+    }
   };
 
   const clearWorkspaceState = () => {
     setConversations([]); setSelectedConversation(null); setMessages([]); setReplyText("");
     clearComposerAttachment(); setEmojiOpen(false); setAttachMenuOpen(false); setInboxChannelFilter("all"); setInboxSearch(""); setIsRecording(false); setRecordingSeconds(0); setRecordingLevels(EMPTY_WAVEFORM);
+    recordingLevelsRef.current = EMPTY_WAVEFORM;
     setIntegrations([]); setWebhooks([]); setWebhookEvents([]); setBillingOverview(null); setBillingPlans([]); setLastWebhookSecret(null);
     setWhatsappPhones([]); setPhoneRegisterForm({ phone_number_id: "", pin: "" });
   };
@@ -351,6 +461,7 @@ function App() {
     try {
       const data = await apiCall("/saas/v1/auth/me");
       setMe(data); setTenants(data?.tenants || []);
+      setProfileForm((prev) => ({ ...prev, fullName: prev.fullName || data?.full_name || "", email: prev.email || data?.email || "" }));
     } catch (err) { showStatus(String(err.message || err), "error"); }
   };
 
@@ -393,8 +504,10 @@ function App() {
     if (!conversation?.id) return;
     try {
       const data = await apiCall(`/saas/v1/conversations/${encodeURIComponent(conversation.id)}/messages`);
-      setSelectedConversation(conversation); setMessages(data?.messages || []);
+      const selected = { ...conversation, unread_count: 0 };
+      setSelectedConversation(selected); setMessages(data?.messages || []);
       if (!options.preserveComposer) { setReplyText(""); clearComposerAttachment(); setEmojiOpen(false); setAttachMenuOpen(false); }
+      if (Number(conversation.unread_count || 0) > 0) markConversationRead(conversation.id, { silent: true });
     } catch (err) { showStatus(String(err.message || err), "error"); }
   };
 
@@ -441,6 +554,15 @@ function App() {
     const timer = window.setInterval(() => loadInbox(), 6000);
     return () => window.clearInterval(timer);
   }, [accessToken, activeView, selectedConversation?.id, notificationSoundEnabled]);
+
+  useEffect(() => {
+    if (activeView !== "inbox") return undefined;
+    const frame = window.requestAnimationFrame(() => {
+      if (messagesPanelRef.current) messagesPanelRef.current.scrollTop = messagesPanelRef.current.scrollHeight;
+      messagesEndRef.current?.scrollIntoView({ block: "end" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [activeView, selectedConversation?.id, messages.length]);
 
   useEffect(() => {
     if (!featureLoaded || activeViewAllowed) return;
@@ -573,7 +695,36 @@ function App() {
   const rotateWebhookToken = async (endpoint) => { try { const data = await apiCall(`/saas/v1/webhooks/endpoints/${encodeURIComponent(endpoint.id)}/rotate-token`, { method: "POST" }); setLastWebhookSecret(data); showStatus("Verify token rotado", "ok"); await loadWebhooks(); } catch (err) { showStatus(String(err.message || err), "error"); } };
   const rotateWebhookSignature = async (endpoint) => { try { const data = await apiCall(`/saas/v1/webhooks/endpoints/${encodeURIComponent(endpoint.id)}/rotate-signature`, { method: "POST" }); setLastWebhookSecret(data); showStatus("Firma HMAC rotada", "ok"); await loadWebhooks(); } catch (err) { showStatus(String(err.message || err), "error"); } };
   const processWebhookEvents = async () => { try { const data = await apiCall("/saas/v1/webhooks/events/process", { method: "POST" }); showStatus(`Procesados: ${data?.result?.processed || 0}`, "ok"); await loadWebhooks(); } catch (err) { showStatus(String(err.message || err), "error"); } };
-  const markSelectedConversationRead = async () => { if (!selectedConversation?.id) return; try { await apiCall(`/saas/v1/conversations/${selectedConversation.id}/read`, { method: "POST" }); showStatus("Conversacion marcada como leida", "ok"); await loadInbox(); } catch (err) { showStatus(String(err.message || err), "error"); } };
+  const patchConversationLocal = (conversationId, patch) => {
+    setConversations((prev) => prev.map((item) => item.id === conversationId ? { ...item, ...patch } : item));
+    setSelectedConversation((prev) => (prev?.id === conversationId ? { ...prev, ...patch } : prev));
+  };
+  const markConversationRead = async (conversationId, { silent = false } = {}) => {
+    if (!conversationId) return;
+    patchConversationLocal(conversationId, { unread_count: 0 });
+    try {
+      await apiCall(`/saas/v1/conversations/${encodeURIComponent(conversationId)}/read`, { method: "POST" });
+      if (!silent) showStatus("Conversacion marcada como leida", "ok");
+    } catch (err) {
+      if (!silent) showStatus(String(err.message || err), "error");
+    }
+  };
+  const markSelectedConversationRead = () => markConversationRead(selectedConversation?.id);
+  const toggleSelectedTakeover = async () => {
+    if (!selectedConversation?.id) return;
+    const nextTakeover = !Boolean(selectedConversation.takeover);
+    patchConversationLocal(selectedConversation.id, { takeover: nextTakeover });
+    setCrmDraft((prev) => ({ ...prev, takeover: nextTakeover }));
+    try {
+      await apiCall(`/saas/v1/conversations/${encodeURIComponent(selectedConversation.id)}/takeover?takeover=${nextTakeover ? "true" : "false"}`, { method: "POST" });
+      showStatus(nextTakeover ? "Takeover humano activado. La IA queda en pausa para este chat." : "Takeover desactivado. La IA puede atender este chat.", "ok");
+    } catch (err) {
+      const rollback = !nextTakeover;
+      patchConversationLocal(selectedConversation.id, { takeover: rollback });
+      setCrmDraft((prev) => ({ ...prev, takeover: rollback }));
+      showStatus(String(err.message || err), "error");
+    }
+  };
   const playIncomingSound = () => {
     try {
       const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
@@ -655,7 +806,6 @@ function App() {
     if (type === "document" || type === "file") return "documento";
     return type;
   };
-  const waveformBars = (seed = "") => EMPTY_WAVEFORM.map((base, idx) => 7 + ((base + seed.length * 3 + idx * 11) % 34));
   const renderMessageContent = (message) => {
     const type = String(message?.msg_type || "text").toLowerCase();
     const url = messageMediaUrl(message);
@@ -666,7 +816,7 @@ function App() {
         {type === "video" && url ? <video className="chat-media video" src={url} controls playsInline /> : null}
         {type === "audio" && url ? (
           <div className="audio-message">
-            <div className="audio-wave" aria-hidden="true">{waveformBars(message.id || message.created_at).map((height, idx) => <span key={idx} style={{ height: `${height}px` }} />)}</div>
+            <AudioWaveform src={url} seed={message.id || message.created_at || message.media_id} />
             <audio src={url} controls preload="metadata" />
           </div>
         ) : null}
@@ -702,6 +852,7 @@ function App() {
       mediaRecorderRef.current = recorder;
       recordingChunksRef.current = [];
       recordingCancelledRef.current = false;
+      recordingLevelsRef.current = EMPTY_WAVEFORM;
       setRecordingLevels(EMPTY_WAVEFORM);
       setRecordingSeconds(0);
       setIsRecording(true);
@@ -715,7 +866,7 @@ function App() {
         setIsRecording(false);
         if (!recordingCancelledRef.current && blob.size) {
           const extension = blobType.includes("ogg") ? "ogg" : "webm";
-          setComposerAttachment(new File([blob], `nota-voz-${Date.now()}.${extension}`, { type: blobType }));
+          setComposerAttachment(new File([blob], `nota-voz-${Date.now()}.${extension}`, { type: blobType }), "audio", recordingLevelsRef.current);
           showStatus("Nota de voz lista para enviar", "ok");
         }
         recordingCancelledRef.current = false;
@@ -737,7 +888,8 @@ function App() {
           data.forEach((value) => { const centered = value - 128; total += centered * centered; });
           const rms = Math.sqrt(total / data.length) / 128;
           const height = Math.max(7, Math.min(44, Math.round(rms * 110)));
-          setRecordingLevels((prev) => [...prev.slice(1), height]);
+          recordingLevelsRef.current = [...recordingLevelsRef.current.slice(1), height];
+          setRecordingLevels(recordingLevelsRef.current);
           recordingAnimationRef.current = window.requestAnimationFrame(tick);
         };
         tick();
@@ -856,7 +1008,7 @@ function App() {
         <div className="company-card"><span>Empresa activa</span><strong>{activeCompany?.tenant_name || activeCompany?.name || me.tenant_id}</strong><small>{me.role} / plan {billingPlan.display_name || billingPlan.plan_code || activeCompany?.plan_code || "starter"}</small><span className={`mini-badge ${String(lifecycleStatus).toLowerCase()}`}>{lifecycleLabel(lifecycleStatus)}{trialEndLabel ? ` hasta ${trialEndLabel}` : ""}</span></div>
       </aside>
 
-      <main className="content">
+      <main className={`content ${activeView === "inbox" ? "content-inbox" : ""}`}>
         <header className="topbar glass-panel">
           <div><p className="eyebrow">{todayLabel()}</p><h1>{viewTitles[activeView]?.[0]}</h1><p>{viewTitles[activeView]?.[1]}</p></div>
           <div className="top-actions"><select value={me.tenant_id || ""} onChange={(event) => switchCompany(event.target.value)} aria-label="Empresa activa">{tenants.map((company) => <option key={company.tenant_id} value={company.tenant_id}>{company.tenant_name || company.name} / {company.role}</option>)}</select><button type="button" onClick={clearTokens}>Salir</button></div>
@@ -865,7 +1017,7 @@ function App() {
 
         {activeView === "dashboard" ? (
           <section className="dashboard-page">
-            <div className="hero-card glass-card"><div><p className="eyebrow">Resumen operativo</p><h2>Bienvenido, {me.email}</h2><p>Datos reales de la empresa activa: CRM, inbox, mensajes, webhooks y consumo del plan.</p>{lifecycleStatus === "trial" ? <p className="trial-note">Demo de 30 dias activa{trialEndLabel ? ` hasta ${trialEndLabel}` : ""}. Puedes configurar Meta, IA y plantillas antes de pasar a pago.</p> : null}</div><button type="button" className="icon-button" onClick={() => loadDashboard(false)}>Actualizar</button></div>
+            <div className="hero-card glass-card"><div><p className="eyebrow">Resumen operativo</p><h2>Bienvenido, {currentUserName}</h2><p>Datos reales de la empresa activa: CRM, inbox, mensajes, webhooks y consumo del plan.</p>{lifecycleStatus === "trial" ? <p className="trial-note">Demo de 30 dias activa{trialEndLabel ? ` hasta ${trialEndLabel}` : ""}. Puedes configurar Meta, IA y plantillas antes de pasar a pago.</p> : null}</div><button type="button" className="icon-button" onClick={() => loadDashboard(false)}>Actualizar</button></div>
             <div className="metric-grid">
               <article className="metric-card mint"><span>Estado cuenta</span><strong>{lifecycleLabel(lifecycleStatus)}</strong><small>{trialEndLabel ? `Termina ${trialEndLabel}` : "Operativa"}</small></article>
               <article className="metric-card mint"><span>Clientes CRM</span><strong>{number(dashboardConversations)}</strong><small>Registros por empresa</small></article>
@@ -885,7 +1037,7 @@ function App() {
         ) : activeView === "inbox" ? (
           <section className={`inbox-grid ${crmPanelOpen ? "crm-open" : "crm-closed"}`}>
             <div className="panel glass-card inbox-list">
-              <div className="panel-head inbox-list-head"><h2>Inbox</h2><span>{filteredConversations.length}</span></div>
+              <div className="panel-head inbox-list-head"><h2>Inbox</h2><span>{unreadTotal ? `${number(unreadTotal)} sin leer` : `${filteredConversations.length} chats`}</span></div>
               <div className="inbox-filters">
                 <button type="button" className={inboxChannelFilter === "all" ? "active" : ""} onClick={() => setInboxChannelFilter("all")}>Todos</button>
                 {availableInboxChannels.map((channel) => <button type="button" key={channel} className={inboxChannelFilter === channel ? "active" : ""} onClick={() => setInboxChannelFilter(channel)}>{channelLabel(channel)}</button>)}
@@ -895,8 +1047,8 @@ function App() {
               <div className="conversation-list">
                 {filteredConversations.map((conversation) => (
                   <button type="button" className={`conversation-item ${selectedConversation?.id === conversation.id ? "active" : ""}`} key={conversation.id} onClick={() => loadMessages(conversation)}>
-                    <strong>{conversation.display_name || conversation.phone || conversation.external_contact_id}</strong>
-                    <span><b>{channelLabel(conversation.channel)}</b> / {conversation.unread_count || 0} sin leer</span>
+                    <span className="conversation-title"><strong>{conversation.display_name || conversation.phone || conversation.external_contact_id}</strong>{Number(conversation.unread_count || 0) > 0 ? <em>{number(conversation.unread_count)}</em> : null}</span>
+                    <span className="conversation-meta"><b>{channelLabel(conversation.channel)}</b>{Number(conversation.unread_count || 0) > 0 ? <small>Sin leer</small> : <small>Leido</small>}</span>
                     <small>{conversation.last_message_text || "-"}</small>
                   </button>
                 ))}
@@ -913,20 +1065,22 @@ function App() {
                   </div>
                 </div>
                 <div className="thread-actions">
+                  {selectedConversation ? <button type="button" className={`takeover-toggle ${selectedConversation.takeover ? "active" : ""}`} onClick={toggleSelectedTakeover}>{selectedConversation.takeover ? "Takeover ON" : "Takeover OFF"}</button> : null}
                   {selectedConversation ? <button type="button" onClick={markSelectedConversationRead}>Leido</button> : null}
                   <button type="button" onClick={() => setNotificationSoundEnabled((prev) => !prev)}>{notificationSoundEnabled ? "Sonido ON" : "Sonido OFF"}</button>
                   <button type="button" onClick={() => setCrmPanelOpen((prev) => !prev)}>{crmPanelOpen ? "Ocultar CRM" : "CRM"}</button>
                 </div>
               </div>
-              <div className="messages">
+              <div className="messages" ref={messagesPanelRef}>
                 {messages.map((message) => (
                   <div className={`message ${message.direction === "out" ? "out" : "in"} ${message.msg_type || "text"}`} key={message.id}>
                     <span className="message-type">{message.direction === "out" ? "tu" : "cliente"} / {messageLabel(message)}</span>
                     {renderMessageContent(message)}
-                    <small>{message.created_at}</small>
+                    <small className="message-foot">{message.created_at}{messageDeliveryState(message) ? <span className={`wa-checks ${messageDeliveryState(message).key}`} title={messageDeliveryState(message).label}>{messageDeliveryState(message).mark}</span> : null}</small>
                   </div>
                 ))}
                 {messages.length === 0 ? <div className="empty">Selecciona una conversacion.</div> : null}
+                <div ref={messagesEndRef} aria-hidden="true" />
               </div>
               {selectedConversation ? (
                 <form className="composer rich-composer" onSubmit={sendSelectedMessage}>
@@ -938,7 +1092,7 @@ function App() {
                       </div>
                       {attachmentFile.type.startsWith("image/") ? <img src={attachmentPreview} alt="Vista previa adjunto" /> : null}
                       {attachmentFile.type.startsWith("video/") ? <video src={attachmentPreview} controls playsInline /> : null}
-                      {attachmentFile.type.startsWith("audio/") ? <div className="audio-message compact outgoing-preview"><div className="audio-wave" aria-hidden="true">{EMPTY_WAVEFORM.slice(0, 22).map((height, idx) => <span key={idx} style={{ height: `${height}px` }} />)}</div><audio src={attachmentPreview} controls /></div> : null}
+                      {attachmentFile.type.startsWith("audio/") ? <div className="audio-message compact outgoing-preview"><AudioWaveform src={attachmentPreview} seed={attachmentFile.name} levels={attachmentWaveform} /><audio src={attachmentPreview} controls /></div> : null}
                       <button type="button" onClick={clearComposerAttachment}>Quitar</button>
                     </div>
                   ) : null}

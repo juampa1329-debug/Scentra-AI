@@ -232,9 +232,21 @@ def switch_tenant(payload: SwitchTenantIn, ctx: AuthContext = Depends(get_curren
 def me(ctx: AuthContext = Depends(get_current_user)):
     with db_session() as conn:
         tenants = _tenant_rows(conn, ctx.user_id)
+        user = conn.execute(
+            text(
+                """
+                SELECT full_name
+                FROM saas_users
+                WHERE id = CAST(:user_id AS uuid)
+                LIMIT 1
+                """
+            ),
+            {"user_id": ctx.user_id},
+        ).mappings().first()
     return MeOut(
         user_id=ctx.user_id,
         email=ctx.email,
+        full_name=str((user or {}).get("full_name") or "").strip(),
         tenant_id=ctx.tenant_id,
         role=ctx.role,
         tenants=[TenantMembershipOut(**row) for row in tenants],
