@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     saas_cors_origins: str = ",".join(DEFAULT_CORS_ORIGINS)
     saas_trial_days: int = 30
     saas_trial_plan_code: str = "starter"
+    saas_embedded_worker_enabled: bool = True
+    saas_worker_idle_sec: int = 5
+    saas_worker_batch_size: int = 25
 
     @property
     def cors_origins(self) -> list[str]:

@@ -140,6 +140,27 @@ code { color: #bbf7d0; }
 .status.ok { border-color: rgba(134, 239, 172, 0.42); color: var(--ok); }
 .status.error { border-color: rgba(248, 113, 113, 0.45); color: var(--danger); }
 .floating-status { margin: 0 0 18px; }
+.trial-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: -6px 0 14px;
+  padding: 9px 12px;
+  border-radius: 16px;
+  background: linear-gradient(135deg, rgba(251,191,36,0.11), rgba(20,184,166,0.07));
+  border-color: rgba(251,191,36,0.24);
+  color: var(--soft);
+}
+.content-inbox .trial-strip { flex: 0 0 auto; margin-bottom: 10px; }
+.trial-strip strong {
+  color: var(--amber);
+  font-size: 11px;
+  font-weight: 1000;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.trial-strip span { color: var(--ink); font-size: 13px; font-weight: 900; }
+.trial-strip small { margin-left: auto; color: var(--muted); font-size: 12px; }
 .app-shell { display: grid; grid-template-columns: 104px minmax(0, 1fr); gap: 14px; min-height: 100vh; padding: 10px; }
 .sidebar { position: sticky; top: 10px; height: calc(100vh - 20px); border-radius: 24px; padding: 12px 8px; display: flex; flex-direction: column; gap: 14px; align-items: center; }
 .brand { display: grid; justify-items: center; gap: 8px; padding: 8px 4px; text-align: center; }
@@ -513,6 +534,8 @@ nav { display: grid; gap: 8px; width: 100%; }
   .company-card { display: none; }
   .nav-item { min-width: 72px; min-height: 58px; }
   .topbar, .hero-card { align-items: stretch; flex-direction: column; }
+  .trial-strip { align-items: flex-start; flex-direction: column; margin-top: 0; }
+  .trial-strip small { margin-left: 0; }
   .top-actions, .metric-grid, .settings-grid, .inbox-grid, .inbox-grid.crm-open, .plan-cards, .feature-grid, .channel-list, .form-grid.two, .plan-summary { grid-template-columns: 1fr; min-width: 0; }
   .top-actions { display: grid; }
   .inbox-list, .inbox-thread, .inbox-crm { min-height: auto; }

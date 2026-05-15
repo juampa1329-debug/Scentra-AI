@@ -292,5 +292,14 @@ def list_provider_models(
     if not token and provider not in {"openrouter", "piper"}:
         return {"ok": False, "source": "static", "detail": "credential_required", "models": _static_models(provider)}
 
-    models = _models_from_provider(provider, token)
-    return {"ok": True, "source": "provider" if token else "static", "models": models or _static_models(provider)}
+    try:
+        models = _models_from_provider(provider, token)
+        return {"ok": True, "source": "provider" if token else "static", "models": models or _static_models(provider)}
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, dict) else {"message": str(exc.detail)}
+        return {
+            "ok": False,
+            "source": "static",
+            "detail": detail,
+            "models": _static_models(provider),
+        }

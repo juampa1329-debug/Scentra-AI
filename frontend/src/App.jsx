@@ -107,6 +107,24 @@ const dateLabel = (value) => {
   if (Number.isNaN(date.getTime())) return String(value);
   return new Intl.DateTimeFormat("es-CO", { day: "2-digit", month: "short", year: "numeric" }).format(date);
 };
+const chatTimeLabel = (value) => {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return new Intl.DateTimeFormat("es-CO", { hour: "numeric", minute: "2-digit", hour12: true }).format(date).toLowerCase().replace(/\s+/g, " ");
+};
+const compactDateTimeLabel = (value) => {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  const now = new Date();
+  const sameDay = date.toDateString() === now.toDateString();
+  if (sameDay) return chatTimeLabel(value);
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  if (date.toDateString() === yesterday.toDateString()) return `ayer ${chatTimeLabel(value)}`;
+  return `${new Intl.DateTimeFormat("es-CO", { day: "2-digit", month: "short" }).format(date)} ${chatTimeLabel(value)}`;
+};
 const lifecycleLabel = (status) => ({
   trial: "Demo",
   active: "Activo",
@@ -151,6 +169,21 @@ const channelLabel = (channel) => ({
   tiktok: "TikTok",
   meta: "Meta",
 }[String(channel || "").toLowerCase()] || String(channel || "Canal"));
+
+const fallbackProviderModels = (provider) => String(provider?.models || "")
+  .split(",")
+  .map((item) => item.trim())
+  .filter(Boolean)
+  .map((item) => ({ id: item, label: item }));
+
+const providerModelsNotice = (data, provider) => {
+  if (data?.ok !== false) return "Modelos cargados desde el proveedor";
+  const detail = data?.detail;
+  const code = typeof detail === "object" ? detail.code : detail;
+  if (code === "credential_required") return `Modelos de referencia cargados. Agrega primero la API key de ${provider?.name || "este proveedor"} para consultar modelos reales.`;
+  if (code === "provider_models_error") return `No se pudo validar la API de ${provider?.name || "este proveedor"}. Dejé modelos de referencia para que puedas continuar.`;
+  return `Modelos de referencia cargados para ${provider?.name || "este proveedor"}.`;
+};
 
 const asObject = (value) => {
   if (value && typeof value === "object" && !Array.isArray(value)) return value;
@@ -1156,11 +1189,15 @@ function App() {
       const data = await apiCall(`/saas/v1/api-credentials/${encodeURIComponent(provider.code)}/models?credential_key=${encodeURIComponent(key)}`);
       const models = data?.models || [];
       const current = credentialByKey[key]?.selected_model || models[0]?.id || "";
-      setCredentialModels((prev) => ({ ...prev, [key]: { loading: false, models, selected: current, source: data?.source || "" } }));
-      showStatus(data?.ok === false ? "Modelos de referencia cargados. Guarda primero una credencial para consultar el proveedor real." : "Modelos cargados desde el proveedor", data?.ok === false ? "neutral" : "ok");
+      const notice = providerModelsNotice(data, provider);
+      setCredentialModels((prev) => ({ ...prev, [key]: { loading: false, models, selected: current, source: data?.source || "", warning: data?.ok === false ? notice : "" } }));
+      showStatus(notice, data?.ok === false ? "neutral" : "ok");
     } catch (err) {
-      setCredentialModels((prev) => ({ ...prev, [key]: { ...(prev[key] || {}), loading: false, error: String(err.message || err) } }));
-      showStatus(String(err.message || err), "error");
+      const models = fallbackProviderModels(provider);
+      const current = credentialByKey[key]?.selected_model || models[0]?.id || "";
+      const warning = `No se pudo consultar ${provider?.name || "el proveedor"} ahora. Cargué modelos de referencia para que puedas continuar.`;
+      setCredentialModels((prev) => ({ ...prev, [key]: { ...(prev[key] || {}), loading: false, models, selected: current, source: "static", warning, error: "" } }));
+      showStatus(warning, "neutral");
     }
   };
   const saveCredentialModel = async (provider) => {
@@ -1240,6 +1277,7 @@ function App() {
               {modelOptions.map((model) => <option key={model.id} value={model.id}>{model.label || model.id}</option>)}
             </select>
             {credential.selected_model ? <small>Modelo guardado: {credential.selected_model}</small> : null}
+            {modelsState.warning ? <small className="soft-copy">{modelsState.warning}</small> : null}
             {modelsState.error ? <small className="danger-copy">{modelsState.error}</small> : null}
           </div>
         ) : null}
@@ -1286,7 +1324,7 @@ function App() {
         <nav>
           {navItems.map(({ key, label, icon }) => <button key={key} className={"nav-item " + (activeView === key ? "active" : "")} onClick={() => setActiveView(key)}><span className="nav-icon">{icon}</span><span>{label}</span></button>)}
         </nav>
-        <div className="company-card"><span>Empresa activa</span><strong>{activeCompany?.tenant_name || activeCompany?.name || me.tenant_id}</strong><small>{me.role} / plan {billingPlan.display_name || billingPlan.plan_code || activeCompany?.plan_code || "starter"}</small><span className={`mini-badge ${String(lifecycleStatus).toLowerCase()}`}>{lifecycleLabel(lifecycleStatus)}{trialEndLabel ? ` hasta ${trialEndLabel}` : ""}</span></div>
+        <div className="company-card"><span>Empresa activa</span><strong>{activeCompany?.tenant_name || activeCompany?.name || me.tenant_id}</strong><small>{me.role} / plan {billingPlan.display_name || billingPlan.plan_code || activeCompany?.plan_code || "starter"}</small></div>
       </aside>
 
       <main className={`content ${activeView === "inbox" ? "content-inbox" : ""}`}>
@@ -1295,6 +1333,7 @@ function App() {
           <div className="top-actions"><select value={me.tenant_id || ""} onChange={(event) => switchCompany(event.target.value)} aria-label="Empresa activa">{tenants.map((company) => <option key={company.tenant_id} value={company.tenant_id}>{company.tenant_name || company.name} / {company.role}</option>)}</select><button type="button" onClick={clearTokens}>Salir</button></div>
         </header>
         {status ? <div className={`status floating-status ${statusTone}`}>{status}</div> : null}
+        {lifecycleStatus === "trial" && activeView !== "dashboard" ? <div className="trial-strip glass-card"><strong>Demo activa</strong><span>{trialEndLabel ? `Hasta ${trialEndLabel}` : "30 dias de prueba"}</span><small>Configura Meta, IA y plantillas antes de pasar a pago.</small></div> : null}
 
         {activeView === "dashboard" ? (
           <section className="dashboard-page">
@@ -1312,7 +1351,7 @@ function App() {
               <article className="panel glass-card"><div className="panel-head"><h2>Uso del plan</h2><span>{billingOverview?.period_yyyymm || "periodo"}</span></div><div className="usage-bars"><div className="usage-line"><div><strong>Mensajes</strong><span>{number(billingRemaining.monthly_messages)} disponibles</span></div><div className="meter"><span style={{ width: `${pct(billingUsage.used_monthly_messages, billingLimits.max_monthly_messages)}%` }} /></div></div><div className="usage-line"><div><strong>Integraciones</strong><span>{number(billingRemaining.integrations)} disponibles</span></div><div className="meter"><span style={{ width: `${pct(billingUsage.used_integrations, billingLimits.max_integrations)}%` }} /></div></div><div className="usage-line"><div><strong>Usuarios</strong><span>{number(billingRemaining.agents)} disponibles</span></div><div className="meter"><span style={{ width: `${pct(billingUsage.used_agents, billingLimits.max_agents)}%` }} /></div></div></div></article>
               <article className="panel glass-card chart-panel"><div className="panel-head"><h2>Actividad reciente</h2><span>mensajes por dia</span></div><div className="activity-bars" role="img" aria-label="Mensajes por dia en los ultimos 14 dias">{dashboardActivity.map((item) => <div className="activity-day" key={item.date} title={`${item.date}: ${item.total} mensajes`}><span style={{ height: `${Math.max(4, (Number(item.total || 0) / dashboardActivityMax) * 100)}%` }} /><small>{String(item.date || "").slice(5)}</small></div>)}</div>{dashboardActivity.every((item) => Number(item.total || 0) === 0) ? <div className="empty">Sin mensajes recientes todavia.</div> : null}</article>
               <article className="panel glass-card"><div className="panel-head"><h2>Canales y pagos</h2><span>operacion</span></div><div className="channel-list dashboard-list">{dashboardChannels.length ? dashboardChannels.map((item) => <div key={item.channel}><strong>{number(item.count)}</strong><span>{item.channel}</span></div>) : <div><strong>0</strong><span>Sin canales</span></div>}<div><strong>{number(dashboardTotals.pending_payments || 0)}</strong><span>Pagos pendientes</span></div><div><strong>{number(dashboardTotals.paid_customers || 0)}</strong><span>Pagos confirmados</span></div></div></article>
-              <article className="panel glass-card wide-panel"><div className="panel-head"><h2>Ultimos movimientos</h2><span>mensajes reales</span></div><div className="recent-list">{dashboardRecent.map((item, idx) => <div key={`${item.created_at}-${idx}`}><strong>{item.display_name || item.phone || item.external_contact_id || "Cliente"}</strong><span>{item.direction} / {item.channel} / {item.created_at}</span><p>{item.text}</p></div>)}{dashboardRecent.length === 0 ? <div className="empty">Todavia no hay movimientos registrados.</div> : null}</div></article>
+              <article className="panel glass-card wide-panel"><div className="panel-head"><h2>Ultimos movimientos</h2><span>mensajes reales</span></div><div className="recent-list">{dashboardRecent.map((item, idx) => <div key={`${item.created_at}-${idx}`}><strong>{item.display_name || item.phone || item.external_contact_id || "Cliente"}</strong><span>{item.direction} / {item.channel} / {compactDateTimeLabel(item.created_at)}</span><p>{item.text}</p></div>)}{dashboardRecent.length === 0 ? <div className="empty">Todavia no hay movimientos registrados.</div> : null}</div></article>
             </section>
           </section>
         ) : activeView === "inbox" ? (
@@ -1357,7 +1396,7 @@ function App() {
                   <div className={`message ${message.direction === "out" ? "out" : "in"} ${message.msg_type || "text"}`} key={message.id}>
                     <span className="message-type">{messageSenderLabel(message)}</span>
                     {renderMessageContent(message)}
-                    <small className="message-foot">{message.created_at}{messageDeliveryState(message) ? <span className={`wa-checks ${messageDeliveryState(message).key}`} title={messageDeliveryState(message).label}>{messageDeliveryState(message).mark}</span> : null}</small>
+                    <small className="message-foot">{chatTimeLabel(message.created_at)}{messageDeliveryState(message) ? <span className={`wa-checks ${messageDeliveryState(message).key}`} title={messageDeliveryState(message).label}>{messageDeliveryState(message).mark}</span> : null}</small>
                   </div>
                 ))}
                 {messages.length === 0 ? <div className="empty">Selecciona una conversacion.</div> : null}
