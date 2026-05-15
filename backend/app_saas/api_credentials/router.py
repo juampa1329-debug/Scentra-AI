@@ -53,6 +53,38 @@ def _secret_hint(value: str) -> str:
     return f"{clean[:4]}...{clean[-4:]}"
 
 
+def _ensure_api_credentials_table(conn) -> None:
+    conn.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS saas_api_credentials (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                tenant_id UUID NOT NULL REFERENCES saas_tenants(id) ON DELETE CASCADE,
+                category TEXT NOT NULL DEFAULT 'ai',
+                provider_code TEXT NOT NULL,
+                credential_key TEXT NOT NULL,
+                display_name TEXT NOT NULL DEFAULT '',
+                secret_value TEXT NOT NULL DEFAULT '',
+                secret_hint TEXT NOT NULL DEFAULT '',
+                metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                last_validated_at TIMESTAMP NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                UNIQUE (tenant_id, credential_key)
+            )
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_saas_api_credentials_tenant_provider
+            ON saas_api_credentials (tenant_id, provider_code, category)
+            """
+        )
+    )
+
+
 def _safe_row(row: dict[str, Any]) -> ApiCredentialOut:
     metadata = row.get("metadata_json") if isinstance(row.get("metadata_json"), dict) else {}
     return ApiCredentialOut(
@@ -164,6 +196,7 @@ def _models_from_provider(provider_code: str, token: str) -> list[dict[str, str]
 @router.get("", response_model=list[ApiCredentialOut])
 def list_api_credentials(ctx: AuthContext = Depends(get_current_user)):
     with db_session() as conn:
+        _ensure_api_credentials_table(conn)
         set_tenant_context(conn, ctx.tenant_id)
         rows = conn.execute(
             text(
@@ -188,6 +221,7 @@ def upsert_api_credential(payload: ApiCredentialUpsertIn, ctx: AuthContext = Dep
     display_name = _clean(payload.display_name, 160)
     incoming_value = _clean(payload.value, 12000)
     with db_session() as conn:
+        _ensure_api_credentials_table(conn)
         set_tenant_context(conn, ctx.tenant_id)
         existing = _load_credential(conn, ctx.tenant_id, provider_code, credential_key)
         if not existing and not incoming_value and not payload.selected_model.strip():
@@ -251,6 +285,7 @@ def list_provider_models(
     provider = _clean(provider_code, 80).lower()
     key = _clean(credential_key, 120).upper()
     with db_session() as conn:
+        _ensure_api_credentials_table(conn)
         set_tenant_context(conn, ctx.tenant_id)
         credential = _load_credential(conn, ctx.tenant_id, provider, key) if key else None
     token = decrypt_secret(str((credential or {}).get("secret_value") or ""))
