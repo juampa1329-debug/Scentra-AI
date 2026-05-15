@@ -2,6 +2,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from app_saas.api_credentials.router import router as api_credentials_router
 from app_saas.admin.router import router as admin_router
 from app_saas.ads.router import router as ads_router
 from app_saas.auth.router import router as auth_router
@@ -43,6 +44,7 @@ app.include_router(campaigns_router, prefix="/saas/v1")
 app.include_router(broadcasts_router, prefix="/saas/v1")
 app.include_router(ads_router, prefix="/saas/v1")
 app.include_router(integrations_router, prefix="/saas/v1")
+app.include_router(api_credentials_router, prefix="/saas/v1")
 app.include_router(media_router, prefix="/saas/v1")
 app.include_router(billing_router, prefix="/saas/v1")
 app.include_router(webhooks_router, prefix="/saas/v1")

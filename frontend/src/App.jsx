@@ -10,21 +10,21 @@ const TOKEN_KEY = "scentra_ai_access_token";
 const REFRESH_KEY = "scentra_ai_refresh_token";
 
 const AI_API_PROVIDERS = [
-  { name: "Google / Gemini", env: "GOOGLE_AI_API_KEY", alt: "GEMINI_API_KEY", models: "gemini-2.5-flash, gemini-2.5-pro, gemma-3-*" },
-  { name: "Groq", env: "GROQ_API_KEY", alt: "", models: "llama-3.1-8b-instant, llama-3.1-70b-versatile" },
-  { name: "Mistral", env: "MISTRAL_API_KEY", alt: "", models: "mistral-small-latest, mistral-medium-latest" },
-  { name: "OpenRouter", env: "OPENROUTER_API_KEY", alt: "OPENROUTER_SITE / OPENROUTER_APP_NAME", models: "google/gemma-2-9b-it y catalogo live" },
+  { code: "google", category: "ai", name: "Google / Gemini", env: "GOOGLE_AI_API_KEY", alt: "GEMINI_API_KEY", models: "gemini-2.5-flash, gemini-2.5-pro, gemma-3-*", supportsModels: true },
+  { code: "groq", category: "ai", name: "Groq", env: "GROQ_API_KEY", alt: "", models: "llama-3.1-8b-instant, llama-3.1-70b-versatile", supportsModels: true },
+  { code: "mistral", category: "ai", name: "Mistral", env: "MISTRAL_API_KEY", alt: "", models: "mistral-small-latest, mistral-medium-latest", supportsModels: true },
+  { code: "openrouter", category: "ai", name: "OpenRouter", env: "OPENROUTER_API_KEY", alt: "OPENROUTER_SITE / OPENROUTER_APP_NAME", models: "catalogo live de OpenRouter", supportsModels: true },
 ];
 
 const TTS_API_PROVIDERS = [
-  { name: "ElevenLabs", env: "ELEVENLABS_API_KEY", fields: "ELEVENLABS_VOICE_ID, ELEVENLABS_MODEL_ID" },
-  { name: "Google Cloud TTS", env: "GOOGLE_CLOUD_TTS_API_KEY", fields: "GOOGLE_TTS_LANGUAGE_CODE, GOOGLE_TTS_VOICE_NAME" },
-  { name: "Piper local", env: "PIPER_BIN", fields: "PIPER_MODEL_PATH" },
+  { code: "elevenlabs", category: "tts", name: "ElevenLabs", env: "ELEVENLABS_API_KEY", fields: "ELEVENLABS_VOICE_ID, ELEVENLABS_MODEL_ID", supportsModels: true },
+  { code: "google_tts", category: "tts", name: "Google Cloud TTS", env: "GOOGLE_CLOUD_TTS_API_KEY", fields: "GOOGLE_TTS_LANGUAGE_CODE, GOOGLE_TTS_VOICE_NAME", supportsModels: true },
+  { code: "piper", category: "tts", name: "Piper local", env: "PIPER_BIN", fields: "PIPER_MODEL_PATH", supportsModels: false },
 ];
 
 const CHANNEL_API_PROVIDERS = [
-  { name: "WhatsApp Cloud API", env: "WHATSAPP_PERMANENT_TOKEN", fields: ["WHATSAPP_TOKEN", "META_ACCESS_TOKEN", "WHATSAPP_PHONE_NUMBER_ID", "WHATSAPP_WABA_ID", "META_APP_ID", "WHATSAPP_GRAPH_VERSION"] },
-  { name: "WooCommerce", env: "WC_BASE_URL", fields: ["WC_CONSUMER_KEY", "WC_CONSUMER_SECRET"] },
+  { code: "whatsapp_cloud", category: "channel", name: "WhatsApp Cloud API", env: "WHATSAPP_PERMANENT_TOKEN", fields: ["WHATSAPP_TOKEN", "META_ACCESS_TOKEN", "WHATSAPP_PHONE_NUMBER_ID", "WHATSAPP_WABA_ID", "META_APP_ID", "WHATSAPP_GRAPH_VERSION"] },
+  { code: "woocommerce", category: "commerce", name: "WooCommerce", env: "WC_BASE_URL", fields: ["WC_CONSUMER_KEY", "WC_CONSUMER_SECRET"] },
 ];
 
 const FEATURE_LABELS = {
@@ -284,7 +284,10 @@ function App() {
   const [aiTest, setAiTest] = useState({ phone: "", message: "" });
   const [profileForm, setProfileForm] = useState({ fullName: "", email: "", phone: "", role: "", avatarUrl: "" });
   const [securityForm, setSecurityForm] = useState({ currentPassword: "", newPassword: "", confirmPassword: "", twoFactorEnabled: false });
-  const [apiSecrets, setApiSecrets] = useState({});
+  const [apiCredentials, setApiCredentials] = useState([]);
+  const [credentialModal, setCredentialModal] = useState(null);
+  const [credentialSaving, setCredentialSaving] = useState(false);
+  const [credentialModels, setCredentialModels] = useState({});
   const [conversations, setConversations] = useState([]);
   const [selectedConversation, setSelectedConversation] = useState(null);
   const [messages, setMessages] = useState([]);
@@ -350,6 +353,7 @@ function App() {
   const activeWebhooks = webhooks.filter((item) => item.is_active).length;
   const activeWhatsappIntegration = integrations.find((item) => item.channel === "whatsapp" && item.status === "connected");
   const whatsappDispatchMode = String(activeWhatsappIntegration?.config_json?.dispatch_mode || "stub").toLowerCase();
+  const credentialByKey = useMemo(() => Object.fromEntries(apiCredentials.map((item) => [item.credential_key, item])), [apiCredentials]);
   const availableInboxChannels = Array.from(new Set([
     ...integrations.filter((item) => item.status === "connected").map((item) => String(item.channel || "").toLowerCase()),
     ...conversations.map((item) => String(item.channel || "").toLowerCase()),
@@ -448,6 +452,7 @@ function App() {
     clearComposerAttachment(); setEmojiOpen(false); setAttachMenuOpen(false); setInboxChannelFilter("all"); setInboxSearch(""); setIsRecording(false); setRecordingSeconds(0); setRecordingLevels(EMPTY_WAVEFORM);
     recordingLevelsRef.current = EMPTY_WAVEFORM;
     setIntegrations([]); setWebhooks([]); setWebhookEvents([]); setBillingOverview(null); setBillingPlans([]); setLastWebhookSecret(null);
+    setApiCredentials([]); setCredentialModal(null); setCredentialModels({});
     setWhatsappPhones([]); setPhoneRegisterForm({ phone_number_id: "", pin: "" });
   };
 
@@ -476,6 +481,12 @@ function App() {
   const loadIntegrations = async () => {
     if (!accessToken) return;
     try { setIntegrations((await apiCall("/saas/v1/integrations")) || []); }
+    catch (err) { showStatus(String(err.message || err), "error"); }
+  };
+
+  const loadApiCredentials = async () => {
+    if (!accessToken) return;
+    try { setApiCredentials((await apiCall("/saas/v1/api-credentials")) || []); }
     catch (err) { showStatus(String(err.message || err), "error"); }
   };
 
@@ -545,7 +556,7 @@ function App() {
   useEffect(() => { loadSession(); }, [accessToken]);
   useEffect(() => {
     if (accessToken && ["dashboard", "customers", "labels", "campaigns", "broadcast", "ads"].includes(activeView)) loadDashboard(true);
-    if (accessToken && activeView === "settings") Promise.all([loadIntegrations(), loadWebhooks(), loadBilling()]);
+    if (accessToken && activeView === "settings") Promise.all([loadIntegrations(), loadWebhooks(), loadBilling(), loadApiCredentials()]);
     if (accessToken && activeView === "inbox") loadInbox();
   }, [accessToken, activeView]);
 
@@ -963,8 +974,116 @@ function App() {
   const saveAiLocal = () => showStatus("Ajustes IA guardados localmente. Falta conectar endpoint persistente.", "ok");
   const saveProfileLocal = () => showStatus("Perfil preparado. Falta conectar persistencia de usuario y foto.", "ok");
   const saveSecurityLocal = () => showStatus("Seguridad preparada. Cambio de clave y 2FA requieren endpoints backend.", "neutral");
-  const saveApiSecretsLocal = () => showStatus("Credenciales preparadas. En produccion deben guardarse cifradas o en secret manager.", "neutral");
+  const openCredentialModal = (provider, credentialKey = provider.env) => {
+    setCredentialModal({
+      ...provider,
+      credential_key: credentialKey,
+      value: "",
+      selected_model: credentialByKey[credentialKey]?.selected_model || "",
+    });
+  };
+  const saveCredentialModal = async (event) => {
+    event.preventDefault();
+    if (!credentialModal || credentialSaving) return;
+    setCredentialSaving(true);
+    try {
+      const data = await apiCall("/saas/v1/api-credentials", {
+        method: "POST",
+        body: JSON.stringify({
+          category: credentialModal.category || "ai",
+          provider_code: credentialModal.code,
+          credential_key: credentialModal.credential_key,
+          display_name: credentialModal.name,
+          value: credentialModal.value,
+          selected_model: credentialModal.selected_model || "",
+        }),
+      });
+      setApiCredentials((prev) => {
+        const others = prev.filter((item) => item.credential_key !== data.credential_key);
+        return [...others, data].sort((a, b) => String(a.credential_key).localeCompare(String(b.credential_key)));
+      });
+      setCredentialModal(null);
+      showStatus("Credencial guardada cifrada en backend", "ok");
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    } finally {
+      setCredentialSaving(false);
+    }
+  };
+  const loadCredentialModels = async (provider) => {
+    if (!provider?.supportsModels) return;
+    const key = provider.env;
+    setCredentialModels((prev) => ({ ...prev, [key]: { ...(prev[key] || {}), loading: true, error: "" } }));
+    try {
+      const data = await apiCall(`/saas/v1/api-credentials/${encodeURIComponent(provider.code)}/models?credential_key=${encodeURIComponent(key)}`);
+      const models = data?.models || [];
+      const current = credentialByKey[key]?.selected_model || models[0]?.id || "";
+      setCredentialModels((prev) => ({ ...prev, [key]: { loading: false, models, selected: current, source: data?.source || "" } }));
+      showStatus(data?.ok === false ? "Modelos de referencia cargados. Guarda primero una credencial para consultar el proveedor real." : "Modelos cargados desde el proveedor", data?.ok === false ? "neutral" : "ok");
+    } catch (err) {
+      setCredentialModels((prev) => ({ ...prev, [key]: { ...(prev[key] || {}), loading: false, error: String(err.message || err) } }));
+      showStatus(String(err.message || err), "error");
+    }
+  };
+  const saveCredentialModel = async (provider) => {
+    const key = provider.env;
+    const selected = credentialModels[key]?.selected || credentialByKey[key]?.selected_model || "";
+    if (!selected) return showStatus("Selecciona un modelo primero.", "neutral");
+    try {
+      const data = await apiCall("/saas/v1/api-credentials", {
+        method: "POST",
+        body: JSON.stringify({
+          category: provider.category,
+          provider_code: provider.code,
+          credential_key: key,
+          display_name: provider.name,
+          selected_model: selected,
+        }),
+      });
+      setApiCredentials((prev) => {
+        const others = prev.filter((item) => item.credential_key !== data.credential_key);
+        return [...others, data].sort((a, b) => String(a.credential_key).localeCompare(String(b.credential_key)));
+      });
+      showStatus("Modelo preferido guardado", "ok");
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    }
+  };
   const submitAiTest = (event) => { event.preventDefault(); showStatus("Prueba IA preparada. El endpoint se conectara en la siguiente fase.", "neutral"); setAiTesterOpen(false); };
+
+  const renderCredentialCard = (provider, credentialKey = provider.env) => {
+    const credential = credentialByKey[credentialKey] || {};
+    const modelsState = credentialModels[credentialKey] || {};
+    const modelOptions = modelsState.models || [];
+    const selectedModel = modelsState.selected ?? credential.selected_model ?? "";
+    return (
+      <div className="api-card" key={`${provider.code}-${credentialKey}`}>
+        <div className="api-card-headline">
+          <div><strong>{provider.name}</strong><span>{provider.models || provider.fields || `Principal: ${provider.env}`}</span></div>
+          <span className={`secret-pill ${credential.has_secret ? "saved" : "missing"}`}>{credential.has_secret ? `Guardada ${credential.secret_hint || ""}` : "Sin guardar"}</span>
+        </div>
+        <div className="api-key-row">
+          <span>{credentialKey}</span>
+          <button type="button" onClick={() => openCredentialModal(provider, credentialKey)}>{credential.has_secret ? "Actualizar" : "Agregar"}</button>
+        </div>
+        {provider.alt ? <small>Alias / extra: {provider.alt}</small> : null}
+        {provider.supportsModels ? (
+          <div className="model-loader">
+            <div className="row-actions">
+              <button type="button" onClick={() => loadCredentialModels(provider)} disabled={modelsState.loading}>{modelsState.loading ? "Cargando..." : "Cargar modelos"}</button>
+              <button type="button" className="primary" onClick={() => saveCredentialModel(provider)} disabled={!selectedModel}>Guardar modelo</button>
+            </div>
+            <select value={selectedModel} onChange={(event) => setCredentialModels((prev) => ({ ...prev, [credentialKey]: { ...(prev[credentialKey] || {}), selected: event.target.value } }))}>
+              <option value="">{credential.selected_model ? `Actual: ${credential.selected_model}` : "Carga modelos disponibles..."}</option>
+              {modelOptions.map((model) => <option key={model.id} value={model.id}>{model.label || model.id}</option>)}
+            </select>
+            {credential.selected_model ? <small>Modelo guardado: {credential.selected_model}</small> : null}
+            {modelsState.error ? <small className="danger-copy">{modelsState.error}</small> : null}
+          </div>
+        ) : null}
+      </div>
+    );
+  };
 
   const isLogged = Boolean(accessToken && me);
 
@@ -1344,18 +1463,18 @@ function App() {
             {settingsTab === "apis" ? <div className="settings-stack">
               <article className="panel glass-card api-console">
                 <div className="panel-head"><h2>Proveedores IA</h2><span>LLM / modelos</span></div>
-                <p className="soft-copy">Estos son los proveedores detectados en el proyecto original. Escribe las llaves aqui solo cuando conectemos persistencia cifrada en backend.</p>
-                <div className="api-card-grid">{AI_API_PROVIDERS.map((provider) => <div className="api-card" key={provider.env}><div><strong>{provider.name}</strong><span>{provider.models}</span></div><label>{provider.env}<input type="password" placeholder="Pegar API key" value={apiSecrets[provider.env] || ""} onChange={(event) => setApiSecrets((prev) => ({ ...prev, [provider.env]: event.target.value }))} /></label>{provider.alt ? <small>Alias / extra: {provider.alt}</small> : null}</div>)}</div>
+                <p className="soft-copy">Las llaves se guardan cifradas por empresa. En el navegador solo mostramos una pista; para rotarlas usa Actualizar y pega el valor nuevo en el modal.</p>
+                <div className="api-card-grid">{AI_API_PROVIDERS.map((provider) => renderCredentialCard(provider))}</div>
               </article>
               <article className="panel glass-card api-console">
                 <div className="panel-head"><h2>Voz y TTS</h2><span>ElevenLabs / Google / Piper</span></div>
-                <div className="api-card-grid">{TTS_API_PROVIDERS.map((provider) => <div className="api-card" key={provider.env}><div><strong>{provider.name}</strong><span>{provider.fields}</span></div><label>{provider.env}<input type="password" placeholder="Pegar valor" value={apiSecrets[provider.env] || ""} onChange={(event) => setApiSecrets((prev) => ({ ...prev, [provider.env]: event.target.value }))} /></label></div>)}</div>
+                <div className="api-card-grid">{TTS_API_PROVIDERS.map((provider) => renderCredentialCard(provider))}</div>
               </article>
               <article className="panel glass-card api-console">
                 <div className="panel-head"><h2>Canales y comercio</h2><span>WhatsApp / WooCommerce</span></div>
-                <div className="api-card-grid channel-api-grid">{CHANNEL_API_PROVIDERS.map((provider) => <div className="api-card wide-api-card" key={provider.name}><div><strong>{provider.name}</strong><span>Principal: {provider.env}</span></div><label>{provider.env}<input type="password" placeholder="Pegar valor principal" value={apiSecrets[provider.env] || ""} onChange={(event) => setApiSecrets((prev) => ({ ...prev, [provider.env]: event.target.value }))} /></label><div className="api-field-list">{provider.fields.map((field) => <label key={field}>{field}<input type={field.includes("TOKEN") || field.includes("SECRET") || field.includes("KEY") ? "password" : "text"} placeholder={field.includes("GRAPH_VERSION") ? "v20.0 / v22.0" : "Valor requerido"} value={apiSecrets[field] || ""} onChange={(event) => setApiSecrets((prev) => ({ ...prev, [field]: event.target.value }))} /></label>)}</div></div>)}</div>
+                <div className="api-card-grid channel-api-grid">{CHANNEL_API_PROVIDERS.map((provider) => <div className="api-card wide-api-card" key={provider.name}><div><strong>{provider.name}</strong><span>Principal: {provider.env}</span></div>{renderCredentialCard(provider)}<div className="api-field-list">{provider.fields.map((field) => renderCredentialCard({ ...provider, name: field, env: field, supportsModels: false }, field))}</div></div>)}</div>
               </article>
-              <article className="panel glass-card"><div className="panel-head"><h2>API SaaS interna</h2><span>base URL</span></div><code className="code-block">{API_BASE || "sin configurar"}/saas/v1</code><p className="soft-copy">Usa Bearer JWT para endpoints privados. Los webhooks resuelven empresa por endpoint key.</p><div className="panel-actions"><button type="button" className="primary" onClick={saveApiSecretsLocal}>Guardar credenciales</button><button type="button" onClick={() => setApiSecrets({})}>Limpiar campos</button></div></article>
+              <article className="panel glass-card"><div className="panel-head"><h2>API SaaS interna</h2><span>base URL</span></div><code className="code-block">{API_BASE || "sin configurar"}/saas/v1</code><p className="soft-copy">Usa Bearer JWT para endpoints privados. Los webhooks resuelven empresa por endpoint key.</p><div className="panel-actions"><button type="button" className="primary" onClick={loadApiCredentials}>Refrescar credenciales</button></div></article>
             </div> : null}
             {settingsTab === "users" ? <div className="settings-grid"><article className="panel glass-card"><div className="panel-head"><h2>Usuarios</h2><span>equipo</span></div><div className="table"><div className="row"><span>{me.email}</span><span>{me.role}</span><span>activo</span></div></div></article><article className="panel glass-card"><div className="panel-head"><h2>Invitar usuario</h2><span>proximo</span></div><label>Email<input placeholder="correo@empresa.com" /></label><label>Rol<select><option>agent</option><option>supervisor</option><option>admin</option></select></label><button type="button" className="primary" onClick={() => showStatus("Invitaciones de usuarios pendientes de backend.", "neutral")}>Enviar invitacion</button></article></div> : null}
             {settingsTab === "profile" ? <div className="settings-grid profile-grid">
@@ -1400,6 +1519,19 @@ function App() {
         )}
       </main>
       {aiTesterOpen ? <div className="modal-backdrop" role="presentation" onMouseDown={() => setAiTesterOpen(false)}><section className="modal-window glass-card" role="dialog" aria-modal="true" aria-label="Probar IA" onMouseDown={(event) => event.stopPropagation()}><div className="panel-head"><h2>Probar IA</h2><button type="button" onClick={() => setAiTesterOpen(false)}>Cerrar</button></div><form onSubmit={submitAiTest} className="modal-form"><label>Phone<input placeholder="57300..." value={aiTest.phone} onChange={(event) => setAiTest((prev) => ({ ...prev, phone: event.target.value }))} /></label><label>Mensaje<textarea rows={5} placeholder="Escribe un mensaje de prueba..." value={aiTest.message} onChange={(event) => setAiTest((prev) => ({ ...prev, message: event.target.value }))} /></label><div className="panel-actions"><button type="submit" className="primary">Procesar</button><button type="button" onClick={() => setAiTest({ phone: "", message: "" })}>Limpiar</button></div></form></section></div> : null}
+      {credentialModal ? (
+        <div className="modal-backdrop" role="presentation" onMouseDown={() => setCredentialModal(null)}>
+          <section className="modal-window glass-card" role="dialog" aria-modal="true" aria-label="Actualizar credencial" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="panel-head"><div><h2>{credentialModal.name}</h2><span>{credentialModal.credential_key}</span></div><button type="button" onClick={() => setCredentialModal(null)}>Cerrar</button></div>
+            <form onSubmit={saveCredentialModal} className="modal-form">
+              <p className="soft-copy">Pega el valor completo solo aqui. Al guardar se cifra en backend y desaparece del navegador; luego solo veras una pista.</p>
+              <label>Nuevo valor<input type="password" autoFocus placeholder="Pegar API key / token / secreto" value={credentialModal.value || ""} onChange={(event) => setCredentialModal((prev) => ({ ...(prev || {}), value: event.target.value }))} /></label>
+              <label>Modelo preferido opcional<input placeholder="ej: gemini-2.5-flash" value={credentialModal.selected_model || ""} onChange={(event) => setCredentialModal((prev) => ({ ...(prev || {}), selected_model: event.target.value }))} /></label>
+              <div className="panel-actions"><button type="submit" className="primary" disabled={credentialSaving}>{credentialSaving ? "Guardando..." : "Guardar cifrado"}</button><button type="button" onClick={() => setCredentialModal(null)}>Cancelar</button></div>
+            </form>
+          </section>
+        </div>
+      ) : null}
     </div>
   );
 }

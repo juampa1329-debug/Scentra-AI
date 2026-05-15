@@ -134,6 +134,7 @@ code { color: #bbf7d0; }
 .auth-links { display: flex; justify-content: space-between; margin-top: 14px; }
 .auth-links button { border: 0; min-height: 28px; background: transparent; color: var(--muted); padding: 0; }
 .field-hint, .soft-copy { color: var(--muted); font-size: 12px; }
+.danger-copy { color: var(--danger) !important; }
 .trial-note { color: var(--soft) !important; }
 .status { border: 1px solid var(--line); border-radius: 16px; padding: 12px 14px; background: rgba(255,255,255,0.08); color: var(--soft); }
 .status.ok { border-color: rgba(134, 239, 172, 0.42); color: var(--ok); }
@@ -226,9 +227,9 @@ nav { display: grid; gap: 8px; width: 100%; }
 .inbox-filters input { flex: 1 0 100%; min-height: 38px; border-radius: 14px; }
 .conversation-list, .messages { display: grid; gap: 10px; }
 .inbox-list { display: grid; grid-template-rows: auto auto minmax(0, 1fr); }
-.conversation-list { max-height: calc(100vh - 310px); overflow: auto; padding-right: 4px; }
+.conversation-list { align-content: start; max-height: calc(100vh - 310px); overflow: auto; padding-right: 4px; }
 .content-inbox .conversation-list { max-height: none; min-height: 0; }
-.conversation-item { display: grid; gap: 5px; min-height: 74px; height: auto; text-align: left; padding: 12px; border-radius: 16px; }
+.conversation-item { align-self: start; display: grid; gap: 5px; min-height: 74px; height: auto; text-align: left; padding: 12px; border-radius: 16px; }
 .conversation-item.active { border-color: rgba(94,234,212,0.55); background: rgba(20,184,166,0.16); }
 .conversation-item span, .conversation-item small, .message span, .message small { color: var(--muted); font-size: 12px; }
 .conversation-item b { color: var(--ok); font-weight: 900; }
@@ -558,6 +559,58 @@ select optgroup {
   background: rgba(255,255,255,0.055);
   padding: 14px;
 }
+.api-card-headline,
+.api-key-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+  min-width: 0;
+}
+.api-key-row {
+  align-items: center;
+  border: 1px solid rgba(255,255,255,0.10);
+  border-radius: 16px;
+  background: rgba(0,0,0,0.14);
+  padding: 10px;
+}
+.api-key-row span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--ink);
+  font-weight: 900;
+}
+.api-key-row button {
+  flex: 0 0 auto;
+  min-height: 32px;
+  border-radius: 12px;
+  font-size: 12px;
+}
+.secret-pill {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  border: 1px solid rgba(148,163,184,0.26);
+  border-radius: 999px;
+  padding: 5px 10px;
+  background: rgba(148,163,184,0.08);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 900;
+}
+.secret-pill.saved {
+  border-color: rgba(52,211,153,0.38);
+  background: rgba(20,184,166,0.12);
+  color: var(--ok);
+}
+.model-loader {
+  display: grid;
+  gap: 9px;
+}
+.model-loader .row-actions {
+  margin: 0;
+}
 .api-card strong,
 .api-card span,
 .api-card small {
@@ -568,6 +621,19 @@ select optgroup {
   color: var(--muted);
   font-size: 12px;
   margin-top: 4px;
+}
+.api-key-row span {
+  color: var(--ink);
+  font-weight: 900;
+  margin-top: 0;
+}
+.api-card .secret-pill {
+  display: inline-flex;
+  color: var(--muted);
+  margin-top: 0;
+}
+.api-card .secret-pill.saved {
+  color: var(--ok);
 }
 .api-field-list {
   display: grid;
