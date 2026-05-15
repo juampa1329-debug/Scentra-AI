@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from app_saas.api_credentials.router import router as api_credentials_router
 from app_saas.admin.router import router as admin_router
@@ -18,6 +18,41 @@ from app_saas.tenants.router import router as tenants_router
 from app_saas.webhooks.router import router as webhooks_router
 
 app = FastAPI(title="Scentra +AI API", version="0.1.0")
+
+
+def _cors_headers_for_origin(origin: str | None) -> dict[str, str]:
+    clean_origin = str(origin or "").strip().rstrip("/")
+    if not clean_origin or clean_origin not in settings.cors_origins:
+        return {}
+    return {
+        "Access-Control-Allow-Origin": clean_origin,
+        "Access-Control-Allow-Credentials": "true",
+        "Vary": "Origin",
+    }
+
+
+@app.middleware("http")
+async def cors_error_guard(request: Request, call_next):
+    origin = request.headers.get("origin")
+    cors_headers = _cors_headers_for_origin(origin)
+    if request.method.upper() == "OPTIONS" and cors_headers:
+        headers = {
+            **cors_headers,
+            "Access-Control-Allow-Methods": "DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT",
+            "Access-Control-Allow-Headers": request.headers.get("access-control-request-headers", "*"),
+            "Access-Control-Max-Age": "600",
+        }
+        return Response("OK", status_code=200, headers=headers)
+    try:
+        response = await call_next(request)
+    except Exception as exc:
+        content = {"ok": False, "error": str(exc) if settings.is_local else "internal_server_error"}
+        return JSONResponse(status_code=500, content=content, headers=cors_headers)
+    for key, value in cors_headers.items():
+        if key not in response.headers:
+            response.headers[key] = value
+    return response
+
 
 app.add_middleware(
     CORSMiddleware,
