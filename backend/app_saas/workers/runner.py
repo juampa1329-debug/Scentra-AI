@@ -3,6 +3,7 @@ import time
 
 from app_saas.workers.dispatch import process_due_outbound_messages
 from app_saas.workers.ingest import process_due_webhook_events
+from app_saas.workers.remarketing import process_due_remarketing_flows
 from app_saas.workers.triggers import process_due_scheduled_trigger_messages
 
 
@@ -14,8 +15,12 @@ def main() -> None:
     while True:
         ingest_result = process_due_webhook_events(limit=batch_size)
         trigger_result = process_due_scheduled_trigger_messages(limit=batch_size)
+        remarketing_result = process_due_remarketing_flows(limit=batch_size)
         outbound_result = process_due_outbound_messages(limit=batch_size)
-        print(f"[{worker_name}] tick ingest={ingest_result} triggers={trigger_result} outbound={outbound_result}")
+        print(
+            f"[{worker_name}] tick ingest={ingest_result} triggers={trigger_result} "
+            f"remarketing={remarketing_result} outbound={outbound_result}"
+        )
         time.sleep(interval_sec)
 
 

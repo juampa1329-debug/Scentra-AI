@@ -298,6 +298,15 @@ nav { display: grid; gap: 8px; width: 100%; }
 .crm-snapshot { display: grid; grid-template-columns: auto 1fr; gap: 8px 12px; border: 1px solid var(--line); border-radius: 18px; padding: 14px; background: rgba(255,255,255,0.055); }
 .crm-snapshot span { color: var(--muted); font-size: 12px; }
 .crm-snapshot strong { text-align: right; overflow-wrap: anywhere; }
+.ai-context-card { grid-column: span 2; display: grid; gap: 10px; border: 1px solid rgba(94,234,212,0.24); border-radius: 18px; padding: 13px; background: linear-gradient(135deg, rgba(20,184,166,0.13), rgba(96,165,250,0.08)); }
+.ai-context-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.ai-context-head button, .ai-context-card > button { min-height: 30px; border-radius: 11px; font-size: 12px; }
+.ai-context-card p { margin: 0; color: var(--soft); line-height: 1.45; }
+.ai-facts { display: flex; flex-wrap: wrap; gap: 6px; }
+.ai-facts span { display: inline-flex; gap: 6px; align-items: center; max-width: 100%; border: 1px solid rgba(148,163,184,0.24); border-radius: 999px; padding: 6px 9px; background: rgba(0,0,0,0.16); color: var(--soft); font-size: 11px; }
+.ai-facts b { color: var(--ok); font-weight: 900; }
+.ai-test-result { border: 1px solid rgba(94,234,212,0.24); border-radius: 18px; padding: 12px; background: rgba(20,184,166,0.10); }
+.ai-test-result p { margin: 8px 0 0; color: var(--soft); white-space: pre-wrap; }
 .settings-tabs { position: sticky; top: 18px; z-index: 4; display: flex; flex-wrap: wrap; gap: 8px; border-radius: 24px; padding: 10px; }
 .settings-tabs button { min-height: 42px; border-radius: 16px; }
 .settings-tabs button.active { background: linear-gradient(135deg, rgba(52,211,153,0.88), rgba(20,184,166,0.72)); color: #04231d; font-weight: 900; }

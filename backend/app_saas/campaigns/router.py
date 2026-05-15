@@ -24,6 +24,7 @@ from app_saas.campaigns.schemas import (
 )
 from app_saas.db import db_session, set_tenant_context
 from app_saas.shared.security import AuthContext, get_current_user, require_role
+from app_saas.workers.remarketing import process_due_remarketing_flows
 
 router = APIRouter(prefix="/campaigns", tags=["saas-campaigns"])
 
@@ -843,6 +844,18 @@ def list_flows(ctx: AuthContext = Depends(get_current_user)):
             {"tenant_id": ctx.tenant_id},
         )
     return {"tenant_id": ctx.tenant_id, "flows": rows}
+
+
+@router.post("/flows/process")
+def process_flows_now(
+    limit: int = Query(100, ge=1, le=500),
+    ctx: AuthContext = Depends(require_role("owner", "admin", "supervisor")),
+):
+    with db_session() as conn:
+        set_tenant_context(conn, ctx.tenant_id)
+        _ensure_remarketing(conn, ctx.tenant_id)
+    result = process_due_remarketing_flows(limit=limit, tenant_id=ctx.tenant_id)
+    return {"ok": True, "tenant_id": ctx.tenant_id, "result": result}
 
 
 @router.post("/flows")

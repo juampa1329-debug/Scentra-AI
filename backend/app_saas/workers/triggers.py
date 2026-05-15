@@ -893,7 +893,16 @@ def execute_triggers_for_message(
             error=error,
             details=execution_details,
         )
-        details.append({"trigger_id": trigger["id"], "name": trigger.get("name"), "matched": True, "status": status, "sent": sent, "conditions": condition_evals, "actions": action_result.get("actions") or []})
+        details.append({
+            "trigger_id": trigger["id"],
+            "name": trigger.get("name"),
+            "matched": True,
+            "status": status,
+            "sent": sent,
+            "block_ai": bool(trigger.get("block_ai")) and status == "ok",
+            "conditions": condition_evals,
+            "actions": action_result.get("actions") or [],
+        })
         if bool(trigger.get("stop_on_match")):
             break
 

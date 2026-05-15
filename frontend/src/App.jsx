@@ -283,6 +283,7 @@ function App() {
   const [aiConfig, setAiConfig] = useState(defaultAiConfig);
   const [aiTesterOpen, setAiTesterOpen] = useState(false);
   const [aiTest, setAiTest] = useState({ phone: "", message: "" });
+  const [aiTestResult, setAiTestResult] = useState("");
   const [profileForm, setProfileForm] = useState({ fullName: "", email: "", phone: "", role: "", avatarUrl: "" });
   const [securityForm, setSecurityForm] = useState({ currentPassword: "", newPassword: "", confirmPassword: "", twoFactorEnabled: false });
   const [apiCredentials, setApiCredentials] = useState([]);
@@ -291,6 +292,7 @@ function App() {
   const [credentialModels, setCredentialModels] = useState({});
   const [conversations, setConversations] = useState([]);
   const [selectedConversation, setSelectedConversation] = useState(null);
+  const [conversationMemory, setConversationMemory] = useState(null);
   const [messages, setMessages] = useState([]);
   const [replyText, setReplyText] = useState("");
   const [attachmentFile, setAttachmentFile] = useState(null);
@@ -491,7 +493,7 @@ function App() {
   };
 
   const clearWorkspaceState = () => {
-    setConversations([]); setSelectedConversation(null); setMessages([]); setReplyText("");
+    setConversations([]); setSelectedConversation(null); setConversationMemory(null); setMessages([]); setReplyText("");
     clearComposerAttachment(); setEmojiOpen(false); setAttachMenuOpen(false); setInboxChannelFilter("all"); setInboxSearch(""); setIsRecording(false); setRecordingSeconds(0); setRecordingLevels(EMPTY_WAVEFORM);
     recordingLevelsRef.current = EMPTY_WAVEFORM;
     setIntegrations([]); setWebhooks([]); setWebhookEvents([]); setBillingOverview(null); setBillingPlans([]); setLastWebhookSecret(null);
@@ -533,6 +535,32 @@ function App() {
     catch (err) { showStatus(String(err.message || err), "error"); }
   };
 
+  const loadAiSettings = async () => {
+    if (!accessToken) return;
+    try {
+      const data = await apiCall("/saas/v1/ai/settings");
+      setAiConfig((prev) => ({
+        ...prev,
+        enabled: Boolean(data?.enabled),
+        provider: data?.provider_code || prev.provider,
+        fallbackProvider: data?.fallback_provider_code || prev.fallbackProvider,
+        systemPrompt: data?.system_prompt || prev.systemPrompt,
+        maxTokens: String(data?.max_tokens || prev.maxTokens),
+        temperature: String(data?.temperature ?? prev.temperature),
+      }));
+    } catch (err) { showStatus(String(err.message || err), "error"); }
+  };
+
+  const loadConversationMemory = async (conversationId) => {
+    if (!accessToken || !conversationId) return;
+    try {
+      const data = await apiCall(`/saas/v1/ai/conversations/${encodeURIComponent(conversationId)}/memory`);
+      setConversationMemory(data || null);
+    } catch {
+      setConversationMemory(null);
+    }
+  };
+
   const loadBilling = async () => {
     if (!accessToken) return;
     try {
@@ -557,9 +585,13 @@ function App() {
   const loadMessages = async (conversation, options = {}) => {
     if (!conversation?.id) return;
     try {
-      const data = await apiCall(`/saas/v1/conversations/${encodeURIComponent(conversation.id)}/messages`);
+      const [data, memoryData] = await Promise.all([
+        apiCall(`/saas/v1/conversations/${encodeURIComponent(conversation.id)}/messages`),
+        apiCall(`/saas/v1/ai/conversations/${encodeURIComponent(conversation.id)}/memory`).catch(() => null),
+      ]);
       const selected = { ...conversation, unread_count: 0 };
       setSelectedConversation(selected); setMessages(data?.messages || []);
+      setConversationMemory(memoryData || null);
       if (!options.preserveComposer) { setReplyText(""); clearComposerAttachment(); setEmojiOpen(false); setAttachMenuOpen(false); }
       if (Number(conversation.unread_count || 0) > 0) markConversationRead(conversation.id, { silent: true });
     } catch (err) { showStatus(String(err.message || err), "error"); }
@@ -579,7 +611,7 @@ function App() {
         const updatedSelected = items.find((item) => item.id === selectedConversation.id);
         if (updatedSelected) await loadMessages({ ...selectedConversation, ...updatedSelected }, { preserveComposer: true });
       }
-      if (!items.length) { setSelectedConversation(null); setMessages([]); setReplyText(""); clearComposerAttachment(); }
+      if (!items.length) { setSelectedConversation(null); setConversationMemory(null); setMessages([]); setReplyText(""); clearComposerAttachment(); }
     } catch (err) { showStatus(String(err.message || err), "error"); }
   };
 
@@ -599,7 +631,7 @@ function App() {
   useEffect(() => { loadSession(); }, [accessToken]);
   useEffect(() => {
     if (accessToken && ["dashboard", "customers", "labels", "campaigns", "broadcast", "ads"].includes(activeView)) loadDashboard(true);
-    if (accessToken && activeView === "settings") Promise.all([loadIntegrations(), loadWebhooks(), loadBilling(), loadApiCredentials()]);
+    if (accessToken && activeView === "settings") Promise.all([loadIntegrations(), loadWebhooks(), loadBilling(), loadApiCredentials(), loadAiSettings()]);
     if (accessToken && activeView === "inbox") loadInbox();
   }, [accessToken, activeView]);
 
@@ -628,6 +660,7 @@ function App() {
   useEffect(() => {
     if (!selectedConversation?.id) {
       setCrmDraft({});
+      setConversationMemory(null);
       return;
     }
     setCrmDraft({
@@ -1014,7 +1047,41 @@ function App() {
     }
   };
   const changePlanDev = async (planCode) => { try { const data = await apiCall("/saas/v1/billing/dev/change-plan", { method: "POST", body: JSON.stringify({ plan_code: planCode }) }); setBillingOverview(data); showStatus(`Plan actualizado a ${planCode}`, "ok"); await loadSession(); } catch (err) { showStatus(String(err.message || err), "error"); } };
-  const saveAiLocal = () => showStatus("Ajustes IA guardados. Credenciales y modelos se administran desde Ajustes > APIs.", "ok");
+  const saveAiLocal = async () => {
+    try {
+      const data = await apiCall("/saas/v1/ai/settings", {
+        method: "PUT",
+        body: JSON.stringify({
+          enabled: Boolean(aiConfig.enabled),
+          provider_code: aiConfig.provider,
+          fallback_provider_code: aiConfig.fallbackProvider,
+          system_prompt: aiConfig.systemPrompt,
+          max_tokens: Number(aiConfig.maxTokens || 1800),
+          temperature: Number(aiConfig.temperature || 0.5),
+          metadata_json: {
+            voice_enabled: Boolean(aiConfig.voiceEnabled),
+            prefer_voice: Boolean(aiConfig.preferVoice),
+            tts_provider: aiConfig.ttsProvider,
+            voice_id: aiConfig.voiceId,
+            voice_name: aiConfig.voiceName,
+            voice_prompt: aiConfig.voicePrompt,
+          },
+        }),
+      });
+      setAiConfig((prev) => ({
+        ...prev,
+        enabled: Boolean(data?.enabled),
+        provider: data?.provider_code || prev.provider,
+        fallbackProvider: data?.fallback_provider_code || prev.fallbackProvider,
+        systemPrompt: data?.system_prompt || prev.systemPrompt,
+        maxTokens: String(data?.max_tokens || prev.maxTokens),
+        temperature: String(data?.temperature ?? prev.temperature),
+      }));
+      showStatus("Ajustes IA guardados. El agente usara el modelo seleccionado en APIs.", "ok");
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    }
+  };
   const saveProfileLocal = () => showStatus("Perfil preparado. Falta conectar persistencia de usuario y foto.", "ok");
   const saveSecurityLocal = () => showStatus("Seguridad preparada. Cambio de clave y 2FA requieren endpoints backend.", "neutral");
   const openCredentialModal = (provider, credentialKey = provider.env) => {
@@ -1092,7 +1159,31 @@ function App() {
       showStatus(String(err.message || err), "error");
     }
   };
-  const submitAiTest = (event) => { event.preventDefault(); showStatus("Prueba IA preparada. El endpoint se conectara en la siguiente fase.", "neutral"); setAiTesterOpen(false); };
+  const processSelectedWithAi = async () => {
+    if (!selectedConversation?.id) return;
+    try {
+      const data = await apiCall(`/saas/v1/ai/conversations/${encodeURIComponent(selectedConversation.id)}/process`, { method: "POST" });
+      const result = data?.result || {};
+      if ((result.outbound || {}).ok) showStatus("IA procesó la conversación y encoló respuesta.", "ok");
+      else showStatus(`IA procesada: ${result.skipped || "sin respuesta para enviar"}`, "neutral");
+      await loadMessages(selectedConversation, { preserveComposer: true });
+      await loadInbox();
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    }
+  };
+  const submitAiTest = async (event) => {
+    event.preventDefault();
+    setAiTestResult("");
+    try {
+      const data = await apiCall("/saas/v1/ai/test", { method: "POST", body: JSON.stringify(aiTest) });
+      const reply = data?.result?.reply || "";
+      setAiTestResult(reply || JSON.stringify(data?.result || {}, null, 2));
+      showStatus("Prueba IA ejecutada con el proveedor activo.", "ok");
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    }
+  };
 
   const renderCredentialCard = (provider, credentialKey = provider.env) => {
     const credential = credentialByKey[credentialKey] || {};
@@ -1312,6 +1403,14 @@ function App() {
                     <label>Intereses<input value={crmDraft.interests || ""} onChange={(event) => updateCrmDraft("interests", event.target.value)} placeholder="dulces, frescos..." /></label>
                     <label>Etiquetas<input value={crmDraft.tags || ""} onChange={(event) => updateCrmDraft("tags", event.target.value)} placeholder="vip, pago pendiente..." /></label>
                     <label>Notas<textarea rows={4} value={crmDraft.notes || ""} onChange={(event) => updateCrmDraft("notes", event.target.value)} /></label>
+                    <div className="ai-context-card">
+                      <div className="ai-context-head"><strong>Contexto IA</strong><button type="button" onClick={() => loadConversationMemory(selectedConversation.id)}>Refrescar</button></div>
+                      <p>{conversationMemory?.summary || "La IA aun no ha construido memoria para esta conversacion."}</p>
+                      <div className="ai-facts">
+                        {Object.entries(conversationMemory?.facts_json || {}).filter(([, value]) => String(value || "").trim()).slice(0, 8).map(([key, value]) => <span key={key}><b>{key}</b>{String(value)}</span>)}
+                      </div>
+                      <button type="button" onClick={processSelectedWithAi}>Procesar con IA ahora</button>
+                    </div>
                     <label className="check-row"><input type="checkbox" checked={Boolean(crmDraft.takeover)} onChange={(event) => updateCrmDraft("takeover", event.target.checked)} /> Takeover humano</label>
                     <button type="button" className="primary" onClick={saveSelectedCrm} disabled={savingCrm}>{savingCrm ? "Guardando..." : "Guardar ficha"}</button>
                   </div>
@@ -1626,7 +1725,7 @@ function App() {
           </section>
         )}
       </main>
-      {aiTesterOpen ? <div className="modal-backdrop" role="presentation" onMouseDown={() => setAiTesterOpen(false)}><section className="modal-window glass-card" role="dialog" aria-modal="true" aria-label="Probar IA" onMouseDown={(event) => event.stopPropagation()}><div className="panel-head"><h2>Probar IA</h2><button type="button" onClick={() => setAiTesterOpen(false)}>Cerrar</button></div><form onSubmit={submitAiTest} className="modal-form"><label>Phone<input placeholder="57300..." value={aiTest.phone} onChange={(event) => setAiTest((prev) => ({ ...prev, phone: event.target.value }))} /></label><label>Mensaje<textarea rows={5} placeholder="Escribe un mensaje de prueba..." value={aiTest.message} onChange={(event) => setAiTest((prev) => ({ ...prev, message: event.target.value }))} /></label><div className="panel-actions"><button type="submit" className="primary">Procesar</button><button type="button" onClick={() => setAiTest({ phone: "", message: "" })}>Limpiar</button></div></form></section></div> : null}
+      {aiTesterOpen ? <div className="modal-backdrop" role="presentation" onMouseDown={() => setAiTesterOpen(false)}><section className="modal-window glass-card" role="dialog" aria-modal="true" aria-label="Probar IA" onMouseDown={(event) => event.stopPropagation()}><div className="panel-head"><h2>Probar IA</h2><button type="button" onClick={() => setAiTesterOpen(false)}>Cerrar</button></div><form onSubmit={submitAiTest} className="modal-form"><label>Phone<input placeholder="57300..." value={aiTest.phone} onChange={(event) => setAiTest((prev) => ({ ...prev, phone: event.target.value }))} /></label><label>Mensaje<textarea rows={5} placeholder="Escribe un mensaje de prueba..." value={aiTest.message} onChange={(event) => setAiTest((prev) => ({ ...prev, message: event.target.value }))} /></label>{aiTestResult ? <div className="ai-test-result"><strong>Respuesta IA</strong><p>{aiTestResult}</p></div> : null}<div className="panel-actions"><button type="submit" className="primary">Procesar</button><button type="button" onClick={() => { setAiTest({ phone: "", message: "" }); setAiTestResult(""); }}>Limpiar</button></div></form></section></div> : null}
       {credentialModal ? (
         <div className="modal-backdrop" role="presentation" onMouseDown={() => setCredentialModal(null)}>
           <section className="modal-window glass-card" role="dialog" aria-modal="true" aria-label="Actualizar credencial" onMouseDown={(event) => event.stopPropagation()}>
@@ -1644,4 +1743,3 @@ function App() {
 }
 
 export default App;
-

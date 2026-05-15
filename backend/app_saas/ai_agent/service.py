@@ -1,0 +1,831 @@
+from __future__ import annotations
+
+import json
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone
+from typing import Any
+from uuid import uuid4
+
+from fastapi import HTTPException
+from sqlalchemy import text
+from sqlalchemy.engine import Connection
+
+from app_saas.api_credentials.router import _ensure_api_credentials_table
+from app_saas.billing.limits import ensure_ai_token_quota, ensure_monthly_message_quota
+from app_saas.shared.secrets import decrypt_secret
+
+DEFAULT_AGENT_PROMPT = """Eres el agente comercial de Scentra +AI para WhatsApp y CRM.
+Tu trabajo es vender con tono humano, claro y consultivo, mantener el contexto de la conversacion y actualizar la ficha CRM.
+No inventes precios, disponibilidad, politicas, enlaces ni promesas si no aparecen en el contexto. Si falta informacion, pregunta de forma breve.
+Cuando el cliente comparta datos utiles, extraelos para CRM: nombre, apellido, ciudad, intereses, etiquetas, etapa comercial, estado de pago, intencion y notas.
+Responde siempre en el idioma del cliente, normalmente espanol colombiano, con frases naturales y cortas."""
+
+PROVIDER_CREDENTIAL_KEYS = {
+    "google": "GOOGLE_AI_API_KEY",
+    "groq": "GROQ_API_KEY",
+    "mistral": "MISTRAL_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+}
+
+PROVIDER_DEFAULT_MODELS = {
+    "google": "gemini-2.5-flash",
+    "groq": "llama-3.1-8b-instant",
+    "mistral": "mistral-small-latest",
+    "openrouter": "google/gemini-2.5-flash",
+}
+
+CRM_FIELDS = {
+    "display_name",
+    "first_name",
+    "last_name",
+    "city",
+    "customer_type",
+    "interests",
+    "tags",
+    "notes",
+    "payment_status",
+    "crm_stage",
+    "intent",
+}
+
+
+def _clean(value: Any, limit: int = 4000) -> str:
+    return str(value or "").strip()[:limit]
+
+
+def _json(value: Any) -> str:
+    return json.dumps(value if value is not None else {}, ensure_ascii=False)
+
+
+def _period_yyyymm() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m")
+
+
+def estimate_tokens(*parts: Any) -> int:
+    size = sum(len(str(part or "")) for part in parts)
+    return max(1, int(size / 4) + 120)
+
+
+def ensure_ai_tables(conn: Connection) -> None:
+    conn.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS saas_ai_settings (
+                tenant_id UUID PRIMARY KEY REFERENCES saas_tenants(id) ON DELETE CASCADE,
+                enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                provider_code TEXT NOT NULL DEFAULT 'google',
+                fallback_provider_code TEXT NOT NULL DEFAULT '',
+                system_prompt TEXT NOT NULL DEFAULT '',
+                max_tokens INTEGER NOT NULL DEFAULT 1800,
+                temperature NUMERIC(4,2) NOT NULL DEFAULT 0.5,
+                metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS saas_conversation_memory (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                tenant_id UUID NOT NULL REFERENCES saas_tenants(id) ON DELETE CASCADE,
+                conversation_id UUID NOT NULL REFERENCES saas_conversations(id) ON DELETE CASCADE,
+                summary TEXT NOT NULL DEFAULT '',
+                facts_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                last_message_id UUID NULL REFERENCES saas_messages(id) ON DELETE SET NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                UNIQUE (tenant_id, conversation_id)
+            )
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_saas_conversation_memory_tenant_updated
+            ON saas_conversation_memory (tenant_id, updated_at DESC)
+            """
+        )
+    )
+
+
+def default_settings(tenant_id: str) -> dict[str, Any]:
+    return {
+        "tenant_id": tenant_id,
+        "enabled": True,
+        "provider_code": "google",
+        "fallback_provider_code": "groq",
+        "system_prompt": DEFAULT_AGENT_PROMPT,
+        "max_tokens": 1800,
+        "temperature": 0.5,
+        "metadata_json": {},
+        "updated_at": "",
+        "active_model": "",
+        "fallback_model": "",
+    }
+
+
+def _provider_model_from_credentials(conn: Connection, tenant_id: str, provider_code: str) -> tuple[str, str, str]:
+    provider = _clean(provider_code, 80).lower()
+    if not provider:
+        return "", "", ""
+    _ensure_api_credentials_table(conn)
+    preferred_key = PROVIDER_CREDENTIAL_KEYS.get(provider, "")
+    filters = [
+        "tenant_id = CAST(:tenant_id AS uuid)",
+        "provider_code = :provider_code",
+        "category = 'ai'",
+    ]
+    params: dict[str, Any] = {"tenant_id": tenant_id, "provider_code": provider}
+    order = "updated_at DESC"
+    if preferred_key:
+        order = "CASE WHEN credential_key = :preferred_key THEN 0 ELSE 1 END, updated_at DESC"
+        params["preferred_key"] = preferred_key
+    row = conn.execute(
+        text(
+            f"""
+            SELECT credential_key, secret_value, metadata_json
+            FROM saas_api_credentials
+            WHERE {" AND ".join(filters)}
+            ORDER BY {order}
+            LIMIT 1
+            """
+        ),
+        params,
+    ).mappings().first()
+    if not row:
+        return "", PROVIDER_DEFAULT_MODELS.get(provider, ""), preferred_key
+    metadata = row.get("metadata_json") if isinstance(row.get("metadata_json"), dict) else {}
+    return (
+        decrypt_secret(str(row.get("secret_value") or "")),
+        _clean(metadata.get("selected_model") or PROVIDER_DEFAULT_MODELS.get(provider, ""), 240),
+        str(row.get("credential_key") or preferred_key),
+    )
+
+
+def get_settings(conn: Connection, tenant_id: str) -> dict[str, Any]:
+    ensure_ai_tables(conn)
+    row = conn.execute(
+        text(
+            """
+            SELECT tenant_id::text, enabled, provider_code, fallback_provider_code,
+                   system_prompt, max_tokens, temperature, metadata_json, updated_at::text
+            FROM saas_ai_settings
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+            LIMIT 1
+            """
+        ),
+        {"tenant_id": tenant_id},
+    ).mappings().first()
+    data = dict(row) if row else default_settings(tenant_id)
+    if not _clean(data.get("system_prompt")):
+        data["system_prompt"] = DEFAULT_AGENT_PROMPT
+    _, active_model, _ = _provider_model_from_credentials(conn, tenant_id, str(data.get("provider_code") or ""))
+    _, fallback_model, _ = _provider_model_from_credentials(conn, tenant_id, str(data.get("fallback_provider_code") or ""))
+    data["active_model"] = active_model
+    data["fallback_model"] = fallback_model
+    data["max_tokens"] = int(data.get("max_tokens") or 1800)
+    data["temperature"] = float(data.get("temperature") or 0.5)
+    data["metadata_json"] = data.get("metadata_json") if isinstance(data.get("metadata_json"), dict) else {}
+    return data
+
+
+def upsert_settings(conn: Connection, tenant_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    ensure_ai_tables(conn)
+    provider = _clean(payload.get("provider_code") or "google", 80).lower()
+    fallback = _clean(payload.get("fallback_provider_code") or "", 80).lower()
+    system_prompt = _clean(payload.get("system_prompt") or DEFAULT_AGENT_PROMPT, 20000)
+    metadata = payload.get("metadata_json") if isinstance(payload.get("metadata_json"), dict) else {}
+    conn.execute(
+        text(
+            """
+            INSERT INTO saas_ai_settings (
+                tenant_id, enabled, provider_code, fallback_provider_code, system_prompt,
+                max_tokens, temperature, metadata_json, updated_at
+            )
+            VALUES (
+                CAST(:tenant_id AS uuid), :enabled, :provider_code, :fallback_provider_code, :system_prompt,
+                :max_tokens, :temperature, CAST(:metadata_json AS jsonb), NOW()
+            )
+            ON CONFLICT (tenant_id)
+            DO UPDATE SET
+                enabled = EXCLUDED.enabled,
+                provider_code = EXCLUDED.provider_code,
+                fallback_provider_code = EXCLUDED.fallback_provider_code,
+                system_prompt = EXCLUDED.system_prompt,
+                max_tokens = EXCLUDED.max_tokens,
+                temperature = EXCLUDED.temperature,
+                metadata_json = EXCLUDED.metadata_json,
+                updated_at = NOW()
+            """
+        ),
+        {
+            "tenant_id": tenant_id,
+            "enabled": bool(payload.get("enabled", True)),
+            "provider_code": provider,
+            "fallback_provider_code": fallback,
+            "system_prompt": system_prompt,
+            "max_tokens": int(payload.get("max_tokens") or 1800),
+            "temperature": float(payload.get("temperature") or 0.5),
+            "metadata_json": _json(metadata),
+        },
+    )
+    return get_settings(conn, tenant_id)
+
+
+def get_memory(conn: Connection, tenant_id: str, conversation_id: str) -> dict[str, Any]:
+    ensure_ai_tables(conn)
+    row = conn.execute(
+        text(
+            """
+            SELECT tenant_id::text, conversation_id::text, summary, facts_json,
+                   COALESCE(last_message_id::text, '') AS last_message_id,
+                   updated_at::text
+            FROM saas_conversation_memory
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND conversation_id = CAST(:conversation_id AS uuid)
+            LIMIT 1
+            """
+        ),
+        {"tenant_id": tenant_id, "conversation_id": conversation_id},
+    ).mappings().first()
+    if row:
+        data = dict(row)
+        data["facts_json"] = data.get("facts_json") if isinstance(data.get("facts_json"), dict) else {}
+        return data
+    return {
+        "tenant_id": tenant_id,
+        "conversation_id": conversation_id,
+        "summary": "",
+        "facts_json": {},
+        "last_message_id": "",
+        "updated_at": "",
+    }
+
+
+def _conversation(conn: Connection, tenant_id: str, conversation_id: str) -> dict[str, Any] | None:
+    row = conn.execute(
+        text(
+            """
+            SELECT id::text, tenant_id::text, channel, external_contact_id, phone, display_name,
+                   first_name, last_name, city, customer_type, interests, takeover,
+                   last_message_text, unread_count, tags, notes, payment_status,
+                   payment_reference, crm_stage, intent, profile_json, updated_at::text
+            FROM saas_conversations
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND id = CAST(:conversation_id AS uuid)
+            LIMIT 1
+            """
+        ),
+        {"tenant_id": tenant_id, "conversation_id": conversation_id},
+    ).mappings().first()
+    return dict(row) if row else None
+
+
+def _recent_messages(conn: Connection, tenant_id: str, conversation_id: str, limit: int = 24) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        text(
+            """
+            SELECT id::text, direction, msg_type, text, media_id, mime_type, payload_json, created_at::text
+            FROM saas_messages
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND conversation_id = CAST(:conversation_id AS uuid)
+            ORDER BY created_at DESC
+            LIMIT :limit
+            """
+        ),
+        {"tenant_id": tenant_id, "conversation_id": conversation_id, "limit": limit},
+    ).mappings().all()
+    messages = [dict(row) for row in rows]
+    messages.reverse()
+    return messages
+
+
+def _prompt(settings: dict[str, Any], conversation: dict[str, Any], memory: dict[str, Any], messages: list[dict[str, Any]]) -> tuple[str, str]:
+    system_prompt = _clean(settings.get("system_prompt") or DEFAULT_AGENT_PROMPT, 20000)
+    facts = memory.get("facts_json") if isinstance(memory.get("facts_json"), dict) else {}
+    transcript_lines = []
+    for message in messages:
+        role = "NEGOCIO" if str(message.get("direction")).lower() == "out" else "CLIENTE"
+        msg_type = _clean(message.get("msg_type") or "text", 40)
+        text_value = _clean(message.get("text") or f"[{msg_type}]", 4000)
+        transcript_lines.append(f"{role} ({msg_type}): {text_value}")
+    crm_context = {
+        "display_name": conversation.get("display_name"),
+        "first_name": conversation.get("first_name"),
+        "last_name": conversation.get("last_name"),
+        "phone": conversation.get("phone") or conversation.get("external_contact_id"),
+        "city": conversation.get("city"),
+        "customer_type": conversation.get("customer_type"),
+        "interests": conversation.get("interests"),
+        "tags": conversation.get("tags"),
+        "notes": conversation.get("notes"),
+        "payment_status": conversation.get("payment_status"),
+        "payment_reference": conversation.get("payment_reference"),
+        "crm_stage": conversation.get("crm_stage"),
+        "intent": conversation.get("intent"),
+    }
+    user_prompt = f"""
+Contexto CRM actual:
+{json.dumps(crm_context, ensure_ascii=False)}
+
+Memoria resumida de la conversacion:
+{memory.get("summary") or "Sin memoria todavia."}
+
+Hechos guardados:
+{json.dumps(facts, ensure_ascii=False)}
+
+Conversacion reciente:
+{chr(10).join(transcript_lines[-24:])}
+
+Tarea:
+1. Responde al ultimo mensaje del cliente si corresponde.
+2. Extrae o mejora los campos CRM solo con datos razonables de la conversacion.
+3. Actualiza una memoria breve para continuar el seguimiento comercial.
+
+Devuelve UNICAMENTE JSON valido con esta forma:
+{{
+  "reply": "respuesta para enviar por WhatsApp, o texto vacio si no debes responder",
+  "memory_summary": "resumen breve de contexto y siguiente paso",
+  "facts": {{"need": "", "budget": "", "product_interest": "", "objections": "", "next_step": ""}},
+  "crm": {{
+    "display_name": "",
+    "first_name": "",
+    "last_name": "",
+    "city": "",
+    "customer_type": "",
+    "interests": "",
+    "tags": ["tag1", "tag2"],
+    "notes": "",
+    "payment_status": "",
+    "crm_stage": "",
+    "intent": ""
+  }}
+}}
+"""
+    return system_prompt, user_prompt
+
+
+def _post_json(url: str, payload: dict[str, Any], *, headers: dict[str, str] | None = None, timeout: int = 45) -> dict[str, Any]:
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json", **(headers or {})},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+            parsed = json.loads(raw or "{}")
+            return parsed if isinstance(parsed, dict) else {"data": parsed}
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"ai_provider_http_{exc.code}:{raw[:500]}") from exc
+    except Exception as exc:
+        raise RuntimeError(f"ai_provider_unavailable:{str(exc)[:300]}") from exc
+
+
+def _call_google(token: str, model: str, system_prompt: str, user_prompt: str, settings: dict[str, Any]) -> str:
+    query = urllib.parse.urlencode({"key": token})
+    safe_model = urllib.parse.quote(model or PROVIDER_DEFAULT_MODELS["google"], safe="")
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{safe_model}:generateContent?{query}"
+    data = _post_json(
+        url,
+        {
+            "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
+            "systemInstruction": {"parts": [{"text": system_prompt}]},
+            "generationConfig": {
+                "temperature": float(settings.get("temperature") or 0.5),
+                "maxOutputTokens": int(settings.get("max_tokens") or 1800),
+                "responseMimeType": "application/json",
+            },
+        },
+    )
+    candidates = data.get("candidates") if isinstance(data.get("candidates"), list) else []
+    if not candidates:
+        return ""
+    parts = (((candidates[0] or {}).get("content") or {}).get("parts") or [])
+    return "\n".join(str(part.get("text") or "") for part in parts if isinstance(part, dict)).strip()
+
+
+def _call_chat_completions(provider: str, token: str, model: str, system_prompt: str, user_prompt: str, settings: dict[str, Any]) -> str:
+    endpoints = {
+        "groq": "https://api.groq.com/openai/v1/chat/completions",
+        "mistral": "https://api.mistral.ai/v1/chat/completions",
+        "openrouter": "https://openrouter.ai/api/v1/chat/completions",
+    }
+    headers = {"Authorization": f"Bearer {token}"}
+    if provider == "openrouter":
+        headers.update({"HTTP-Referer": "https://app.scentra-ai.online", "X-Title": "Scentra +AI"})
+    data = _post_json(
+        endpoints[provider],
+        {
+            "model": model or PROVIDER_DEFAULT_MODELS.get(provider, ""),
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": float(settings.get("temperature") or 0.5),
+            "max_tokens": int(settings.get("max_tokens") or 1800),
+            "response_format": {"type": "json_object"},
+        },
+        headers=headers,
+    )
+    choices = data.get("choices") if isinstance(data.get("choices"), list) else []
+    if not choices:
+        return ""
+    message = (choices[0] or {}).get("message") or {}
+    return str(message.get("content") or "").strip()
+
+
+def _extract_json(raw: str) -> dict[str, Any]:
+    text_value = _clean(raw, 50000)
+    if not text_value:
+        return {}
+    try:
+        parsed = json.loads(text_value)
+        return parsed if isinstance(parsed, dict) else {}
+    except json.JSONDecodeError:
+        start = text_value.find("{")
+        end = text_value.rfind("}")
+        if start >= 0 and end > start:
+            try:
+                parsed = json.loads(text_value[start : end + 1])
+                return parsed if isinstance(parsed, dict) else {}
+            except json.JSONDecodeError:
+                return {"reply": text_value}
+    return {"reply": text_value}
+
+
+def generate_agent_result(conn: Connection, tenant_id: str, conversation: dict[str, Any], messages: list[dict[str, Any]]) -> dict[str, Any]:
+    settings = get_settings(conn, tenant_id)
+    if not bool(settings.get("enabled")):
+        return {"ok": False, "skipped": "ai_disabled"}
+
+    providers = [_clean(settings.get("provider_code"), 80).lower()]
+    fallback = _clean(settings.get("fallback_provider_code"), 80).lower()
+    if fallback and fallback not in providers:
+        providers.append(fallback)
+    memory = get_memory(conn, tenant_id, str(conversation["id"]))
+    system_prompt, user_prompt = _prompt(settings, conversation, memory, messages)
+    requested_tokens = estimate_tokens(system_prompt, user_prompt)
+    ensure_ai_token_quota(conn, tenant_id, requested=requested_tokens)
+
+    last_error = ""
+    for provider in [item for item in providers if item]:
+        token, model, credential_key = _provider_model_from_credentials(conn, tenant_id, provider)
+        if not token:
+            last_error = f"missing_ai_credential:{provider}:{credential_key}"
+            continue
+        try:
+            if provider == "google":
+                raw = _call_google(token, model, system_prompt, user_prompt, settings)
+            elif provider in {"groq", "mistral", "openrouter"}:
+                raw = _call_chat_completions(provider, token, model, system_prompt, user_prompt, settings)
+            else:
+                last_error = f"unsupported_ai_provider:{provider}"
+                continue
+            parsed = _extract_json(raw)
+            parsed["provider_code"] = provider
+            parsed["model"] = model
+            parsed["estimated_tokens"] = estimate_tokens(system_prompt, user_prompt, raw)
+            return {"ok": True, "result": parsed, "raw": raw}
+        except Exception as exc:
+            last_error = str(exc)[:900]
+            continue
+    return {"ok": False, "skipped": last_error or "ai_unavailable"}
+
+
+def _split_tags(value: Any) -> list[str]:
+    raw = value
+    if isinstance(raw, str):
+        raw = raw.replace("\n", ",").split(",")
+    if not isinstance(raw, list):
+        return []
+    seen: set[str] = set()
+    tags: list[str] = []
+    for item in raw:
+        tag = _clean(item, 60)
+        key = tag.lower()
+        if tag and key not in seen:
+            seen.add(key)
+            tags.append(tag)
+    return tags
+
+
+def _merge_crm_patch(conversation: dict[str, Any], crm: dict[str, Any]) -> dict[str, Any]:
+    patch: dict[str, Any] = {}
+    for field in CRM_FIELDS:
+        if field == "tags":
+            existing = _split_tags(conversation.get("tags"))
+            incoming = _split_tags(crm.get("tags"))
+            merged = existing[:]
+            keys = {item.lower() for item in merged}
+            for tag in incoming:
+                if tag.lower() not in keys:
+                    merged.append(tag)
+                    keys.add(tag.lower())
+            if merged and ", ".join(merged) != _clean(conversation.get("tags")):
+                patch["tags"] = ", ".join(merged[:40])
+            continue
+        value = _clean(crm.get(field), 4000)
+        if not value:
+            continue
+        if field == "notes":
+            existing = _clean(conversation.get("notes"), 5000)
+            if value and value.lower() not in existing.lower():
+                patch["notes"] = (f"{existing}\nIA: {value}" if existing else f"IA: {value}")[:5000]
+            continue
+        if not _clean(conversation.get(field)) or field in {"interests", "customer_type", "payment_status", "crm_stage", "intent"}:
+            patch[field] = value[:4000]
+    if patch.get("first_name") and not patch.get("display_name") and not _clean(conversation.get("display_name")):
+        patch["display_name"] = " ".join([patch.get("first_name", ""), patch.get("last_name", "")]).strip()
+    return patch
+
+
+def _update_crm(conn: Connection, tenant_id: str, conversation: dict[str, Any], crm: dict[str, Any], facts: dict[str, Any]) -> dict[str, Any]:
+    patch = _merge_crm_patch(conversation, crm)
+    profile = conversation.get("profile_json") if isinstance(conversation.get("profile_json"), dict) else {}
+    profile = {**profile, "ai_facts": facts, "ai_last_update": datetime.now(timezone.utc).isoformat()}
+    patch["profile_json"] = profile
+    assignments = []
+    params: dict[str, Any] = {"tenant_id": tenant_id, "conversation_id": conversation["id"]}
+    for key, value in patch.items():
+        if key == "profile_json":
+            assignments.append("profile_json = CAST(:profile_json AS jsonb)")
+            params["profile_json"] = _json(value)
+        else:
+            assignments.append(f"{key} = :{key}")
+            params[key] = value
+    assignments.append("last_profiled_at = NOW()")
+    assignments.append("updated_at = NOW()")
+    conn.execute(
+        text(
+            f"""
+            UPDATE saas_conversations
+            SET {", ".join(assignments)}
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND id = CAST(:conversation_id AS uuid)
+            """
+        ),
+        params,
+    )
+    return patch
+
+
+def _upsert_memory(conn: Connection, tenant_id: str, conversation_id: str, message_id: str, summary: str, facts: dict[str, Any]) -> dict[str, Any]:
+    row = conn.execute(
+        text(
+            """
+            INSERT INTO saas_conversation_memory (
+                tenant_id, conversation_id, summary, facts_json, last_message_id, updated_at
+            )
+            VALUES (
+                CAST(:tenant_id AS uuid), CAST(:conversation_id AS uuid), :summary,
+                CAST(:facts_json AS jsonb), CAST(:message_id AS uuid), NOW()
+            )
+            ON CONFLICT (tenant_id, conversation_id)
+            DO UPDATE SET
+                summary = COALESCE(NULLIF(EXCLUDED.summary, ''), saas_conversation_memory.summary),
+                facts_json = saas_conversation_memory.facts_json || EXCLUDED.facts_json,
+                last_message_id = EXCLUDED.last_message_id,
+                updated_at = NOW()
+            RETURNING tenant_id::text, conversation_id::text, summary, facts_json,
+                      COALESCE(last_message_id::text, '') AS last_message_id, updated_at::text
+            """
+        ),
+        {
+            "tenant_id": tenant_id,
+            "conversation_id": conversation_id,
+            "message_id": message_id,
+            "summary": _clean(summary, 5000),
+            "facts_json": _json(facts),
+        },
+    ).mappings().first()
+    return dict(row) if row else get_memory(conn, tenant_id, conversation_id)
+
+
+def _queue_ai_reply(conn: Connection, tenant_id: str, conversation: dict[str, Any], body_text: str, ai_result: dict[str, Any]) -> dict[str, Any]:
+    body = _clean(body_text, 4000)
+    if not body:
+        return {"ok": False, "skipped": "empty_ai_reply"}
+    ensure_monthly_message_quota(conn, tenant_id, requested=1)
+    channel = _clean(conversation.get("channel"), 40) or "whatsapp"
+    conversation_id = str(conversation["id"])
+    local_external_id = f"local:ai:{uuid4().hex}"
+    payload = {
+        "source": "ai_agent",
+        "dispatch_status": "queued",
+        "ai_provider": ai_result.get("provider_code") or "",
+        "ai_model": ai_result.get("model") or "",
+    }
+    message = conn.execute(
+        text(
+            """
+            INSERT INTO saas_messages (
+                tenant_id, conversation_id, channel, external_message_id, direction, msg_type, text, payload_json
+            )
+            VALUES (
+                CAST(:tenant_id AS uuid), CAST(:conversation_id AS uuid), :channel, :external_message_id,
+                'out', 'text', :body_text, CAST(:payload_json AS jsonb)
+            )
+            RETURNING id::text
+            """
+        ),
+        {
+            "tenant_id": tenant_id,
+            "conversation_id": conversation_id,
+            "channel": channel,
+            "external_message_id": local_external_id,
+            "body_text": body,
+            "payload_json": _json(payload),
+        },
+    ).mappings().first()
+    outbound = conn.execute(
+        text(
+            """
+            INSERT INTO saas_outbound_messages (
+                tenant_id, conversation_id, message_id, channel, recipient_external_id, body_text, payload_json
+            )
+            VALUES (
+                CAST(:tenant_id AS uuid), CAST(:conversation_id AS uuid), CAST(:message_id AS uuid),
+                :channel, :recipient_external_id, :body_text, CAST(:payload_json AS jsonb)
+            )
+            RETURNING id::text, status
+            """
+        ),
+        {
+            "tenant_id": tenant_id,
+            "conversation_id": conversation_id,
+            "message_id": message["id"],
+            "channel": channel,
+            "recipient_external_id": _clean(conversation.get("external_contact_id") or conversation.get("phone"), 180),
+            "body_text": body,
+            "payload_json": _json({"local_external_message_id": local_external_id, **payload}),
+        },
+    ).mappings().first()
+    conn.execute(
+        text(
+            """
+            UPDATE saas_conversations
+            SET last_message_text = :body_text,
+                last_message_at = NOW(),
+                updated_at = NOW()
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND id = CAST(:conversation_id AS uuid)
+            """
+        ),
+        {"tenant_id": tenant_id, "conversation_id": conversation_id, "body_text": body},
+    )
+    conn.execute(
+        text(
+            """
+            INSERT INTO saas_usage_counters (tenant_id, metric_code, period_yyyymm, metric_value)
+            VALUES (CAST(:tenant_id AS uuid), 'outbound_messages_queued', :period, 1)
+            ON CONFLICT (tenant_id, metric_code, period_yyyymm)
+            DO UPDATE SET metric_value = saas_usage_counters.metric_value + 1, updated_at = NOW()
+            """
+        ),
+        {"tenant_id": tenant_id, "period": _period_yyyymm()},
+    )
+    return {"ok": True, "message_id": message["id"], "outbound_id": outbound["id"], "status": outbound["status"]}
+
+
+def _record_ai_usage(conn: Connection, tenant_id: str, tokens: int) -> None:
+    conn.execute(
+        text(
+            """
+            INSERT INTO saas_usage_counters (tenant_id, metric_code, period_yyyymm, metric_value)
+            VALUES (CAST(:tenant_id AS uuid), 'ai_tokens', :period, :tokens)
+            ON CONFLICT (tenant_id, metric_code, period_yyyymm)
+            DO UPDATE SET metric_value = saas_usage_counters.metric_value + EXCLUDED.metric_value, updated_at = NOW()
+            """
+        ),
+        {"tenant_id": tenant_id, "period": _period_yyyymm(), "tokens": int(max(1, tokens))},
+    )
+
+
+def process_conversation_ai(conn: Connection, tenant_id: str, conversation_id: str, message_id: str = "") -> dict[str, Any]:
+    ensure_ai_tables(conn)
+    conversation = _conversation(conn, tenant_id, conversation_id)
+    if not conversation:
+        return {"ok": False, "skipped": "conversation_not_found"}
+    if bool(conversation.get("takeover")):
+        return {"ok": False, "skipped": "takeover_human_on"}
+    messages = _recent_messages(conn, tenant_id, conversation_id)
+    if not messages:
+        return {"ok": False, "skipped": "no_messages"}
+    latest = messages[-1]
+    if str(latest.get("direction") or "").lower() != "in":
+        return {"ok": False, "skipped": "latest_not_inbound"}
+    if message_id and str(latest.get("id")) != str(message_id):
+        inbound_ids = {str(item.get("id")) for item in messages if str(item.get("direction")).lower() == "in"}
+        if str(message_id) not in inbound_ids:
+            return {"ok": False, "skipped": "message_not_inbound"}
+
+    try:
+        generated = generate_agent_result(conn, tenant_id, conversation, messages)
+    except HTTPException as exc:
+        return {"ok": False, "skipped": "quota_or_feature_blocked", "detail": exc.detail}
+    except Exception as exc:
+        return {"ok": False, "skipped": "ai_generation_error", "detail": str(exc)[:500]}
+
+    if not generated.get("ok"):
+        return generated
+    result = generated.get("result") or {}
+    crm = result.get("crm") if isinstance(result.get("crm"), dict) else {}
+    facts = result.get("facts") if isinstance(result.get("facts"), dict) else {}
+    try:
+        crm_patch = _update_crm(conn, tenant_id, conversation, crm, facts)
+        memory = _upsert_memory(
+            conn,
+            tenant_id,
+            conversation_id,
+            str(latest["id"]),
+            _clean(result.get("memory_summary") or "", 5000),
+            facts,
+        )
+        tokens = int(result.get("estimated_tokens") or estimate_tokens(generated.get("raw") or ""))
+        _record_ai_usage(conn, tenant_id, tokens)
+        outbound = _queue_ai_reply(conn, tenant_id, conversation, _clean(result.get("reply"), 4000), result)
+    except HTTPException as exc:
+        return {"ok": False, "skipped": "ai_postprocess_blocked", "detail": exc.detail}
+    except Exception as exc:
+        return {"ok": False, "skipped": "ai_postprocess_error", "detail": str(exc)[:500]}
+    return {"ok": True, "crm_patch": crm_patch, "memory": memory, "outbound": outbound, "ai": {"provider": result.get("provider_code"), "model": result.get("model"), "tokens": tokens}}
+
+
+def test_agent(conn: Connection, tenant_id: str, phone: str, message: str) -> dict[str, Any]:
+    pseudo_conversation = {
+        "id": "00000000-0000-0000-0000-000000000000",
+        "channel": "whatsapp",
+        "external_contact_id": _clean(phone, 120) or "test",
+        "phone": _clean(phone, 120),
+        "display_name": "",
+        "first_name": "",
+        "last_name": "",
+        "city": "",
+        "customer_type": "",
+        "interests": "",
+        "takeover": False,
+        "last_message_text": _clean(message, 4000),
+        "unread_count": 1,
+        "tags": "",
+        "notes": "",
+        "payment_status": "",
+        "payment_reference": "",
+        "crm_stage": "contactado",
+        "intent": "",
+        "profile_json": {},
+    }
+    pseudo_messages = [
+        {
+            "id": "test-message",
+            "direction": "in",
+            "msg_type": "text",
+            "text": _clean(message, 4000),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+    ]
+    settings = get_settings(conn, tenant_id)
+    if not bool(settings.get("enabled")):
+        raise HTTPException(status_code=409, detail="ai_disabled")
+    # The test path uses the regular provider call but does not write CRM, memory or outbound.
+    memory = {
+        "tenant_id": tenant_id,
+        "conversation_id": pseudo_conversation["id"],
+        "summary": "",
+        "facts_json": {},
+        "last_message_id": "",
+        "updated_at": "",
+    }
+    system_prompt, user_prompt = _prompt(settings, pseudo_conversation, memory, pseudo_messages)
+    ensure_ai_token_quota(conn, tenant_id, requested=estimate_tokens(system_prompt, user_prompt))
+    last_error = ""
+    providers = [_clean(settings.get("provider_code"), 80).lower(), _clean(settings.get("fallback_provider_code"), 80).lower()]
+    for provider in [item for idx, item in enumerate(providers) if item and item not in providers[:idx]]:
+        token, model, credential_key = _provider_model_from_credentials(conn, tenant_id, provider)
+        if not token:
+            last_error = f"missing_ai_credential:{provider}:{credential_key}"
+            continue
+        try:
+            if provider == "google":
+                raw = _call_google(token, model, system_prompt, user_prompt, settings)
+            elif provider in {"groq", "mistral", "openrouter"}:
+                raw = _call_chat_completions(provider, token, model, system_prompt, user_prompt, settings)
+            else:
+                last_error = f"unsupported_ai_provider:{provider}"
+                continue
+            parsed = _extract_json(raw)
+            parsed["provider_code"] = provider
+            parsed["model"] = model
+            _record_ai_usage(conn, tenant_id, estimate_tokens(system_prompt, user_prompt, raw))
+            return {"ok": True, "result": parsed}
+        except Exception as exc:
+            last_error = str(exc)[:900]
+    raise HTTPException(status_code=409, detail=last_error or "ai_unavailable")

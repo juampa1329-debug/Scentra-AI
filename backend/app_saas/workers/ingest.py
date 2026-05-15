@@ -7,6 +7,7 @@ from typing import Any
 
 from sqlalchemy import text
 
+from app_saas.ai_agent.service import process_conversation_ai
 from app_saas.db import db_session, set_tenant_context
 from app_saas.workers.triggers import execute_triggers_for_message
 
@@ -426,6 +427,8 @@ def process_due_webhook_events(limit: int = 25, tenant_id: str | None = None) ->
     statuses_updated = 0
     triggers_matched = 0
     trigger_errors = 0
+    ai_replies_queued = 0
+    ai_skipped = 0
 
     with db_session() as conn:
         filters = ["status = 'received'"]
@@ -490,6 +493,20 @@ def process_due_webhook_events(limit: int = 25, tenant_id: str | None = None) ->
                             triggers_matched += 1
                         if trigger_result.get("ok") is not True:
                             trigger_errors += 1
+                        block_ai = any(bool(item.get("block_ai")) for item in trigger_result.get("details", []) if isinstance(item, dict))
+                        if block_ai:
+                            ai_skipped += 1
+                        else:
+                            ai_result = process_conversation_ai(
+                                conn,
+                                tenant_id=tenant_id,
+                                conversation_id=saved["conversation_id"],
+                                message_id=saved["message_id"],
+                            )
+                            if ai_result.get("ok") and (ai_result.get("outbound") or {}).get("ok"):
+                                ai_replies_queued += 1
+                            else:
+                                ai_skipped += 1
                 for status_event in statuses:
                     updated_statuses_for_event += _apply_delivery_status(conn, tenant_id, status_event)
 
@@ -543,4 +560,6 @@ def process_due_webhook_events(limit: int = 25, tenant_id: str | None = None) ->
         "statuses_updated": statuses_updated,
         "triggers_matched": triggers_matched,
         "trigger_errors": trigger_errors,
+        "ai_replies_queued": ai_replies_queued,
+        "ai_skipped": ai_skipped,
     }
