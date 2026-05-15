@@ -250,7 +250,7 @@ nav { display: grid; gap: 8px; width: 100%; }
 .message { width: fit-content; max-width: min(720px, 88%); border: 1px solid var(--line); border-radius: 18px; background: rgba(255,255,255,0.07); padding: 11px 13px; }
 .message.out { justify-self: end; border-color: rgba(52,211,153,0.28); background: rgba(20,184,166,0.16); }
 .message p { margin: 5px 0 7px; overflow-wrap: anywhere; }
-.message-type { text-transform: uppercase; letter-spacing: 0.08em; }
+.message-type { color: var(--soft); font-size: 11px; font-weight: 800; letter-spacing: 0.02em; }
 .message-foot { display: inline-flex; align-items: center; gap: 7px; }
 .wa-checks { display: inline-flex; align-items: center; justify-content: center; min-width: 18px; min-height: 14px; color: var(--muted); font-size: 13px; font-weight: 1000; letter-spacing: -0.16em; }
 .wa-checks.delivered { color: var(--soft); }

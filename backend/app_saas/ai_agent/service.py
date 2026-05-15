@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -14,7 +15,17 @@ from sqlalchemy.engine import Connection
 
 from app_saas.api_credentials.router import _ensure_api_credentials_table
 from app_saas.billing.limits import ensure_ai_token_quota, ensure_monthly_message_quota
+from app_saas.db import db_session, set_tenant_context
 from app_saas.shared.secrets import decrypt_secret
+from app_saas.workers.dispatch import (
+    DispatchPermanentError,
+    DispatchTransientError,
+    _integration_config,
+    _load_connected_integration,
+    _meta_graph_version,
+    _post_json,
+    _secret_from_env,
+)
 
 DEFAULT_AGENT_PROMPT = """Eres el agente comercial de Scentra +AI para WhatsApp y CRM.
 Tu trabajo es vender con tono humano, claro y consultivo, mantener el contexto de la conversacion y actualizar la ficha CRM.
@@ -109,6 +120,33 @@ def ensure_ai_tables(conn: Connection) -> None:
             """
             CREATE INDEX IF NOT EXISTS idx_saas_conversation_memory_tenant_updated
             ON saas_conversation_memory (tenant_id, updated_at DESC)
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS saas_ai_pending_replies (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                tenant_id UUID NOT NULL REFERENCES saas_tenants(id) ON DELETE CASCADE,
+                conversation_id UUID NOT NULL REFERENCES saas_conversations(id) ON DELETE CASCADE,
+                last_message_id UUID NULL REFERENCES saas_messages(id) ON DELETE SET NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                scheduled_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                attempts INTEGER NOT NULL DEFAULT 0,
+                last_error TEXT NOT NULL DEFAULT '',
+                created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                UNIQUE (tenant_id, conversation_id)
+            )
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_saas_ai_pending_due
+            ON saas_ai_pending_replies (tenant_id, status, scheduled_at)
             """
         )
     )
@@ -610,65 +648,175 @@ def _upsert_memory(conn: Connection, tenant_id: str, conversation_id: str, messa
     return dict(row) if row else get_memory(conn, tenant_id, conversation_id)
 
 
-def _queue_ai_reply(conn: Connection, tenant_id: str, conversation: dict[str, Any], body_text: str, ai_result: dict[str, Any]) -> dict[str, Any]:
+def _metadata_int(metadata: dict[str, Any], key: str, default: int, minimum: int, maximum: int) -> int:
+    try:
+        value = int(metadata.get(key, default))
+    except Exception:
+        value = default
+    return max(minimum, min(maximum, value))
+
+
+def _split_reply_chunks(body: str, max_chars: int) -> list[str]:
+    clean = _clean(body, 8000)
+    if not clean:
+        return []
+    if max_chars <= 0 or len(clean) <= max_chars:
+        return [clean]
+    paragraphs = [part.strip() for part in re.split(r"\n{2,}", clean) if part.strip()]
+    units: list[str] = []
+    for paragraph in paragraphs or [clean]:
+        if len(paragraph) <= max_chars:
+            units.append(paragraph)
+            continue
+        sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", paragraph) if part.strip()]
+        units.extend(sentences or [paragraph])
+
+    chunks: list[str] = []
+    current = ""
+    for unit in units:
+        if len(unit) > max_chars:
+            if current:
+                chunks.append(current.strip())
+                current = ""
+            for idx in range(0, len(unit), max_chars):
+                chunks.append(unit[idx : idx + max_chars].strip())
+            continue
+        candidate = f"{current}\n\n{unit}".strip() if current else unit
+        if len(candidate) <= max_chars:
+            current = candidate
+        else:
+            if current:
+                chunks.append(current.strip())
+            current = unit
+    if current:
+        chunks.append(current.strip())
+    return [chunk for chunk in chunks if chunk][:8]
+
+
+def _latest_inbound_message(messages: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for message in reversed(messages):
+        if str(message.get("direction") or "").lower() == "in":
+            return message
+    return None
+
+
+def _maybe_send_typing_indicator(
+    conn: Connection,
+    tenant_id: str,
+    conversation: dict[str, Any],
+    latest_inbound: dict[str, Any] | None,
+    settings: dict[str, Any],
+) -> dict[str, Any]:
+    metadata = settings.get("metadata_json") if isinstance(settings.get("metadata_json"), dict) else {}
+    if metadata.get("typing_indicator_enabled", True) is False:
+        return {"ok": False, "skipped": "typing_indicator_disabled"}
+    message_id = _clean((latest_inbound or {}).get("external_message_id"), 240)
+    if not message_id or message_id.startswith("local:"):
+        return {"ok": False, "skipped": "provider_message_id_missing"}
+    integration = _load_connected_integration(conn, tenant_id, _clean(conversation.get("channel"), 40) or "whatsapp")
+    if not integration:
+        return {"ok": False, "skipped": "integration_not_connected"}
+    config = _integration_config(integration)
+    if str(config.get("dispatch_mode") or "stub").strip().lower() not in {"meta_cloud", "whatsapp_cloud"}:
+        return {"ok": False, "skipped": "dispatch_mode_not_meta_cloud"}
+    phone_number_id = _clean(config.get("phone_number_id"), 80)
+    access_token = _secret_from_env(config, integration)
+    if not phone_number_id or not access_token:
+        return {"ok": False, "skipped": "meta_credentials_missing"}
+    base_url = str(config.get("graph_base_url") or "https://graph.facebook.com").rstrip("/")
+    version = _meta_graph_version(config)
+    timeout_sec = int(config.get("timeout_sec") or 15)
+    payload = {
+        "messaging_product": "whatsapp",
+        "status": "read",
+        "message_id": message_id,
+        "typing_indicator": {"type": "text"},
+    }
+    try:
+        response = _post_json(f"{base_url}/{version}/{phone_number_id}/messages", payload, access_token, timeout_sec)
+        return {"ok": True, "response": response}
+    except (DispatchPermanentError, DispatchTransientError) as exc:
+        return {"ok": False, "error": str(exc)[:300]}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)[:300]}
+
+
+def _queue_ai_reply(conn: Connection, tenant_id: str, conversation: dict[str, Any], body_text: str, ai_result: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
     body = _clean(body_text, 4000)
     if not body:
         return {"ok": False, "skipped": "empty_ai_reply"}
-    ensure_monthly_message_quota(conn, tenant_id, requested=1)
+    metadata = settings.get("metadata_json") if isinstance(settings.get("metadata_json"), dict) else {}
+    chunk_chars = _metadata_int(metadata, "reply_chunk_chars", 480, 0, 2000)
+    initial_delay_ms = _metadata_int(metadata, "reply_initial_delay_ms", 4000, 0, 240000)
+    chunk_delay_ms = _metadata_int(metadata, "reply_chunk_delay_ms", 4000, 0, 240000)
+    chunks = _split_reply_chunks(body, chunk_chars)
+    if not chunks:
+        return {"ok": False, "skipped": "empty_ai_reply"}
+    ensure_monthly_message_quota(conn, tenant_id, requested=len(chunks))
     channel = _clean(conversation.get("channel"), 40) or "whatsapp"
     conversation_id = str(conversation["id"])
-    local_external_id = f"local:ai:{uuid4().hex}"
-    payload = {
-        "source": "ai_agent",
-        "dispatch_status": "queued",
-        "ai_provider": ai_result.get("provider_code") or "",
-        "ai_model": ai_result.get("model") or "",
-    }
-    message = conn.execute(
-        text(
-            """
-            INSERT INTO saas_messages (
-                tenant_id, conversation_id, channel, external_message_id, direction, msg_type, text, payload_json
-            )
-            VALUES (
-                CAST(:tenant_id AS uuid), CAST(:conversation_id AS uuid), :channel, :external_message_id,
-                'out', 'text', :body_text, CAST(:payload_json AS jsonb)
-            )
-            RETURNING id::text
-            """
-        ),
-        {
-            "tenant_id": tenant_id,
-            "conversation_id": conversation_id,
-            "channel": channel,
-            "external_message_id": local_external_id,
-            "body_text": body,
-            "payload_json": _json(payload),
-        },
-    ).mappings().first()
-    outbound = conn.execute(
-        text(
-            """
-            INSERT INTO saas_outbound_messages (
-                tenant_id, conversation_id, message_id, channel, recipient_external_id, body_text, payload_json
-            )
-            VALUES (
-                CAST(:tenant_id AS uuid), CAST(:conversation_id AS uuid), CAST(:message_id AS uuid),
-                :channel, :recipient_external_id, :body_text, CAST(:payload_json AS jsonb)
-            )
-            RETURNING id::text, status
-            """
-        ),
-        {
-            "tenant_id": tenant_id,
-            "conversation_id": conversation_id,
-            "message_id": message["id"],
-            "channel": channel,
-            "recipient_external_id": _clean(conversation.get("external_contact_id") or conversation.get("phone"), 180),
-            "body_text": body,
-            "payload_json": _json({"local_external_message_id": local_external_id, **payload}),
-        },
-    ).mappings().first()
+    queued: list[dict[str, Any]] = []
+    for index, chunk in enumerate(chunks):
+        local_external_id = f"local:ai:{uuid4().hex}"
+        delay_seconds = int(round((initial_delay_ms + (index * chunk_delay_ms)) / 1000))
+        payload = {
+            "source": "ai_agent",
+            "dispatch_status": "queued",
+            "ai_provider": ai_result.get("provider_code") or "",
+            "ai_model": ai_result.get("model") or "",
+            "reply_chunk_index": index + 1,
+            "reply_chunk_total": len(chunks),
+            "reply_delay_seconds": delay_seconds,
+        }
+        message = conn.execute(
+            text(
+                """
+                INSERT INTO saas_messages (
+                    tenant_id, conversation_id, channel, external_message_id, direction, msg_type, text, payload_json
+                )
+                VALUES (
+                    CAST(:tenant_id AS uuid), CAST(:conversation_id AS uuid), :channel, :external_message_id,
+                    'out', 'text', :body_text, CAST(:payload_json AS jsonb)
+                )
+                RETURNING id::text
+                """
+            ),
+            {
+                "tenant_id": tenant_id,
+                "conversation_id": conversation_id,
+                "channel": channel,
+                "external_message_id": local_external_id,
+                "body_text": chunk,
+                "payload_json": _json(payload),
+            },
+        ).mappings().first()
+        outbound = conn.execute(
+            text(
+                """
+                INSERT INTO saas_outbound_messages (
+                    tenant_id, conversation_id, message_id, channel, recipient_external_id,
+                    body_text, payload_json, next_attempt_at
+                )
+                VALUES (
+                    CAST(:tenant_id AS uuid), CAST(:conversation_id AS uuid), CAST(:message_id AS uuid),
+                    :channel, :recipient_external_id, :body_text, CAST(:payload_json AS jsonb),
+                    NOW() + (:delay_seconds * INTERVAL '1 second')
+                )
+                RETURNING id::text, status, next_attempt_at::text
+                """
+            ),
+            {
+                "tenant_id": tenant_id,
+                "conversation_id": conversation_id,
+                "message_id": message["id"],
+                "channel": channel,
+                "recipient_external_id": _clean(conversation.get("external_contact_id") or conversation.get("phone"), 180),
+                "body_text": chunk,
+                "payload_json": _json({"local_external_message_id": local_external_id, **payload}),
+                "delay_seconds": delay_seconds,
+            },
+        ).mappings().first()
+        queued.append({"message_id": message["id"], "outbound_id": outbound["id"], "status": outbound["status"], "next_attempt_at": outbound["next_attempt_at"]})
     conn.execute(
         text(
             """
@@ -680,20 +828,20 @@ def _queue_ai_reply(conn: Connection, tenant_id: str, conversation: dict[str, An
               AND id = CAST(:conversation_id AS uuid)
             """
         ),
-        {"tenant_id": tenant_id, "conversation_id": conversation_id, "body_text": body},
+        {"tenant_id": tenant_id, "conversation_id": conversation_id, "body_text": chunks[-1]},
     )
     conn.execute(
         text(
             """
             INSERT INTO saas_usage_counters (tenant_id, metric_code, period_yyyymm, metric_value)
-            VALUES (CAST(:tenant_id AS uuid), 'outbound_messages_queued', :period, 1)
+            VALUES (CAST(:tenant_id AS uuid), 'outbound_messages_queued', :period, :count)
             ON CONFLICT (tenant_id, metric_code, period_yyyymm)
-            DO UPDATE SET metric_value = saas_usage_counters.metric_value + 1, updated_at = NOW()
+            DO UPDATE SET metric_value = saas_usage_counters.metric_value + EXCLUDED.metric_value, updated_at = NOW()
             """
         ),
-        {"tenant_id": tenant_id, "period": _period_yyyymm()},
+        {"tenant_id": tenant_id, "period": _period_yyyymm(), "count": len(chunks)},
     )
-    return {"ok": True, "message_id": message["id"], "outbound_id": outbound["id"], "status": outbound["status"]}
+    return {"ok": True, "queued_messages": len(queued), "chunks": queued}
 
 
 def _record_ai_usage(conn: Connection, tenant_id: str, tokens: int) -> None:
@@ -712,6 +860,7 @@ def _record_ai_usage(conn: Connection, tenant_id: str, tokens: int) -> None:
 
 def process_conversation_ai(conn: Connection, tenant_id: str, conversation_id: str, message_id: str = "") -> dict[str, Any]:
     ensure_ai_tables(conn)
+    settings = get_settings(conn, tenant_id)
     conversation = _conversation(conn, tenant_id, conversation_id)
     if not conversation:
         return {"ok": False, "skipped": "conversation_not_found"}
@@ -727,6 +876,7 @@ def process_conversation_ai(conn: Connection, tenant_id: str, conversation_id: s
         inbound_ids = {str(item.get("id")) for item in messages if str(item.get("direction")).lower() == "in"}
         if str(message_id) not in inbound_ids:
             return {"ok": False, "skipped": "message_not_inbound"}
+    typing = _maybe_send_typing_indicator(conn, tenant_id, conversation, _latest_inbound_message(messages), settings)
 
     try:
         generated = generate_agent_result(conn, tenant_id, conversation, messages)
@@ -752,12 +902,154 @@ def process_conversation_ai(conn: Connection, tenant_id: str, conversation_id: s
         )
         tokens = int(result.get("estimated_tokens") or estimate_tokens(generated.get("raw") or ""))
         _record_ai_usage(conn, tenant_id, tokens)
-        outbound = _queue_ai_reply(conn, tenant_id, conversation, _clean(result.get("reply"), 4000), result)
+        outbound = _queue_ai_reply(conn, tenant_id, conversation, _clean(result.get("reply"), 4000), result, settings)
     except HTTPException as exc:
         return {"ok": False, "skipped": "ai_postprocess_blocked", "detail": exc.detail}
     except Exception as exc:
         return {"ok": False, "skipped": "ai_postprocess_error", "detail": str(exc)[:500]}
-    return {"ok": True, "crm_patch": crm_patch, "memory": memory, "outbound": outbound, "ai": {"provider": result.get("provider_code"), "model": result.get("model"), "tokens": tokens}}
+    return {"ok": True, "crm_patch": crm_patch, "memory": memory, "outbound": outbound, "typing": typing, "ai": {"provider": result.get("provider_code"), "model": result.get("model"), "tokens": tokens}}
+
+
+def schedule_conversation_ai(
+    conn: Connection,
+    tenant_id: str,
+    conversation_id: str,
+    message_id: str,
+    delay_seconds: int | None = None,
+) -> dict[str, Any]:
+    ensure_ai_tables(conn)
+    settings = get_settings(conn, tenant_id)
+    metadata = settings.get("metadata_json") if isinstance(settings.get("metadata_json"), dict) else {}
+    if delay_seconds is None:
+        delay_seconds = _metadata_int(metadata, "inbound_cooldown_seconds", 6, 0, 3600)
+    row = conn.execute(
+        text(
+            """
+            INSERT INTO saas_ai_pending_replies (
+                tenant_id, conversation_id, last_message_id, status, scheduled_at, attempts, last_error, updated_at
+            )
+            VALUES (
+                CAST(:tenant_id AS uuid), CAST(:conversation_id AS uuid), CAST(:message_id AS uuid),
+                'pending', NOW() + (:delay_seconds * INTERVAL '1 second'), 0, '', NOW()
+            )
+            ON CONFLICT (tenant_id, conversation_id)
+            DO UPDATE SET
+                last_message_id = EXCLUDED.last_message_id,
+                status = 'pending',
+                scheduled_at = EXCLUDED.scheduled_at,
+                last_error = '',
+                updated_at = NOW()
+            RETURNING id::text, scheduled_at::text, status
+            """
+        ),
+        {
+            "tenant_id": tenant_id,
+            "conversation_id": conversation_id,
+            "message_id": message_id,
+            "delay_seconds": max(0, int(delay_seconds or 0)),
+        },
+    ).mappings().first()
+    return {"ok": True, "pending": dict(row or {}), "delay_seconds": max(0, int(delay_seconds or 0))}
+
+
+def _due_ai_jobs(conn: Connection, tenant_id: str | None, limit: int) -> list[dict[str, Any]]:
+    filters = ["status = 'pending'", "scheduled_at <= NOW()"]
+    params: dict[str, Any] = {"limit": max(1, min(int(limit or 25), 200))}
+    if tenant_id:
+        filters.append("tenant_id = CAST(:tenant_id AS uuid)")
+        params["tenant_id"] = tenant_id
+    rows = conn.execute(
+        text(
+            f"""
+            WITH due AS (
+                SELECT id
+                FROM saas_ai_pending_replies
+                WHERE {" AND ".join(filters)}
+                ORDER BY scheduled_at ASC, updated_at ASC
+                LIMIT :limit
+                FOR UPDATE SKIP LOCKED
+            )
+            UPDATE saas_ai_pending_replies p
+            SET status = 'processing',
+                attempts = attempts + 1,
+                updated_at = NOW()
+            FROM due
+            WHERE p.id = due.id
+            RETURNING p.id::text, p.tenant_id::text, p.conversation_id::text,
+                      COALESCE(p.last_message_id::text, '') AS last_message_id,
+                      p.attempts
+            """
+        ),
+        params,
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def process_due_ai_replies(limit: int = 25, tenant_id: str | None = None) -> dict[str, Any]:
+    stats: dict[str, Any] = {"picked": 0, "queued": 0, "skipped": 0, "failed": 0, "errors": []}
+    with db_session() as conn:
+        ensure_ai_tables(conn)
+        if tenant_id:
+            set_tenant_context(conn, tenant_id)
+        jobs = _due_ai_jobs(conn, tenant_id, limit)
+        stats["picked"] = len(jobs)
+        for job in jobs:
+            set_tenant_context(conn, str(job["tenant_id"]))
+            result = process_conversation_ai(
+                conn,
+                str(job["tenant_id"]),
+                str(job["conversation_id"]),
+                str(job.get("last_message_id") or ""),
+            )
+            if result.get("ok"):
+                queued = int((result.get("outbound") or {}).get("queued_messages") or 0)
+                stats["queued"] += queued
+                conn.execute(
+                    text(
+                        """
+                        UPDATE saas_ai_pending_replies
+                        SET status = 'completed',
+                            last_error = '',
+                            updated_at = NOW()
+                        WHERE id = CAST(:id AS uuid)
+                        """
+                    ),
+                    {"id": job["id"]},
+                )
+                continue
+            skipped = str(result.get("skipped") or "ai_skipped")
+            retryable = skipped in {"ai_generation_error", "quota_or_feature_blocked", "ai_postprocess_error", "ai_postprocess_blocked"}
+            if retryable and int(job.get("attempts") or 0) < 3:
+                conn.execute(
+                    text(
+                        """
+                        UPDATE saas_ai_pending_replies
+                        SET status = 'pending',
+                            scheduled_at = NOW() + INTERVAL '5 minutes',
+                            last_error = :error,
+                            updated_at = NOW()
+                        WHERE id = CAST(:id AS uuid)
+                        """
+                    ),
+                    {"id": job["id"], "error": json.dumps(result, ensure_ascii=False)[:900]},
+                )
+                stats["failed"] += 1
+            else:
+                conn.execute(
+                    text(
+                        """
+                        UPDATE saas_ai_pending_replies
+                        SET status = 'skipped',
+                            last_error = :error,
+                            updated_at = NOW()
+                        WHERE id = CAST(:id AS uuid)
+                        """
+                    ),
+                    {"id": job["id"], "error": json.dumps(result, ensure_ascii=False)[:900]},
+                )
+                stats["skipped"] += 1
+            stats["errors"].append({"id": job["id"], "conversation_id": job["conversation_id"], "result": result})
+    return stats
 
 
 def test_agent(conn: Connection, tenant_id: str, phone: str, message: str) -> dict[str, Any]:

@@ -63,6 +63,7 @@ const defaultAiConfig = () => ({
   delayBetween: "4000",
   typingDelay: "4000",
   cooldown: "6",
+  typingIndicator: true,
   voiceEnabled: true,
   preferVoice: false,
   ttsProvider: "elevenlabs",
@@ -539,6 +540,7 @@ function App() {
     if (!accessToken) return;
     try {
       const data = await apiCall("/saas/v1/ai/settings");
+      const meta = asObject(data?.metadata_json);
       setAiConfig((prev) => ({
         ...prev,
         enabled: Boolean(data?.enabled),
@@ -547,6 +549,17 @@ function App() {
         systemPrompt: data?.system_prompt || prev.systemPrompt,
         maxTokens: String(data?.max_tokens || prev.maxTokens),
         temperature: String(data?.temperature ?? prev.temperature),
+        chunks: String(meta.reply_chunk_chars ?? prev.chunks),
+        delayBetween: String(meta.reply_chunk_delay_ms ?? prev.delayBetween),
+        typingDelay: String(meta.reply_initial_delay_ms ?? prev.typingDelay),
+        cooldown: String(meta.inbound_cooldown_seconds ?? prev.cooldown),
+        typingIndicator: meta.typing_indicator_enabled !== false,
+        voiceEnabled: meta.voice_enabled ?? prev.voiceEnabled,
+        preferVoice: meta.prefer_voice ?? prev.preferVoice,
+        ttsProvider: meta.tts_provider || prev.ttsProvider,
+        voiceId: meta.voice_id || prev.voiceId,
+        voiceName: meta.voice_name || prev.voiceName,
+        voicePrompt: meta.voice_prompt || prev.voicePrompt,
       }));
     } catch (err) { showStatus(String(err.message || err), "error"); }
   };
@@ -893,6 +906,11 @@ function App() {
     if (type === "document" || type === "file") return "documento";
     return type;
   };
+  const messageSenderLabel = (message) => {
+    if (String(message?.direction || "").toLowerCase() === "out") return "Tu";
+    const fullName = [selectedConversation?.first_name, selectedConversation?.last_name].filter(Boolean).join(" ").trim();
+    return fullName || selectedConversation?.display_name || "Cliente";
+  };
   const renderMessageContent = (message) => {
     const type = String(message?.msg_type || "text").toLowerCase();
     const url = messageMediaUrl(message);
@@ -1065,6 +1083,11 @@ function App() {
             voice_id: aiConfig.voiceId,
             voice_name: aiConfig.voiceName,
             voice_prompt: aiConfig.voicePrompt,
+            typing_indicator_enabled: Boolean(aiConfig.typingIndicator),
+            inbound_cooldown_seconds: Number(aiConfig.cooldown || 6),
+            reply_initial_delay_ms: Number(aiConfig.typingDelay || 4000),
+            reply_chunk_delay_ms: Number(aiConfig.delayBetween || 4000),
+            reply_chunk_chars: Number(aiConfig.chunks || 480),
           },
         }),
       });
@@ -1076,6 +1099,11 @@ function App() {
         systemPrompt: data?.system_prompt || prev.systemPrompt,
         maxTokens: String(data?.max_tokens || prev.maxTokens),
         temperature: String(data?.temperature ?? prev.temperature),
+        chunks: String(asObject(data?.metadata_json).reply_chunk_chars ?? prev.chunks),
+        delayBetween: String(asObject(data?.metadata_json).reply_chunk_delay_ms ?? prev.delayBetween),
+        typingDelay: String(asObject(data?.metadata_json).reply_initial_delay_ms ?? prev.typingDelay),
+        cooldown: String(asObject(data?.metadata_json).inbound_cooldown_seconds ?? prev.cooldown),
+        typingIndicator: asObject(data?.metadata_json).typing_indicator_enabled !== false,
       }));
       showStatus("Ajustes IA guardados. El agente usara el modelo seleccionado en APIs.", "ok");
     } catch (err) {
@@ -1327,7 +1355,7 @@ function App() {
               <div className="messages" ref={messagesPanelRef}>
                 {messages.map((message) => (
                   <div className={`message ${message.direction === "out" ? "out" : "in"} ${message.msg_type || "text"}`} key={message.id}>
-                    <span className="message-type">{message.direction === "out" ? "tu" : "cliente"} / {messageLabel(message)}</span>
+                    <span className="message-type">{messageSenderLabel(message)}</span>
                     {renderMessageContent(message)}
                     <small className="message-foot">{message.created_at}{messageDeliveryState(message) ? <span className={`wa-checks ${messageDeliveryState(message).key}`} title={messageDeliveryState(message).label}>{messageDeliveryState(message).mark}</span> : null}</small>
                   </div>
@@ -1464,6 +1492,14 @@ function App() {
                     </div>
                   </div>
                   <p className="soft-copy">Los modelos se eligen en Ajustes &gt; APIs con Cargar modelos y Guardar modelo. Aqui solo se selecciona el proveedor y el comportamiento.</p>
+                  <h3>Ritmo humano</h3>
+                  <div className="form-grid four">
+                    <label>Espera antes de responder (seg)<input type="number" min="0" value={aiConfig.cooldown} onChange={(event) => setAiConfig((prev) => ({ ...prev, cooldown: event.target.value }))} /></label>
+                    <label>Typing antes del primer envio (ms)<input type="number" min="0" value={aiConfig.typingDelay} onChange={(event) => setAiConfig((prev) => ({ ...prev, typingDelay: event.target.value }))} /></label>
+                    <label>Chars por fragmento<input type="number" min="0" value={aiConfig.chunks} onChange={(event) => setAiConfig((prev) => ({ ...prev, chunks: event.target.value }))} /></label>
+                    <label>Delay entre fragmentos (ms)<input type="number" min="0" value={aiConfig.delayBetween} onChange={(event) => setAiConfig((prev) => ({ ...prev, delayBetween: event.target.value }))} /></label>
+                  </div>
+                  <label className="check-row"><input type="checkbox" checked={Boolean(aiConfig.typingIndicator)} onChange={(event) => setAiConfig((prev) => ({ ...prev, typingIndicator: event.target.checked }))} /> Mostrar “escribiendo...” en WhatsApp cuando Meta lo permita</label>
                   <div className="panel-actions"><button type="button" className="primary" onClick={saveAiLocal}>Guardar ajustes</button><button type="button" onClick={() => setAiTesterOpen(true)}>Probar IA</button></div>
                 </article>
                 <article className="panel glass-card">

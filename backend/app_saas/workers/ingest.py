@@ -7,7 +7,7 @@ from typing import Any
 
 from sqlalchemy import text
 
-from app_saas.ai_agent.service import process_conversation_ai
+from app_saas.ai_agent.service import schedule_conversation_ai
 from app_saas.db import db_session, set_tenant_context
 from app_saas.workers.triggers import execute_triggers_for_message
 
@@ -497,13 +497,13 @@ def process_due_webhook_events(limit: int = 25, tenant_id: str | None = None) ->
                         if block_ai:
                             ai_skipped += 1
                         else:
-                            ai_result = process_conversation_ai(
+                            ai_result = schedule_conversation_ai(
                                 conn,
                                 tenant_id=tenant_id,
                                 conversation_id=saved["conversation_id"],
                                 message_id=saved["message_id"],
                             )
-                            if ai_result.get("ok") and (ai_result.get("outbound") or {}).get("ok"):
+                            if ai_result.get("ok"):
                                 ai_replies_queued += 1
                             else:
                                 ai_skipped += 1
