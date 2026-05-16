@@ -9,6 +9,7 @@ class IntegrationUpsertIn(BaseModel):
     status: str = "connected"
     secret_ref: Optional[str] = None
     config_json: dict[str, Any] = Field(default_factory=dict)
+    current_password: Optional[str] = None
 
 
 class IntegrationOut(BaseModel):

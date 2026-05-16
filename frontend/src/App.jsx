@@ -315,6 +315,7 @@ function App() {
   const [phoneRegisterForm, setPhoneRegisterForm] = useState({ phone_number_id: "", pin: "" });
   const [phoneSyncing, setPhoneSyncing] = useState(false);
   const [integrationForm, setIntegrationForm] = useState({ provider: "meta", channel: "whatsapp", status: "connected", dispatch_mode: "stub", phone_number_id: "", business_account_id: "", app_id: "", graph_api_version: "v24.0", access_token_env: "SCENTRA_META_ACCESS_TOKEN" });
+  const [integrationSecretModal, setIntegrationSecretModal] = useState(null);
   const [aiConfig, setAiConfig] = useState(defaultAiConfig);
   const [aiTesterOpen, setAiTesterOpen] = useState(false);
   const [aiTest, setAiTest] = useState({ phone: "", message: "" });
@@ -449,6 +450,25 @@ function App() {
     ads: ["Ads Manager", "Leads, comentarios y eventos de Meta conectados al inbox."],
     settings: ["Ajustes", "IA, canales, webhooks, APIs, usuarios y seguridad."],
   };
+  const selectedIntegrationForForm = integrations.find((item) => (
+    String(item.provider || "").toLowerCase() === String(integrationForm.provider || "").toLowerCase()
+    && String(item.channel || "").toLowerCase() === String(integrationForm.channel || "").toLowerCase()
+  ));
+  const selectedIntegrationConfig = selectedIntegrationForForm?.config_json || {};
+  const integrationToForm = (integration) => {
+    const config = integration?.config_json || {};
+    return {
+      provider: integration?.provider || "meta",
+      channel: integration?.channel || "whatsapp",
+      status: integration?.status || "connected",
+      dispatch_mode: config.dispatch_mode || "stub",
+      phone_number_id: config.phone_number_id || "",
+      business_account_id: config.business_account_id || config.waba_id || "",
+      app_id: config.app_id || "",
+      graph_api_version: config.graph_api_version || "v24.0",
+      access_token_env: config.access_token_env || "SCENTRA_META_ACCESS_TOKEN",
+    };
+  };
 
   const showStatus = (text, tone = "neutral") => { setStatus(text); setStatusTone(tone); };
 
@@ -544,6 +564,7 @@ function App() {
     recordingLevelsRef.current = EMPTY_WAVEFORM;
     setIntegrations([]); setWebhooks([]); setWebhookEvents([]); setBillingOverview(null); setBillingPlans([]); setLastWebhookSecret(null);
     setApiCredentials([]); setCredentialModal(null); setCredentialModels({}); setKnowledgeSources([]); setDiagnostics(null);
+    setIntegrationSecretModal(null);
     setWhatsappPhones([]); setPhoneRegisterForm({ phone_number_id: "", pin: "" });
   };
 
@@ -715,6 +736,16 @@ function App() {
   }, [accessToken, activeView, selectedConversation?.id, notificationSoundEnabled]);
 
   useEffect(() => {
+    const metaWhatsapp = integrations.find((item) => item.provider === "meta" && item.channel === "whatsapp");
+    const formIsEmptyMeta = integrationForm.provider === "meta"
+      && integrationForm.channel === "whatsapp"
+      && !integrationForm.phone_number_id
+      && !integrationForm.business_account_id
+      && !integrationForm.app_id;
+    if (metaWhatsapp && formIsEmptyMeta) setIntegrationForm(integrationToForm(metaWhatsapp));
+  }, [integrations.length]);
+
+  useEffect(() => {
     if (activeView !== "inbox") return undefined;
     const frame = window.requestAnimationFrame(() => {
       if (messagesPanelRef.current) messagesPanelRef.current.scrollTop = messagesPanelRef.current.scrollHeight;
@@ -787,8 +818,9 @@ function App() {
   const saveIntegration = async (event) => {
     event.preventDefault();
     const accessTokenEnv = (integrationForm.access_token_env || "SCENTRA_META_ACCESS_TOKEN").trim();
-    const accessToken = (metaAccessTokenRef.current?.value || "").trim();
-    const appSecret = (metaAppSecretRef.current?.value || "").trim();
+    const isUpdatingExisting = Boolean(selectedIntegrationForForm);
+    const accessToken = isUpdatingExisting ? "" : (metaAccessTokenRef.current?.value || "").trim();
+    const appSecret = isUpdatingExisting ? "" : (metaAppSecretRef.current?.value || "").trim();
     const phoneNumberId = (integrationForm.phone_number_id || "").trim();
     const dispatchMode = (integrationForm.dispatch_mode || "stub").trim();
     if (dispatchMode !== "stub" && !phoneNumberId) return showStatus("Phone Number ID requerido para Meta Cloud real.", "error");
@@ -800,6 +832,73 @@ function App() {
       if (metaAccessTokenRef.current) metaAccessTokenRef.current.value = "";
       if (metaAppSecretRef.current) metaAppSecretRef.current.value = "";
       showStatus("Integracion guardada", "ok"); await loadIntegrations(); await loadBilling();
+    } catch (err) { showStatus(String(err.message || err), "error"); }
+  };
+
+  const editIntegration = (integration) => {
+    setIntegrationForm(integrationToForm(integration));
+    if (metaAccessTokenRef.current) metaAccessTokenRef.current.value = "";
+    if (metaAppSecretRef.current) metaAppSecretRef.current.value = "";
+    showStatus("Integracion cargada para editar. Guarda para actualizar datos generales.", "ok");
+  };
+
+  const openIntegrationSecretModal = (integration = selectedIntegrationForForm) => {
+    if (!integration) return showStatus("Primero guarda la integracion general.", "error");
+    const config = integration.config_json || {};
+    setIntegrationSecretModal({
+      provider: integration.provider,
+      channel: integration.channel,
+      status: integration.status,
+      secret_ref: integration.secret_ref || "",
+      dispatch_mode: config.dispatch_mode || "stub",
+      phone_number_id: config.phone_number_id || "",
+      business_account_id: config.business_account_id || config.waba_id || "",
+      app_id: config.app_id || "",
+      graph_api_version: config.graph_api_version || "v24.0",
+      access_token_env: config.access_token_env || "SCENTRA_META_ACCESS_TOKEN",
+      token_hint: config.access_token_hint || "",
+      app_secret_hint: config.app_secret_hint || "",
+      has_access_token: Boolean(config.has_access_token),
+      has_app_secret: Boolean(config.has_app_secret),
+      access_token: "",
+      app_secret: "",
+      current_password: "",
+    });
+  };
+
+  const saveIntegrationSecrets = async (event) => {
+    event.preventDefault();
+    if (!integrationSecretModal) return;
+    const accessToken = String(integrationSecretModal.access_token || "").trim();
+    const appSecret = String(integrationSecretModal.app_secret || "").trim();
+    const currentPassword = String(integrationSecretModal.current_password || "").trim();
+    if (!accessToken && !appSecret) return showStatus("Pega al menos un token o app secret para actualizar.", "error");
+    if (!currentPassword) return showStatus("Confirma tu contrasena para actualizar secretos.", "error");
+    const configJson = {
+      dispatch_mode: integrationSecretModal.dispatch_mode || "stub",
+      phone_number_id: integrationSecretModal.phone_number_id || "",
+      business_account_id: integrationSecretModal.business_account_id || "",
+      app_id: integrationSecretModal.app_id || "",
+      graph_api_version: integrationSecretModal.graph_api_version || "v24.0",
+      access_token_env: integrationSecretModal.access_token_env || "SCENTRA_META_ACCESS_TOKEN",
+    };
+    if (accessToken) configJson.access_token = accessToken;
+    if (appSecret) configJson.app_secret = appSecret;
+    try {
+      await apiCall("/saas/v1/integrations", {
+        method: "POST",
+        body: JSON.stringify({
+          provider: integrationSecretModal.provider,
+          channel: integrationSecretModal.channel,
+          status: integrationSecretModal.status || "connected",
+          secret_ref: accessToken ? "tenant:meta:whatsapp" : integrationSecretModal.secret_ref,
+          config_json: configJson,
+          current_password: currentPassword,
+        }),
+      });
+      setIntegrationSecretModal(null);
+      showStatus("Secretos actualizados y cifrados", "ok");
+      await loadIntegrations();
     } catch (err) { showStatus(String(err.message || err), "error"); }
   };
 
@@ -1725,6 +1824,18 @@ function App() {
                     <button type="button" onClick={loadIntegrations}>Refrescar</button>
                   </div>
                   <p className="soft-copy">Pega el token permanente una sola vez. Scentra lo cifra en backend y luego solo muestra una pista, nunca el token completo en el navegador.</p>
+                  {selectedIntegrationForForm ? (
+                    <div className="current-integration-strip">
+                      <div>
+                        <strong>Integracion actual: {selectedIntegrationForForm.provider} / {selectedIntegrationForForm.channel}</strong>
+                        <span>{selectedIntegrationForForm.status} / {selectedIntegrationConfig.dispatch_mode || "stub"} - Phone {selectedIntegrationConfig.phone_number_id || "-"} - WABA {selectedIntegrationConfig.business_account_id || "-"}</span>
+                      </div>
+                      <div className="row-actions">
+                        <button type="button" className="primary" onClick={() => editIntegration(selectedIntegrationForForm)}>Cargar datos para editar</button>
+                        <button type="button" onClick={() => openIntegrationSecretModal(selectedIntegrationForForm)}>Actualizar token</button>
+                      </div>
+                    </div>
+                  ) : null}
                   <form className="meta-grid" onSubmit={saveIntegration}>
                     <label>Proveedor
                       <select value={integrationForm.provider} onChange={(event) => setIntegrationForm((prev) => ({ ...prev, provider: event.target.value }))}>
@@ -1765,15 +1876,27 @@ function App() {
                     <label>Meta App ID
                       <input placeholder="ID de la app en Meta" value={integrationForm.app_id} onChange={(event) => setIntegrationForm((prev) => ({ ...prev, app_id: event.target.value }))} />
                     </label>
-                    <label className="token-field">Meta App Secret
-                      <input ref={metaAppSecretRef} type="password" placeholder="Opcional: valida x-hub-signature-256" autoComplete="off" spellCheck={false} />
-                    </label>
                     <label>Graph API
                       <input placeholder="v24.0" value={integrationForm.graph_api_version} onChange={(event) => setIntegrationForm((prev) => ({ ...prev, graph_api_version: event.target.value }))} />
                     </label>
-                    <label className="token-field">Token permanente de Meta
-                      <input ref={metaAccessTokenRef} type="password" placeholder="Pegar token permanente" autoComplete="off" spellCheck={false} />
-                    </label>
+                    {!selectedIntegrationForForm ? (
+                      <>
+                        <label className="token-field">Meta App Secret
+                          <input ref={metaAppSecretRef} type="password" placeholder="Opcional: valida x-hub-signature-256" autoComplete="off" spellCheck={false} />
+                        </label>
+                        <label className="token-field">Token permanente de Meta
+                          <input ref={metaAccessTokenRef} type="password" placeholder="Pegar token permanente" autoComplete="off" spellCheck={false} />
+                        </label>
+                      </>
+                    ) : (
+                      <div className="secret-summary token-field">
+                        <div>
+                          <strong>Secretos protegidos</strong>
+                          <span>Token: {selectedIntegrationConfig.has_access_token ? `******** ${selectedIntegrationConfig.access_token_hint || ""}` : "sin token"} / App secret: {selectedIntegrationConfig.has_app_secret ? `******** ${selectedIntegrationConfig.app_secret_hint || ""}` : "sin app secret"}</span>
+                        </div>
+                        <button type="button" onClick={() => openIntegrationSecretModal(selectedIntegrationForForm)}>Actualizar secretos</button>
+                      </div>
+                    )}
                     <button type="submit" className="primary">Guardar integracion</button>
                   </form>
                   <div className="integration-cards">
@@ -1791,6 +1914,10 @@ function App() {
                           <div><span>WABA ID</span><strong>{config.business_account_id || "-"}</strong></div>
                           <div><span>Meta App ID</span><strong>{config.app_id || "-"}</strong></div>
                           <div className="integration-marks"><mark>{tokenLabel}</mark><mark>{appSecretLabel}</mark></div>
+                          <div className="row-actions">
+                            <button type="button" onClick={() => editIntegration(integration)}>Editar</button>
+                            <button type="button" onClick={() => openIntegrationSecretModal(integration)}>Actualizar token</button>
+                          </div>
                         </div>
                       );
                     })}
@@ -1986,6 +2113,28 @@ function App() {
         )}
       </main>
       {aiTesterOpen ? <div className="modal-backdrop" role="presentation" onMouseDown={() => setAiTesterOpen(false)}><section className="modal-window glass-card" role="dialog" aria-modal="true" aria-label="Probar IA" onMouseDown={(event) => event.stopPropagation()}><div className="panel-head"><h2>Probar IA</h2><button type="button" onClick={() => setAiTesterOpen(false)}>Cerrar</button></div><form onSubmit={submitAiTest} className="modal-form"><label>Phone<input placeholder="57300..." value={aiTest.phone} onChange={(event) => setAiTest((prev) => ({ ...prev, phone: event.target.value }))} /></label><label>Mensaje<textarea rows={5} placeholder="Escribe un mensaje de prueba..." value={aiTest.message} onChange={(event) => setAiTest((prev) => ({ ...prev, message: event.target.value }))} /></label>{aiTestResult ? <div className="ai-test-result"><strong>Respuesta IA</strong><p>{aiTestResult}</p></div> : null}<div className="panel-actions"><button type="submit" className="primary">Procesar</button><button type="button" onClick={() => { setAiTest({ phone: "", message: "" }); setAiTestResult(""); }}>Limpiar</button></div></form></section></div> : null}
+      {integrationSecretModal ? (
+        <div className="modal-backdrop" role="presentation" onMouseDown={() => setIntegrationSecretModal(null)}>
+          <section className="modal-window glass-card" role="dialog" aria-modal="true" aria-label="Actualizar secretos de integracion" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="panel-head">
+              <div><h2>Actualizar secretos</h2><span>{integrationSecretModal.provider} / {integrationSecretModal.channel}</span></div>
+              <button type="button" onClick={() => setIntegrationSecretModal(null)}>Cerrar</button>
+            </div>
+            <form onSubmit={saveIntegrationSecrets} className="modal-form">
+              <p className="soft-copy">El valor guardado no se puede revelar. Para corregirlo, pega uno nuevo y confirma tu contrasena. El backend reemplaza el secreto cifrado y el navegador solo recibe una pista.</p>
+              <div className="secret-box muted-secret">
+                <strong>Estado actual</strong>
+                <span>Token Meta: {integrationSecretModal.has_access_token ? `******** ${integrationSecretModal.token_hint || ""}` : "sin token guardado"}</span>
+                <span>App Secret: {integrationSecretModal.has_app_secret ? `******** ${integrationSecretModal.app_secret_hint || ""}` : "sin app secret guardado"}</span>
+              </div>
+              <label>Nuevo token permanente de Meta<input type="password" autoFocus placeholder="Pegar token completo solo si vas a reemplazarlo" autoComplete="off" spellCheck={false} value={integrationSecretModal.access_token || ""} onChange={(event) => setIntegrationSecretModal((prev) => ({ ...(prev || {}), access_token: event.target.value }))} /></label>
+              <label>Nuevo Meta App Secret<input type="password" placeholder="Opcional: pegar app secret nuevo" autoComplete="off" spellCheck={false} value={integrationSecretModal.app_secret || ""} onChange={(event) => setIntegrationSecretModal((prev) => ({ ...(prev || {}), app_secret: event.target.value }))} /></label>
+              <label>Tu contrasena<input type="password" placeholder="Confirma tu contrasena para guardar" autoComplete="current-password" value={integrationSecretModal.current_password || ""} onChange={(event) => setIntegrationSecretModal((prev) => ({ ...(prev || {}), current_password: event.target.value }))} /></label>
+              <div className="panel-actions"><button type="submit" className="primary">Guardar cifrado</button><button type="button" onClick={() => setIntegrationSecretModal(null)}>Cancelar</button></div>
+            </form>
+          </section>
+        </div>
+      ) : null}
       {credentialModal ? (
         <div className="modal-backdrop" role="presentation" onMouseDown={() => setCredentialModal(null)}>
           <section className="modal-window glass-card" role="dialog" aria-modal="true" aria-label="Actualizar credencial" onMouseDown={(event) => event.stopPropagation()}>

@@ -358,7 +358,7 @@ nav { display: grid; gap: 8px; width: 100%; }
 .copy-line code { min-width: 0; }
 .copy-line button { min-height: 32px; border-radius: 11px; font-size: 12px; }
 .channels-settings { gap: 18px; }
-.integration-card { overflow: hidden; }
+.integration-card { overflow: visible; }
 .meta-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(170px, 1fr));
@@ -372,6 +372,48 @@ nav { display: grid; gap: 8px; width: 100%; }
 }
 .meta-grid .token-field {
   grid-column: span 2;
+}
+.secret-summary {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  border: 1px solid rgba(94,234,212,0.28);
+  border-radius: 18px;
+  background: rgba(20,184,166,0.08);
+  padding: 12px;
+}
+.secret-summary strong,
+.secret-summary span {
+  display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.secret-summary span {
+  color: var(--muted);
+  font-size: 12px;
+}
+.current-integration-strip {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  border: 1px solid rgba(52,211,153,0.30);
+  border-radius: 20px;
+  background: linear-gradient(135deg, rgba(20,184,166,0.14), rgba(59,130,246,0.08));
+  padding: 13px;
+  margin: 12px 0 4px;
+}
+.current-integration-strip strong,
+.current-integration-strip span {
+  display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.current-integration-strip span {
+  color: var(--muted);
+  font-size: 12px;
 }
 .integration-cards,
 .webhook-cards,
@@ -391,9 +433,16 @@ nav { display: grid; gap: 8px; width: 100%; }
 }
 .integration-card-row {
   display: grid;
-  grid-template-columns: 1.2fr repeat(3, minmax(130px, 1fr)) auto;
+  grid-template-columns: minmax(180px, 1.2fr) repeat(3, minmax(130px, 1fr));
   gap: 12px;
   align-items: center;
+}
+.integration-card-row .integration-marks {
+  grid-column: span 2;
+}
+.integration-card-row .row-actions {
+  grid-column: 1 / -1;
+  justify-content: flex-end;
 }
 .integration-card-row strong,
 .integration-card-row span,
@@ -610,7 +659,7 @@ nav { display: grid; gap: 8px; width: 100%; }
   .conversation-list { max-height: 280px; }
   .messages { min-height: 420px; }
   .inline-form, .integrations-form, .composer, .usage-line, .row, .row.four, .row.six, .integration-row,
-  .meta-grid, .meta-grid .token-field, .integration-card-row, .phone-register-form, .webhook-create-form,
+  .meta-grid, .meta-grid .token-field, .current-integration-strip, .integration-card-row, .phone-register-form, .webhook-create-form,
   .secret-value-row, .callback-box { grid-template-columns: 1fr; grid-column: auto; }
   .rich-composer { grid-template-columns: auto auto minmax(0, 1fr) auto auto; }
   .attachment-preview, .recording-panel, .audio-message, .crm-mini-form { grid-template-columns: 1fr; }

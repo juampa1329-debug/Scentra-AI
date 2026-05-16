@@ -14,7 +14,7 @@ from sqlalchemy import text
 from app_saas.billing.limits import ensure_integration_quota
 from app_saas.db import db_session, set_tenant_context
 from app_saas.integrations.schemas import IntegrationOut, IntegrationUpsertIn, WhatsappPhoneRegisterIn
-from app_saas.shared.security import AuthContext, get_current_user, require_role
+from app_saas.shared.security import AuthContext, get_current_user, require_role, verify_password
 from app_saas.shared.secrets import decrypt_secret, encrypt_secret, is_masked_secret, mask_secret
 
 router = APIRouter(prefix="/integrations", tags=["saas-integrations"])
@@ -104,6 +104,37 @@ def _merge_secret_config(incoming: dict, existing: dict | None) -> dict:
         elif key in next_config:
             next_config.pop(key, None)
     return next_config
+
+
+def _has_plain_secret_update(config: dict | None) -> bool:
+    candidate = dict(config or {})
+    env_value = str(candidate.get("access_token_env") or "").strip()
+    if _looks_like_secret_value(env_value):
+        return True
+    for key in SENSITIVE_CONFIG_KEYS:
+        value = str(candidate.get(key) or "").strip()
+        if value and not is_masked_secret(value) and not value.startswith("enc:v1:"):
+            return True
+    return False
+
+
+def _require_current_password(conn, user_id: str, current_password: str | None) -> None:
+    password = str(current_password or "").strip()
+    if not password:
+        raise HTTPException(status_code=403, detail="current_password_required")
+    user = conn.execute(
+        text(
+            """
+            SELECT password_hash, status
+            FROM saas_users
+            WHERE id = CAST(:user_id AS uuid)
+            LIMIT 1
+            """
+        ),
+        {"user_id": user_id},
+    ).mappings().first()
+    if not user or user["status"] != "active" or not verify_password(password, user["password_hash"]):
+        raise HTTPException(status_code=403, detail="invalid_current_password")
 
 
 def _graph_request(method: str, url: str, token: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -242,6 +273,8 @@ def upsert_integration(
             ),
             {"tenant_id": ctx.tenant_id, "provider": provider, "channel": channel},
         ).mappings().first()
+        if existing and _has_plain_secret_update(payload.config_json):
+            _require_current_password(conn, ctx.user_id, payload.current_password)
         config_json = _merge_secret_config(payload.config_json or {}, dict(existing["config_json"] or {}) if existing else {})
         row = conn.execute(
             text(
