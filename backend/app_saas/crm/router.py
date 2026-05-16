@@ -25,6 +25,20 @@ DEFAULT_LABELS = [
     ("Recompra", "#34d399", "Candidato para recompra o fidelizacion", "retencion"),
 ]
 
+PRODUCT_CARD_KEYS = {
+    "id",
+    "name",
+    "sku",
+    "price",
+    "regular_price",
+    "sale_price",
+    "currency",
+    "permalink",
+    "image_url",
+    "stock_status",
+    "short_description",
+}
+
 CUSTOMER_FIELDS = {
     "display_name",
     "phone",
@@ -42,6 +56,62 @@ CUSTOMER_FIELDS = {
     "takeover",
     "profile_json",
 }
+
+
+def _clean_text(value: Any, limit: int = 500) -> str:
+    return str(value or "").strip()[:limit]
+
+
+def _safe_product_card(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    has_product_signal = any(_clean_text(raw.get(key), 900 if key in {"permalink", "image_url"} else 500) for key in PRODUCT_CARD_KEYS)
+    has_product_signal = has_product_signal or bool(raw.get("categories")) or bool(raw.get("attributes"))
+    if not has_product_signal:
+        return {}
+    product: dict[str, Any] = {key: _clean_text(raw.get(key), 900 if key in {"permalink", "image_url"} else 500) for key in PRODUCT_CARD_KEYS}
+    categories = raw.get("categories")
+    if isinstance(categories, list):
+        product["categories"] = [_clean_text(item, 80) for item in categories if _clean_text(item, 80)][:8]
+    else:
+        product["categories"] = []
+    attributes = raw.get("attributes")
+    clean_attributes: list[dict[str, str]] = []
+    if isinstance(attributes, list):
+        for item in attributes:
+            if not isinstance(item, dict):
+                continue
+            name = _clean_text(item.get("name"), 80)
+            value = _clean_text(item.get("value"), 220)
+            if name and value:
+                clean_attributes.append({"name": name, "value": value})
+    product["attributes"] = clean_attributes[:8]
+    if not product.get("name"):
+        product["name"] = "Producto"
+    return product
+
+
+def _product_caption(product: dict[str, Any], note: str = "") -> str:
+    lines: list[str] = []
+    clean_note = _clean_text(note, 900)
+    if clean_note:
+        lines.append(clean_note)
+        lines.append("")
+    if product.get("name"):
+        lines.append(str(product["name"]))
+    price = product.get("sale_price") or product.get("price") or product.get("regular_price")
+    if price:
+        lines.append(f"Precio: {price}")
+    sku = product.get("sku")
+    if sku:
+        lines.append(f"SKU: {sku}")
+    for attribute in product.get("attributes") or []:
+        lines.append(f"{attribute['name']}: {attribute['value']}")
+    if product.get("short_description"):
+        lines.append(str(product["short_description"]))
+    if product.get("permalink"):
+        lines.append(f"Ver producto: {product['permalink']}")
+    return "\n".join(line for line in lines if line is not None).strip()[:4096]
 
 
 def _period_yyyymm() -> str:
@@ -919,13 +989,18 @@ def send_message(
     payload: SendMessageIn,
     ctx: AuthContext = Depends(require_role("owner", "admin", "supervisor", "agent")),
 ):
+    incoming_payload = payload.payload_json if isinstance(payload.payload_json, dict) else {}
+    product_card = _safe_product_card(incoming_payload.get("product_card") or incoming_payload.get("product") or {})
+    note_text = _clean_text(incoming_payload.get("message_note"), 900)
     body_text = payload.text.strip()
     requested_media_id = payload.media_id.strip()
     requested_type = payload.msg_type.strip().lower() or ("file" if requested_media_id else "text")
-    allowed_types = {"text", "image", "video", "audio", "document", "file"}
+    allowed_types = {"text", "image", "video", "audio", "document", "file", "product"}
     if requested_type not in allowed_types:
         raise HTTPException(status_code=400, detail="unsupported_message_type")
-    if not body_text and not requested_media_id:
+    if requested_type == "product" and product_card:
+        body_text = body_text or _product_caption(product_card, note_text)
+    if not body_text and not requested_media_id and not product_card:
         raise HTTPException(status_code=400, detail="message_content_required")
 
     with db_session() as conn:
@@ -989,6 +1064,13 @@ def send_message(
             "mime_type": mime_type,
             "filename": filename,
         }
+        if product_card:
+            message_payload.update({
+                "product_card": product_card,
+                "message_note": note_text,
+                "cta_url": product_card.get("permalink") or "",
+                "cta_text": "Ver producto",
+            })
         message = conn.execute(
             text(
                 """
@@ -1025,7 +1107,8 @@ def send_message(
                     text,
                     media_id,
                     mime_type,
-                    created_at::text
+                    created_at::text,
+                    payload_json
                 """
             ),
             {
@@ -1079,6 +1162,12 @@ def send_message(
                     "media_id": media_id,
                     "mime_type": mime_type,
                     "filename": filename,
+                    **({
+                        "product_card": product_card,
+                        "message_note": note_text,
+                        "cta_url": product_card.get("permalink") or "",
+                        "cta_text": "Ver producto",
+                    } if product_card else {}),
                 }),
             },
         ).mappings().first()

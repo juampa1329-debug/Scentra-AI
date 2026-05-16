@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import base64
+import html
 import json
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -59,6 +61,18 @@ def _safe_product(item: dict[str, Any]) -> dict[str, Any]:
     images = item.get("images") if isinstance(item.get("images"), list) else []
     first_image = next((image for image in images if isinstance(image, dict) and image.get("src")), {})
     categories = item.get("categories") if isinstance(item.get("categories"), list) else []
+    attributes = item.get("attributes") if isinstance(item.get("attributes"), list) else []
+    clean_attributes: list[dict[str, str]] = []
+    for attribute in attributes:
+        if not isinstance(attribute, dict):
+            continue
+        name = str(attribute.get("name") or "").strip()
+        options = attribute.get("options")
+        value = ", ".join(str(option).strip() for option in options if str(option).strip()) if isinstance(options, list) else str(attribute.get("option") or "").strip()
+        if name and value:
+            clean_attributes.append({"name": name[:80], "value": value[:220]})
+    short_description = html.unescape(re.sub(r"<[^>]+>", " ", str(item.get("short_description") or "")))
+    short_description = re.sub(r"\s+", " ", short_description).strip()
     return {
         "id": str(item.get("id") or ""),
         "name": str(item.get("name") or "Producto"),
@@ -71,6 +85,8 @@ def _safe_product(item: dict[str, Any]) -> dict[str, Any]:
         "image_url": str(first_image.get("src") or ""),
         "stock_status": str(item.get("stock_status") or ""),
         "categories": [str(category.get("name") or "") for category in categories if isinstance(category, dict) and category.get("name")],
+        "attributes": clean_attributes[:8],
+        "short_description": short_description[:300],
     }
 
 

@@ -10,6 +10,7 @@ class SendMessageIn(BaseModel):
     media_id: str = Field(default="", max_length=240)
     mime_type: str = Field(default="", max_length=160)
     filename: str = Field(default="", max_length=240)
+    payload_json: dict[str, Any] | None = None
 
 
 class CustomerUpdateIn(BaseModel):

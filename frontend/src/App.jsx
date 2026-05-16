@@ -198,6 +198,95 @@ const asObject = (value) => {
   return {};
 };
 
+const cleanProductText = (value, limit = 500) => String(value || "").trim().slice(0, limit);
+
+const normalizeProductCard = (product) => {
+  const raw = asObject(product);
+  const attributes = Array.isArray(raw.attributes)
+    ? raw.attributes
+        .map((item) => ({ name: cleanProductText(item?.name, 80), value: cleanProductText(item?.value || item?.option, 220) }))
+        .filter((item) => item.name && item.value)
+        .slice(0, 8)
+    : [];
+  const categories = Array.isArray(raw.categories) ? raw.categories.map((item) => cleanProductText(item, 80)).filter(Boolean).slice(0, 8) : [];
+  return {
+    id: cleanProductText(raw.id, 80),
+    name: cleanProductText(raw.name, 180) || "Producto",
+    sku: cleanProductText(raw.sku, 120),
+    price: cleanProductText(raw.price, 80),
+    regular_price: cleanProductText(raw.regular_price, 80),
+    sale_price: cleanProductText(raw.sale_price, 80),
+    currency: cleanProductText(raw.currency, 20),
+    permalink: cleanProductText(raw.permalink, 900),
+    image_url: cleanProductText(raw.image_url || raw.featured_image, 900),
+    stock_status: cleanProductText(raw.stock_status, 80),
+    short_description: cleanProductText(raw.short_description, 280),
+    categories,
+    attributes,
+  };
+};
+
+const productCardFromMessage = (message) => {
+  const payload = asObject(message?.payload_json);
+  const product = normalizeProductCard(payload.product_card || payload.product || payload.catalog_product || {});
+  return product.name !== "Producto" || product.permalink || product.image_url || product.price ? product : null;
+};
+
+const productPriceLabel = (product) => {
+  const price = product.sale_price || product.price || product.regular_price || "";
+  if (!price) return "Precio no visible";
+  const numeric = Number(String(price).replace(/[^\d.,-]/g, "").replace(/\./g, "").replace(",", "."));
+  if (Number.isFinite(numeric) && numeric > 0) return new Intl.NumberFormat("es-CO", { style: "currency", currency: "COP", maximumFractionDigits: 0 }).format(numeric);
+  return product.currency ? `${product.currency} ${price}` : `$ ${price}`;
+};
+
+const buildProductOutboundText = (product, note = "") => {
+  const lines = [];
+  const cleanNote = cleanProductText(note, 900);
+  if (cleanNote) lines.push(cleanNote, "");
+  lines.push(product.name || "Producto");
+  const price = productPriceLabel(product);
+  if (price && price !== "Precio no visible") lines.push(`Precio: ${price}`);
+  if (product.sku) lines.push(`SKU: ${product.sku}`);
+  product.attributes.forEach((attribute) => lines.push(`${attribute.name}: ${attribute.value}`));
+  if (product.short_description) lines.push(product.short_description);
+  if (product.permalink) lines.push(`Ver producto: ${product.permalink}`);
+  return lines.join("\n").trim();
+};
+
+function ProductMessageCard({ product, compact = false }) {
+  if (!product) return null;
+  const detailChips = [
+    ...(product.categories || []).slice(0, 2),
+    product.stock_status ? (product.stock_status === "instock" ? "Disponible" : product.stock_status) : "",
+    product.sku ? `SKU ${product.sku}` : "",
+  ].filter(Boolean).slice(0, 4);
+  return (
+    <article className={`product-message-card ${compact ? "compact" : ""}`}>
+      <div className="product-card-media">
+        {product.image_url ? <img src={product.image_url} alt={product.name} loading="lazy" /> : <span>Sin imagen</span>}
+      </div>
+      <div className="product-card-body">
+        <strong>{product.name}</strong>
+        <b>{productPriceLabel(product)}</b>
+        {detailChips.length ? <div className="product-card-chips">{detailChips.map((chip) => <span key={chip}>{chip}</span>)}</div> : null}
+        {product.attributes?.length ? (
+          <dl className="product-card-attrs">
+            {product.attributes.slice(0, 4).map((attribute) => (
+              <React.Fragment key={`${attribute.name}-${attribute.value}`}>
+                <dt>{attribute.name}</dt>
+                <dd>{attribute.value}</dd>
+              </React.Fragment>
+            ))}
+          </dl>
+        ) : null}
+        {product.short_description ? <p>{product.short_description}</p> : null}
+        {product.permalink ? <a href={product.permalink} target="_blank" rel="noreferrer">Ver producto</a> : null}
+      </div>
+    </article>
+  );
+}
+
 const messageDeliveryState = (message) => {
   if (String(message?.direction || "").toLowerCase() !== "out") return null;
   const payload = asObject(message?.payload_json);
@@ -347,6 +436,7 @@ function App() {
   const [catalogProducts, setCatalogProducts] = useState([]);
   const [catalogLoading, setCatalogLoading] = useState(false);
   const [catalogError, setCatalogError] = useState("");
+  const [catalogDraft, setCatalogDraft] = useState(null);
   const [emojiOpen, setEmojiOpen] = useState(false);
   const [emojiSearch, setEmojiSearch] = useState("");
   const [recentEmojis, setRecentEmojis] = useState(() => {
@@ -544,6 +634,7 @@ function App() {
   const setComposerAttachment = (file, forcedKind = "", knownWaveform = null) => {
     if (!file) return;
     clearComposerAttachment();
+    setCatalogDraft(null);
     const kind = forcedKind || mediaKindFromMime(file.type);
     const signature = `${file.name || "archivo"}:${file.size || 0}:${file.lastModified || Date.now()}`;
     attachmentSignatureRef.current = signature;
@@ -562,7 +653,7 @@ function App() {
 
   const clearWorkspaceState = () => {
     setConversations([]); setSelectedConversation(null); setConversationMemory(null); setMessages([]); setReplyText("");
-    clearComposerAttachment(); setEmojiOpen(false); setAttachMenuOpen(false); setInboxChannelFilter("all"); setInboxSearch(""); setIsRecording(false); setRecordingSeconds(0); setRecordingLevels(EMPTY_WAVEFORM);
+    clearComposerAttachment(); setCatalogDraft(null); setEmojiOpen(false); setAttachMenuOpen(false); setInboxChannelFilter("all"); setInboxSearch(""); setIsRecording(false); setRecordingSeconds(0); setRecordingLevels(EMPTY_WAVEFORM);
     recordingLevelsRef.current = EMPTY_WAVEFORM;
     setIntegrations([]); setWebhooks([]); setWebhookEvents([]); setBillingOverview(null); setBillingPlans([]); setLastWebhookSecret(null);
     setApiCredentials([]); setCredentialModal(null); setCredentialModels({}); setKnowledgeSources([]); setDiagnostics(null);
@@ -689,7 +780,7 @@ function App() {
       const selected = { ...conversation, unread_count: 0 };
       setSelectedConversation(selected); setMessages(data?.messages || []);
       setConversationMemory(memoryData || null);
-      if (!options.preserveComposer) { setReplyText(""); clearComposerAttachment(); setEmojiOpen(false); setAttachMenuOpen(false); }
+      if (!options.preserveComposer) { setReplyText(""); clearComposerAttachment(); setCatalogDraft(null); setEmojiOpen(false); setAttachMenuOpen(false); }
       if (Number(conversation.unread_count || 0) > 0) markConversationRead(conversation.id, { silent: true });
     } catch (err) { showStatus(String(err.message || err), "error"); }
   };
@@ -708,7 +799,7 @@ function App() {
         const updatedSelected = items.find((item) => item.id === selectedConversation.id);
         if (updatedSelected) await loadMessages({ ...selectedConversation, ...updatedSelected }, { preserveComposer: true });
       }
-      if (!items.length) { setSelectedConversation(null); setConversationMemory(null); setMessages([]); setReplyText(""); clearComposerAttachment(); }
+      if (!items.length) { setSelectedConversation(null); setConversationMemory(null); setMessages([]); setReplyText(""); clearComposerAttachment(); setCatalogDraft(null); }
     } catch (err) { showStatus(String(err.message || err), "error"); }
   };
 
@@ -1045,13 +1136,11 @@ function App() {
     loadCatalogProducts("");
   };
   const insertCatalogProduct = (product) => {
-    const price = product.price ? ` - ${product.price}` : "";
-    const sku = product.sku ? `\nSKU: ${product.sku}` : "";
-    const url = product.permalink ? `\n${product.permalink}` : "";
-    const text = `${product.name || "Producto"}${price}${sku}${url}`;
-    setReplyText((prev) => `${prev}${prev.trim() ? "\n\n" : ""}${text}`);
+    const normalized = normalizeProductCard(product);
+    clearComposerAttachment();
+    setCatalogDraft(normalized);
     setCatalogOpen(false);
-    showStatus("Producto insertado en el mensaje. Cuando activemos mensajes de catalogo nativos, saldra como tarjeta interactiva.", "ok");
+    showStatus("Producto adjunto como ficha. Puedes agregar una nota y enviarlo.", "ok");
   };
   const openAttachmentPicker = (kind) => {
     setAttachMenuOpen(false);
@@ -1103,6 +1192,7 @@ function App() {
     if (type === "video") return "video";
     if (type === "audio") return "nota de voz";
     if (type === "document" || type === "file") return "documento";
+    if (type === "product") return "producto";
     return type;
   };
   const messageSenderLabel = (message) => {
@@ -1114,8 +1204,13 @@ function App() {
     const type = String(message?.msg_type || "text").toLowerCase();
     const url = messageMediaUrl(message);
     const label = messageLabel(message);
+    const product = productCardFromMessage(message);
+    const payload = asObject(message?.payload_json);
+    const note = cleanProductText(payload.message_note, 900);
     return (
       <>
+        {product ? <ProductMessageCard product={product} /> : null}
+        {product && note ? <p className="product-message-note">{note}</p> : null}
         {type === "image" && url ? <img className="chat-media image" src={url} alt={message.text || "Imagen recibida"} loading="lazy" /> : null}
         {type === "video" && url ? <video className="chat-media video" src={url} controls playsInline /> : null}
         {type === "audio" && url ? (
@@ -1125,7 +1220,7 @@ function App() {
           </div>
         ) : null}
         {(type === "document" || type === "file") && url ? <a className="document-chip" href={url} target="_blank" rel="noreferrer">Abrir {label}</a> : null}
-        {message.text && !/^\[(image|video|audio|document|file)\]$/i.test(message.text) ? <p>{message.text}</p> : !url ? <p>[{label}]</p> : null}
+        {!product && message.text && !/^\[(image|video|audio|document|file|product)\]$/i.test(message.text) ? <p>{message.text}</p> : !product && !url ? <p>[{label}]</p> : null}
       </>
     );
   };
@@ -1220,13 +1315,15 @@ function App() {
   const sendSelectedMessage = async (event) => {
     event.preventDefault();
     if (!selectedConversation?.id || composerSending) return;
-    if (!replyText.trim() && !attachmentFile) return;
+    if (!replyText.trim() && !attachmentFile && !catalogDraft) return;
     setComposerSending(true);
     try {
       let mediaId = "";
       let msgType = "text";
       let mimeType = "";
       let filename = "";
+      let outgoingText = replyText.trim();
+      let payloadJson = {};
       if (attachmentFile) {
         msgType = attachmentKind || mediaKindFromMime(attachmentFile.type);
         mimeType = attachmentFile.type || "";
@@ -1236,10 +1333,19 @@ function App() {
         formData.append("file", attachmentFile);
         const upload = await apiCall("/saas/v1/media/upload", { method: "POST", body: formData });
         mediaId = upload?.media_id || upload?.media?.id || "";
+      } else if (catalogDraft) {
+        msgType = "product";
+        outgoingText = buildProductOutboundText(catalogDraft, replyText.trim());
+        payloadJson = {
+          product_card: catalogDraft,
+          message_note: replyText.trim(),
+          cta_url: catalogDraft.permalink || "",
+          cta_text: "Ver producto",
+        };
       }
       const data = await apiCall(`/saas/v1/conversations/${encodeURIComponent(selectedConversation.id)}/messages`, {
         method: "POST",
-        body: JSON.stringify({ text: replyText, msg_type: msgType, media_id: mediaId, mime_type: mimeType, filename }),
+        body: JSON.stringify({ text: outgoingText, msg_type: msgType, media_id: mediaId, mime_type: mimeType, filename, payload_json: payloadJson }),
       });
       const dispatch = data?.dispatch || {};
       const outboundError = dispatch.last_error || data?.outbound_status?.error || "";
@@ -1254,6 +1360,7 @@ function App() {
       }
       setReplyText("");
       clearComposerAttachment();
+      setCatalogDraft(null);
       setEmojiOpen(false);
       await loadMessages(selectedConversation);
       await loadInbox();
@@ -1655,6 +1762,12 @@ function App() {
                       <button type="button" onClick={clearComposerAttachment}>Quitar</button>
                     </div>
                   ) : null}
+                  {catalogDraft ? (
+                    <div className="attachment-preview product-draft-preview">
+                      <ProductMessageCard product={catalogDraft} compact />
+                      <button type="button" onClick={() => setCatalogDraft(null)}>Quitar</button>
+                    </div>
+                  ) : null}
                   {isRecording ? (
                     <div className="recording-panel">
                       <strong>{formatDuration(recordingSeconds)}</strong>
@@ -1679,7 +1792,7 @@ function App() {
                   <button type="button" className={`composer-icon mic-button ${isRecording ? "active" : ""}`} onClick={isRecording ? stopVoiceRecording : startVoiceRecording} title="Grabar nota de voz">♩</button>
                   <input value={replyText} onChange={(event) => setReplyText(event.target.value)} placeholder="Escribe un mensaje..." />
                   <button type="button" className="composer-icon" onClick={() => setEmojiOpen((prev) => !prev)} title="Emojis">☺</button>
-                  <button type="submit" className="primary send-button" disabled={composerSending || (!replyText.trim() && !attachmentFile)}>{composerSending ? "..." : "➤"}</button>
+                  <button type="submit" className="primary send-button" disabled={composerSending || (!replyText.trim() && !attachmentFile && !catalogDraft)}>{composerSending ? "..." : "➤"}</button>
                   {emojiOpen ? (
                     <div className="emoji-panel whatsapp-emoji-panel">
                       <input value={emojiSearch} onChange={(event) => setEmojiSearch(event.target.value)} placeholder="Buscar emoji..." />
@@ -2209,6 +2322,8 @@ function App() {
                   <strong>{product.name}</strong>
                   <span>{product.price ? `$ ${product.price}` : "Sin precio visible"}</span>
                   <small>{product.stock_status || "stock"}{product.sku ? ` / SKU ${product.sku}` : ""}</small>
+                  {Array.isArray(product.attributes) && product.attributes.length ? <small>{product.attributes.slice(0, 2).map((item) => `${item.name}: ${item.value}`).join(" · ")}</small> : null}
+                  <em>Enviar ficha</em>
                 </button>
               ))}
               {!catalogLoading && catalogProducts.length === 0 ? <div className="empty">Sin productos para mostrar. Prueba otra busqueda o revisa que WooCommerce tenga productos publicados.</div> : null}
