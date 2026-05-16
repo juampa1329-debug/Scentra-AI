@@ -165,6 +165,16 @@ def _subscription_list(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return [item for item in data if isinstance(item, dict)] if isinstance(data, list) else []
 
 
+def _subscription_app_candidates(item: dict[str, Any]) -> set[str]:
+    candidates = {
+        _clean(item.get("id") or item.get("app_id") or item.get("application_id"), 80),
+    }
+    nested = item.get("whatsapp_business_api_data")
+    if isinstance(nested, dict):
+        candidates.add(_clean(nested.get("id") or nested.get("app_id") or nested.get("application_id"), 80))
+    return {candidate for candidate in candidates if candidate}
+
+
 def _is_subscribed(payload: dict[str, Any], app_id: str = "") -> bool:
     subscriptions = _subscription_list(payload)
     if not subscriptions:
@@ -173,8 +183,7 @@ def _is_subscribed(payload: dict[str, Any], app_id: str = "") -> bool:
     if not clean_app_id:
         return True
     for item in subscriptions:
-        candidate = _clean(item.get("id") or item.get("app_id") or item.get("application_id"), 80)
-        if candidate and candidate == clean_app_id:
+        if clean_app_id in _subscription_app_candidates(item):
             return True
     return False
 
