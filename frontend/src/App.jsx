@@ -328,6 +328,8 @@ function App() {
   const [knowledgeUploading, setKnowledgeUploading] = useState(false);
   const [diagnostics, setDiagnostics] = useState(null);
   const [diagnosticsRunning, setDiagnosticsRunning] = useState(false);
+  const [debugInboundForm, setDebugInboundForm] = useState({ from_phone: "573001112233", message: "Hola, prueba de webhook entrante", contact_name: "Cliente Debug" });
+  const [debugInboundResult, setDebugInboundResult] = useState(null);
   const [credentialModal, setCredentialModal] = useState(null);
   const [credentialSaving, setCredentialSaving] = useState(false);
   const [credentialModels, setCredentialModels] = useState({});
@@ -564,6 +566,7 @@ function App() {
     recordingLevelsRef.current = EMPTY_WAVEFORM;
     setIntegrations([]); setWebhooks([]); setWebhookEvents([]); setBillingOverview(null); setBillingPlans([]); setLastWebhookSecret(null);
     setApiCredentials([]); setCredentialModal(null); setCredentialModels({}); setKnowledgeSources([]); setDiagnostics(null);
+    setDebugInboundResult(null);
     setIntegrationSecretModal(null);
     setWhatsappPhones([]); setPhoneRegisterForm({ phone_number_id: "", pin: "" });
   };
@@ -1360,6 +1363,25 @@ function App() {
       setDiagnosticsRunning(false);
     }
   };
+  const simulateInboundWebhook = async (event) => {
+    event.preventDefault();
+    setDiagnosticsRunning(true);
+    try {
+      const data = await apiCall("/saas/v1/diagnostics/whatsapp/simulate-inbound", {
+        method: "POST",
+        body: JSON.stringify(debugInboundForm),
+      });
+      setDebugInboundResult(data);
+      showStatus(data?.ok ? "Simulacion entrante OK: Scentra creo mensaje en Inbox." : "Simulacion ejecutada, pero no creo mensaje.", data?.ok ? "ok" : "error");
+      await loadDiagnostics(true);
+      await loadInbox();
+    } catch (err) {
+      setDebugInboundResult({ ok: false, error: String(err.message || err) });
+      showStatus(String(err.message || err), "error");
+    } finally {
+      setDiagnosticsRunning(false);
+    }
+  };
   const saveProfileLocal = () => showStatus("Perfil preparado. Falta conectar persistencia de usuario y foto.", "ok");
   const saveSecurityLocal = () => showStatus("Seguridad preparada. Cambio de clave y 2FA requieren endpoints backend.", "neutral");
   const openCredentialModal = (provider, credentialKey = provider.env) => {
@@ -2053,8 +2075,32 @@ function App() {
                 </div>
               </article>
               <article className="panel glass-card">
+                <div className="panel-head"><h2>Simular mensaje entrante</h2><span>prueba pipeline interno</span></div>
+                <p className="soft-copy">Esta prueba no llama a Meta. Inserta un webhook falso con el WABA/Phone configurado y verifica si Scentra lo convierte en conversacion y mensaje. Si pasa, el fallo esta en Meta: callback, suscripcion o campo messages.</p>
+                <form className="debug-sim-form" onSubmit={simulateInboundWebhook}>
+                  <label>Telefono cliente
+                    <input value={debugInboundForm.from_phone} placeholder="573001112233" onChange={(event) => setDebugInboundForm((prev) => ({ ...prev, from_phone: event.target.value }))} />
+                  </label>
+                  <label>Nombre
+                    <input value={debugInboundForm.contact_name} placeholder="Cliente Debug" onChange={(event) => setDebugInboundForm((prev) => ({ ...prev, contact_name: event.target.value }))} />
+                  </label>
+                  <label>Mensaje
+                    <input value={debugInboundForm.message} placeholder="Hola, prueba entrante" onChange={(event) => setDebugInboundForm((prev) => ({ ...prev, message: event.target.value }))} />
+                  </label>
+                  <button type="submit" className="primary" disabled={diagnosticsRunning}>{diagnosticsRunning ? "Probando..." : "Simular entrada"}</button>
+                </form>
+                {debugInboundResult ? (
+                  <div className={`debug-result ${debugInboundResult.ok ? "ok" : "bad"}`}>
+                    <strong>{debugInboundResult.ok ? "Pipeline interno OK" : "Pipeline interno con error"}</strong>
+                    <span>{debugInboundResult.ok ? "Scentra pudo procesar un mensaje tipo Meta y crear/actualizar el Inbox." : (debugInboundResult.error || "No se creo mensaje desde el webhook simulado.")}</span>
+                    {debugInboundResult.process_result ? <small>Webhooks procesados: {debugInboundResult.process_result.processed || 0} / mensajes insertados: {debugInboundResult.process_result.messages_inserted || 0} / errores: {debugInboundResult.process_result.errors || 0}</small> : null}
+                    {debugInboundResult.conversation?.id ? <small>Conversacion: {debugInboundResult.conversation.display_name || debugInboundResult.conversation.phone || debugInboundResult.conversation.external_contact_id}</small> : null}
+                  </div>
+                ) : null}
+              </article>
+              <article className="panel glass-card">
                 <div className="panel-head"><h2>Integraciones</h2><span>configuracion segura</span></div>
-                <div className="debug-table">{(diagnostics?.integrations || []).map((item, idx) => <div className="debug-row" key={`${item.provider}-${item.channel}-${idx}`}><strong>{item.provider} / {item.channel}</strong><span>{item.status} / {item.dispatch_mode || "-"}</span><small>Phone: {item.phone_number_id || "-"} / Token: {item.has_token ? "guardado" : "faltante"}</small></div>)}{!diagnostics?.integrations?.length ? <div className="empty">Sin integraciones registradas.</div> : null}</div>
+                <div className="debug-table">{(diagnostics?.integrations || []).map((item, idx) => <div className="debug-row" key={`${item.provider}-${item.channel}-${idx}`}><strong>{item.provider} / {item.channel}</strong><span>{item.status} / {item.dispatch_mode || "-"}</span><small>Phone: {item.phone_number_id || "-"} / WABA: {item.business_account_id || "-"} / App: {item.app_id || "-"} / Token: {item.has_token ? "guardado" : "faltante"}</small></div>)}{!diagnostics?.integrations?.length ? <div className="empty">Sin integraciones registradas.</div> : null}</div>
               </article>
               <article className="panel glass-card">
                 <div className="panel-head"><h2>Colas y errores</h2><span>webhooks / IA / outbound</span></div>

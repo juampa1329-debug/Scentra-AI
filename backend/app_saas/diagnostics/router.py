@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import time
 from typing import Any
+from uuid import uuid4
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
@@ -17,6 +22,12 @@ from app_saas.workers.dispatch import process_due_outbound_messages
 from app_saas.workers.ingest import process_due_webhook_events
 
 router = APIRouter(prefix="/diagnostics", tags=["saas-diagnostics"])
+
+
+class WhatsappInboundSimulationIn(BaseModel):
+    from_phone: str = Field(default="573001112233", max_length=40)
+    message: str = Field(default="Mensaje de prueba desde diagnostico Scentra", max_length=1000)
+    contact_name: str = Field(default="Cliente Debug", max_length=120)
 
 
 def _table_exists(conn: Connection, table_name: str) -> bool:
@@ -44,6 +55,56 @@ def _status_counts(conn: Connection, table_name: str, tenant_id: str) -> list[di
 def _recent_rows(conn: Connection, sql: str, tenant_id: str, limit: int = 5) -> list[dict[str, Any]]:
     rows = conn.execute(text(sql), {"tenant_id": tenant_id, "limit": limit}).mappings().all()
     return [dict(row) for row in rows]
+
+
+def _load_debug_whatsapp_integration(conn: Connection, tenant_id: str) -> dict[str, Any]:
+    row = conn.execute(
+        text(
+            """
+            SELECT provider, channel, status, config_json
+            FROM saas_integrations
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND channel = 'whatsapp'
+            ORDER BY
+              CASE WHEN provider = 'meta' THEN 0 ELSE 1 END,
+              updated_at DESC NULLS LAST
+            LIMIT 1
+            """
+        ),
+        {"tenant_id": tenant_id},
+    ).mappings().first()
+    if not row:
+        raise HTTPException(status_code=400, detail="whatsapp_integration_missing")
+    data = dict(row)
+    config = data.get("config_json") if isinstance(data.get("config_json"), dict) else {}
+    return {**data, "config_json": config, "safe_config": _safe_config_for_output(config), "has_token": bool(_integration_token(config))}
+
+
+def _load_debug_webhook_endpoint(conn: Connection, tenant_id: str) -> dict[str, Any]:
+    row = conn.execute(
+        text(
+            """
+            SELECT id::text, provider, endpoint_key, is_active, signature_required, last_seen_at::text
+            FROM saas_webhook_endpoints
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND provider IN ('whatsapp', 'meta')
+              AND is_active = TRUE
+            ORDER BY
+              CASE WHEN provider = 'whatsapp' THEN 0 ELSE 1 END,
+              updated_at DESC NULLS LAST
+            LIMIT 1
+            """
+        ),
+        {"tenant_id": tenant_id},
+    ).mappings().first()
+    if not row:
+        raise HTTPException(status_code=400, detail="active_whatsapp_webhook_missing")
+    return dict(row)
+
+
+def _safe_phone(value: str) -> str:
+    clean = "".join(ch for ch in str(value or "").strip() if ch.isdigit())
+    return clean[:40] or "573001112233"
 
 
 @router.get("/overview")
@@ -100,6 +161,7 @@ def diagnostics_overview(ctx: AuthContext = Depends(get_current_user)):
                     "dispatch_mode": safe_config.get("dispatch_mode", ""),
                     "phone_number_id": safe_config.get("phone_number_id", ""),
                     "business_account_id": safe_config.get("business_account_id", ""),
+                    "app_id": safe_config.get("app_id", ""),
                     "has_token": bool(_integration_token(config)),
                     "last_sync_at": data.get("last_sync_at") or "",
                 }
@@ -198,4 +260,150 @@ def run_diagnostics_processors(
         "webhooks": process_due_webhook_events(limit=limit, tenant_id=ctx.tenant_id),
         "ai": process_due_ai_replies(limit=limit, tenant_id=ctx.tenant_id),
         "outbound": process_due_outbound_messages(limit=limit, tenant_id=ctx.tenant_id),
+    }
+
+
+@router.post("/whatsapp/simulate-inbound")
+def simulate_whatsapp_inbound(
+    payload: WhatsappInboundSimulationIn,
+    ctx: AuthContext = Depends(require_role("owner", "admin", "supervisor")),
+):
+    from_phone = _safe_phone(payload.from_phone)
+    body = str(payload.message or "").strip()[:1000] or "Mensaje de prueba desde diagnostico Scentra"
+    contact_name = str(payload.contact_name or "").strip()[:120] or "Cliente Debug"
+    now = int(time.time())
+    provider_message_id = f"wamid.debug.{uuid4().hex}"
+
+    with db_session() as conn:
+        set_tenant_context(conn, ctx.tenant_id)
+        integration = _load_debug_whatsapp_integration(conn, ctx.tenant_id)
+        endpoint = _load_debug_webhook_endpoint(conn, ctx.tenant_id)
+        safe_config = integration["safe_config"]
+        phone_number_id = str(safe_config.get("phone_number_id") or "").strip()
+        waba_id = str(safe_config.get("business_account_id") or "").strip()
+        if not phone_number_id:
+            raise HTTPException(status_code=400, detail="phone_number_id_missing")
+        if not waba_id:
+            raise HTTPException(status_code=400, detail="waba_id_missing")
+
+        webhook_payload = {
+            "object": "whatsapp_business_account",
+            "entry": [
+                {
+                    "id": waba_id,
+                    "changes": [
+                        {
+                            "field": "messages",
+                            "value": {
+                                "messaging_product": "whatsapp",
+                                "metadata": {
+                                    "display_phone_number": "debug",
+                                    "phone_number_id": phone_number_id,
+                                },
+                                "contacts": [
+                                    {
+                                        "profile": {"name": contact_name},
+                                        "wa_id": from_phone,
+                                    }
+                                ],
+                                "messages": [
+                                    {
+                                        "from": from_phone,
+                                        "id": provider_message_id,
+                                        "timestamp": str(now),
+                                        "text": {"body": body},
+                                        "type": "text",
+                                    }
+                                ],
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+        raw = json.dumps(webhook_payload, sort_keys=True).encode("utf-8")
+        raw_sha256 = hashlib.sha256(raw).hexdigest()
+        event_id = f"debug:{provider_message_id}"
+        result = conn.execute(
+            text(
+                """
+                INSERT INTO saas_webhook_events (
+                    tenant_id,
+                    endpoint_id,
+                    provider,
+                    event_id,
+                    status,
+                    headers_json,
+                    payload_json,
+                    raw_sha256
+                )
+                VALUES (
+                    CAST(:tenant_id AS uuid),
+                    CAST(:endpoint_id AS uuid),
+                    :provider,
+                    :event_id,
+                    'received',
+                    CAST(:headers_json AS jsonb),
+                    CAST(:payload_json AS jsonb),
+                    :raw_sha256
+                )
+                ON CONFLICT (tenant_id, provider, event_id) DO NOTHING
+                """
+            ),
+            {
+                "tenant_id": ctx.tenant_id,
+                "endpoint_id": endpoint["id"],
+                "provider": endpoint["provider"],
+                "event_id": event_id,
+                "headers_json": json.dumps({"x-scentra-debug": "simulate-inbound"}),
+                "payload_json": json.dumps(webhook_payload),
+                "raw_sha256": raw_sha256,
+            },
+        )
+        inserted = int(result.rowcount or 0) > 0
+
+    process_result = process_due_webhook_events(limit=10, tenant_id=ctx.tenant_id)
+
+    with db_session() as conn:
+        set_tenant_context(conn, ctx.tenant_id)
+        conversation = conn.execute(
+            text(
+                """
+                SELECT id::text, channel, external_contact_id, phone, display_name, last_message_text, unread_count, updated_at::text
+                FROM saas_conversations
+                WHERE tenant_id = CAST(:tenant_id AS uuid)
+                  AND channel = 'whatsapp'
+                  AND external_contact_id = :from_phone
+                LIMIT 1
+                """
+            ),
+            {"tenant_id": ctx.tenant_id, "from_phone": from_phone},
+        ).mappings().first()
+        message = conn.execute(
+            text(
+                """
+                SELECT id::text, direction, msg_type, text, created_at::text
+                FROM saas_messages
+                WHERE tenant_id = CAST(:tenant_id AS uuid)
+                  AND external_message_id = :provider_message_id
+                LIMIT 1
+                """
+            ),
+            {"tenant_id": ctx.tenant_id, "provider_message_id": provider_message_id},
+        ).mappings().first()
+
+    return {
+        "ok": bool(message),
+        "inserted_event": inserted,
+        "tenant_id": ctx.tenant_id,
+        "provider": endpoint["provider"],
+        "endpoint_key": endpoint["endpoint_key"],
+        "phone_number_id": phone_number_id,
+        "waba_id": waba_id,
+        "from_phone": from_phone,
+        "provider_message_id": provider_message_id,
+        "process_result": process_result,
+        "conversation": dict(conversation or {}),
+        "message": dict(message or {}),
+        "interpretation": "scentra_pipeline_ok_meta_webhook_pending" if message else "scentra_pipeline_failed",
     }

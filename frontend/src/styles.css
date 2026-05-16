@@ -638,6 +638,33 @@ nav { display: grid; gap: 8px; width: 100%; }
 .debug-checks .ok { border-color: rgba(52,211,153,0.42); background: rgba(20,184,166,0.16); color: var(--ok); }
 .debug-checks .warn { border-color: rgba(251,191,36,0.42); background: rgba(251,191,36,0.12); color: var(--amber); }
 .debug-checks .bad, .debug-row.error { border-color: rgba(248,113,113,0.42); background: rgba(248,113,113,0.10); color: #fecaca; }
+.debug-sim-form {
+  display: grid;
+  grid-template-columns: minmax(160px, 0.8fr) minmax(160px, 0.8fr) minmax(220px, 1.4fr) auto;
+  gap: 10px;
+  align-items: end;
+}
+.debug-result {
+  display: grid;
+  gap: 5px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 13px;
+  margin-top: 12px;
+  background: rgba(255,255,255,0.055);
+}
+.debug-result.ok {
+  border-color: rgba(52,211,153,0.42);
+  background: rgba(20,184,166,0.13);
+}
+.debug-result.bad {
+  border-color: rgba(248,113,113,0.42);
+  background: rgba(248,113,113,0.10);
+}
+.debug-result span,
+.debug-result small {
+  color: var(--muted);
+}
 @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes pop-in { from { opacity: 0; transform: translateY(18px) scale(0.96); } to { opacity: 1; transform: translateY(0) scale(1); } }
 @media (max-width: 1180px) { .metric-grid, .settings-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } .dashboard-layout { grid-template-columns: 1fr; } }
@@ -659,7 +686,7 @@ nav { display: grid; gap: 8px; width: 100%; }
   .conversation-list { max-height: 280px; }
   .messages { min-height: 420px; }
   .inline-form, .integrations-form, .composer, .usage-line, .row, .row.four, .row.six, .integration-row,
-  .meta-grid, .meta-grid .token-field, .current-integration-strip, .integration-card-row, .phone-register-form, .webhook-create-form,
+  .meta-grid, .meta-grid .token-field, .current-integration-strip, .integration-card-row, .phone-register-form, .webhook-create-form, .debug-sim-form,
   .secret-value-row, .callback-box { grid-template-columns: 1fr; grid-column: auto; }
   .rich-composer { grid-template-columns: auto auto minmax(0, 1fr) auto auto; }
   .attachment-preview, .recording-panel, .audio-message, .crm-mini-form { grid-template-columns: 1fr; }
