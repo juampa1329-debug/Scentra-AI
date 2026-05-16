@@ -16,6 +16,7 @@ from app_saas.api_credentials.router import _ensure_api_credentials_table
 from app_saas.config import settings
 from app_saas.db import db_session, set_tenant_context
 from app_saas.integrations.router import _integration_token, _safe_config_for_output
+from app_saas.integrations.whatsapp_subscription import ensure_whatsapp_subscription_log_table
 from app_saas.knowledge.router import ensure_knowledge_tables
 from app_saas.shared.security import AuthContext, get_current_user, require_role
 from app_saas.workers.dispatch import process_due_outbound_messages
@@ -105,6 +106,83 @@ def _load_debug_webhook_endpoint(conn: Connection, tenant_id: str) -> dict[str, 
 def _safe_phone(value: str) -> str:
     clean = "".join(ch for ch in str(value or "").strip() if ch.isdigit())
     return clean[:40] or "573001112233"
+
+
+def _whatsapp_webhook_signal(conn: Connection, tenant_id: str) -> dict[str, Any]:
+    if not _table_exists(conn, "saas_webhook_events"):
+        return {
+            "status_events_24h": 0,
+            "inbound_events_24h": 0,
+            "statuses_without_inbound": False,
+            "recommendation": "",
+        }
+    row = conn.execute(
+        text(
+            """
+            SELECT
+              COUNT(*) FILTER (
+                WHERE payload_json::text ILIKE '%"statuses"%'
+                  AND received_at >= NOW() - INTERVAL '24 hours'
+              )::int AS status_events_24h,
+              COUNT(*) FILTER (
+                WHERE payload_json::text ILIKE '%"messages"%'
+                  AND received_at >= NOW() - INTERVAL '24 hours'
+              )::int AS inbound_events_24h,
+              COUNT(*) FILTER (
+                WHERE payload_json::text ILIKE '%"statuses"%'
+                  AND received_at >= NOW() - INTERVAL '7 days'
+              )::int AS status_events_7d,
+              COUNT(*) FILTER (
+                WHERE payload_json::text ILIKE '%"messages"%'
+                  AND received_at >= NOW() - INTERVAL '7 days'
+              )::int AS inbound_events_7d
+            FROM saas_webhook_events
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND provider IN ('whatsapp', 'meta')
+            """
+        ),
+        {"tenant_id": tenant_id},
+    ).mappings().first()
+    data = dict(row or {})
+    symptom = int(data.get("status_events_24h") or 0) > 0 and int(data.get("inbound_events_24h") or 0) == 0
+    if not symptom:
+        symptom = int(data.get("status_events_7d") or 0) > 0 and int(data.get("inbound_events_7d") or 0) == 0
+    data["statuses_without_inbound"] = bool(symptom)
+    data["recommendation"] = (
+        "Llegan statuses de Meta, pero no llegan mensajes entrantes. Verifica WABA subscribed_apps, callback URL, token de verificacion y campo messages en la app de Meta."
+        if symptom
+        else ""
+    )
+    return data
+
+
+def _recent_subscription_checks(conn: Connection, tenant_id: str, limit: int = 5) -> list[dict[str, Any]]:
+    ensure_whatsapp_subscription_log_table(conn)
+    rows = conn.execute(
+        text(
+            """
+            SELECT
+                waba_id,
+                app_id,
+                status,
+                already_subscribed,
+                auto_subscribe_attempted,
+                final_subscribed,
+                http_status,
+                meta_code,
+                meta_error_type,
+                meta_error_message,
+                error,
+                created_at::text
+            FROM saas_whatsapp_subscription_checks
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+            ORDER BY created_at DESC
+            LIMIT :limit
+            """
+        ),
+        {"tenant_id": tenant_id, "limit": limit},
+    ).mappings().all()
+    return [dict(row) for row in rows]
 
 
 @router.get("/overview")
@@ -214,6 +292,8 @@ def diagnostics_overview(ctx: AuthContext = Depends(get_current_user)):
         webhook_counts = _status_counts(conn, "saas_webhook_events", ctx.tenant_id)
         outbound_counts = _status_counts(conn, "saas_outbound_messages", ctx.tenant_id)
         ai_pending_counts = _status_counts(conn, "saas_ai_pending_replies", ctx.tenant_id)
+        whatsapp_signal = _whatsapp_webhook_signal(conn, ctx.tenant_id)
+        subscription_checks = _recent_subscription_checks(conn, ctx.tenant_id)
     return {
         "tenant": dict(tenant or {}),
         "runtime": {
@@ -242,6 +322,8 @@ def diagnostics_overview(ctx: AuthContext = Depends(get_current_user)):
         ],
         "integrations": integration_rows,
         "webhooks": {"endpoints": webhooks, "events": webhook_counts, "last_events": last_events},
+        "whatsapp_symptoms": whatsapp_signal,
+        "whatsapp_subscription_checks": subscription_checks,
         "queues": {
             "outbound": outbound_counts,
             "ai_pending": ai_pending_counts,

@@ -14,6 +14,7 @@ from sqlalchemy import text
 from app_saas.billing.limits import ensure_integration_quota
 from app_saas.db import db_session, set_tenant_context
 from app_saas.integrations.schemas import IntegrationOut, IntegrationUpsertIn, WhatsappPhoneRegisterIn
+from app_saas.integrations.whatsapp_subscription import ensure_webhook_subscription
 from app_saas.shared.security import AuthContext, get_current_user, require_role, verify_password
 from app_saas.shared.secrets import decrypt_secret, encrypt_secret, is_masked_secret, mask_secret
 
@@ -207,6 +208,34 @@ def _integration_token(config: dict[str, Any]) -> str:
     return ""
 
 
+def _waba_id_from_config(config: dict[str, Any]) -> str:
+    return str(
+        config.get("business_account_id")
+        or config.get("waba_id")
+        or config.get("whatsapp_business_account_id")
+        or ""
+    ).strip()
+
+
+def _maybe_ensure_whatsapp_subscription(conn, *, tenant_id: str, integration_id: str, config: dict[str, Any]) -> dict[str, Any] | None:
+    token = _integration_token(config)
+    waba_id = _waba_id_from_config(config)
+    if not token or not waba_id:
+        return None
+    result = ensure_webhook_subscription(
+        waba_id,
+        token,
+        graph_version=str(config.get("graph_api_version") or "v24.0").strip(),
+        app_id=str(config.get("app_id") or "").strip(),
+        auto_subscribe=True,
+        retries=2,
+        conn=conn,
+        tenant_id=tenant_id,
+        integration_id=integration_id,
+    )
+    return result
+
+
 @router.get("", response_model=list[IntegrationOut])
 def list_integrations(ctx: AuthContext = Depends(get_current_user)):
     with db_session() as conn:
@@ -311,7 +340,32 @@ def upsert_integration(
                 "config_json": json.dumps(config_json),
             },
         ).mappings().first()
-    return IntegrationOut(**{**dict(row), "config_json": _safe_config_for_output(dict(row).get("config_json"))})
+        row_data = dict(row)
+        saved_config = dict(row_data.get("config_json") or {})
+        if provider == "meta" and channel == "whatsapp" and status == "connected":
+            subscription_result = _maybe_ensure_whatsapp_subscription(conn, tenant_id=ctx.tenant_id, integration_id=row_data["id"], config=saved_config)
+            if subscription_result is not None:
+                saved_config["last_webhook_subscription_check"] = {
+                    "status": subscription_result.get("status"),
+                    "ok": bool(subscription_result.get("ok")),
+                    "final_subscribed": bool(subscription_result.get("final_subscribed")),
+                    "auto_subscribe_attempted": bool(subscription_result.get("auto_subscribe_attempted")),
+                    "checked_at": subscription_result.get("checked_at"),
+                    "error": str(subscription_result.get("error") or "")[:500],
+                }
+                conn.execute(
+                    text(
+                        """
+                        UPDATE saas_integrations
+                        SET config_json = CAST(:config_json AS jsonb), last_sync_at = NOW(), updated_at = NOW()
+                        WHERE id = CAST(:integration_id AS uuid)
+                        """
+                    ),
+                    {"integration_id": row_data["id"], "config_json": json.dumps(saved_config)},
+                )
+                row_data["config_json"] = saved_config
+                row_data["last_sync_at"] = row_data.get("last_sync_at") or ""
+    return IntegrationOut(**{**row_data, "config_json": _safe_config_for_output(row_data.get("config_json"))})
 
 
 @router.get("/meta/whatsapp/phone-numbers")
@@ -328,6 +382,18 @@ def list_whatsapp_phone_numbers(ctx: AuthContext = Depends(require_role("owner",
         if not waba_id:
             raise HTTPException(status_code=400, detail="waba_id_required")
 
+        subscription_result = ensure_webhook_subscription(
+            waba_id,
+            token,
+            graph_version=version,
+            app_id=str(config.get("app_id") or "").strip(),
+            auto_subscribe=True,
+            retries=2,
+            conn=conn,
+            tenant_id=ctx.tenant_id,
+            integration_id=integration["id"],
+        )
+
         fields = "id,display_phone_number,verified_name,quality_rating,code_verification_status,name_status,platform_type"
         query = urllib.parse.urlencode({"fields": fields})
         data = _graph_request("GET", f"https://graph.facebook.com/{version}/{waba_id}/phone_numbers?{query}", token)
@@ -337,6 +403,14 @@ def list_whatsapp_phone_numbers(ctx: AuthContext = Depends(require_role("owner",
 
         config["phone_numbers"] = phone_numbers
         config["last_phone_sync_status"] = "ok"
+        config["last_webhook_subscription_check"] = {
+            "status": subscription_result.get("status"),
+            "ok": bool(subscription_result.get("ok")),
+            "final_subscribed": bool(subscription_result.get("final_subscribed")),
+            "auto_subscribe_attempted": bool(subscription_result.get("auto_subscribe_attempted")),
+            "checked_at": subscription_result.get("checked_at"),
+            "error": str(subscription_result.get("error") or "")[:500],
+        }
         conn.execute(
             text(
                 """
@@ -347,7 +421,7 @@ def list_whatsapp_phone_numbers(ctx: AuthContext = Depends(require_role("owner",
             ),
             {"integration_id": integration["id"], "config_json": json.dumps(config)},
         )
-    return {"ok": True, "tenant_id": ctx.tenant_id, "phone_numbers": phone_numbers}
+    return {"ok": True, "tenant_id": ctx.tenant_id, "phone_numbers": phone_numbers, "subscription": subscription_result}
 
 
 @router.post("/meta/whatsapp/register-phone")

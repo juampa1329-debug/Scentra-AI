@@ -419,6 +419,7 @@ function App() {
   const [diagnosticsRunning, setDiagnosticsRunning] = useState(false);
   const [debugInboundForm, setDebugInboundForm] = useState({ from_phone: "573001112233", message: "Hola, prueba de webhook entrante", contact_name: "Cliente Debug" });
   const [debugInboundResult, setDebugInboundResult] = useState(null);
+  const [subscriptionCheck, setSubscriptionCheck] = useState(null);
   const [credentialModal, setCredentialModal] = useState(null);
   const [credentialSaving, setCredentialSaving] = useState(false);
   const [credentialModels, setCredentialModels] = useState({});
@@ -657,7 +658,7 @@ function App() {
     recordingLevelsRef.current = EMPTY_WAVEFORM;
     setIntegrations([]); setWebhooks([]); setWebhookEvents([]); setBillingOverview(null); setBillingPlans([]); setLastWebhookSecret(null);
     setApiCredentials([]); setCredentialModal(null); setCredentialModels({}); setKnowledgeSources([]); setDiagnostics(null);
-    setDebugInboundResult(null);
+    setDebugInboundResult(null); setSubscriptionCheck(null);
     setIntegrationSecretModal(null);
     setWhatsappPhones([]); setPhoneRegisterForm({ phone_number_id: "", pin: "" });
   };
@@ -1489,6 +1490,24 @@ function App() {
       setDiagnosticsRunning(false);
     }
   };
+  const checkWhatsappSubscription = async () => {
+    setDiagnosticsRunning(true);
+    try {
+      const metaIntegration = (diagnostics?.integrations || integrations || []).find((item) => item.provider === "meta" && item.channel === "whatsapp") || {};
+      const wabaId = metaIntegration.business_account_id || integrationForm.business_account_id || "";
+      const query = wabaId ? `?wabaId=${encodeURIComponent(wabaId)}` : "";
+      const data = await apiCall(`/saas/v1/internal/whatsapp/check-subscription${query}`);
+      setSubscriptionCheck(data);
+      showStatus(data?.is_subscribed ? "WABA suscrito a la app de Meta." : "WABA revisado: falta suscripcion o Meta no la confirmo.", data?.is_subscribed ? "ok" : "error");
+      await loadDiagnostics(true);
+      await loadIntegrations();
+    } catch (err) {
+      setSubscriptionCheck({ ok: false, error: String(err.message || err) });
+      showStatus(String(err.message || err), "error");
+    } finally {
+      setDiagnosticsRunning(false);
+    }
+  };
   const saveProfileLocal = () => showStatus("Perfil preparado. Falta conectar persistencia de usuario y foto.", "ok");
   const saveSecurityLocal = () => showStatus("Seguridad preparada. Cambio de clave y 2FA requieren endpoints backend.", "neutral");
   const openCredentialModal = (provider, credentialKey = provider.env) => {
@@ -2166,7 +2185,7 @@ function App() {
               <article className="panel glass-card">
                 <div className="panel-head"><h2>Diagnostico operativo</h2><span>Meta / IA / colas</span></div>
                 <p className="soft-copy">Usa este panel cuando un cliente no recibe mensajes, no entran webhooks o la IA no responde. No muestra secretos, solo estado y ultimos errores.</p>
-                <div className="panel-actions"><button type="button" className="primary" onClick={() => loadDiagnostics()} disabled={diagnosticsRunning}>Refrescar diagnostico</button><button type="button" onClick={runDiagnostics} disabled={diagnosticsRunning}>{diagnosticsRunning ? "Procesando..." : "Procesar pendientes"}</button></div>
+                <div className="panel-actions"><button type="button" className="primary" onClick={() => loadDiagnostics()} disabled={diagnosticsRunning}>Refrescar diagnostico</button><button type="button" onClick={runDiagnostics} disabled={diagnosticsRunning}>{diagnosticsRunning ? "Procesando..." : "Procesar pendientes"}</button><button type="button" onClick={checkWhatsappSubscription} disabled={diagnosticsRunning}>{diagnosticsRunning ? "Verificando..." : "Verificar WABA subscribed_apps"}</button></div>
                 <div className="debug-grid">
                   <div><span>API</span><strong>{diagnostics?.runtime?.api_ok ? "OK" : "Sin datos"}</strong><small>Worker embebido: {diagnostics?.runtime?.embedded_worker_enabled ? "ON" : "OFF"}</small></div>
                   <div><span>Empresa</span><strong>{diagnostics?.tenant?.name || activeCompany?.tenant_name || "-"}</strong><small>{diagnostics?.tenant?.status || lifecycleStatus}</small></div>
@@ -2185,7 +2204,30 @@ function App() {
                   <span className={(diagnostics?.webhooks?.endpoints || []).some((item) => item.is_active) ? "ok" : "bad"}>Webhook activo</span>
                   <span className={diagnostics?.credentials?.some((item) => item.category === "ai" && item.has_secret) ? "ok" : "bad"}>API IA guardada</span>
                   <span className={diagnostics?.ai?.active_model ? "ok" : "warn"}>Modelo IA seleccionado</span>
+                  <span className={diagnostics?.whatsapp_symptoms?.statuses_without_inbound ? "bad" : "ok"}>Statuses vs inbound</span>
                 </div>
+                {diagnostics?.whatsapp_symptoms?.statuses_without_inbound ? (
+                  <div className="debug-result bad">
+                    <strong>Meta esta enviando statuses, pero no llegan mensajes entrantes</strong>
+                    <span>{diagnostics.whatsapp_symptoms.recommendation}</span>
+                    <small>Statuses 24h: {number(diagnostics.whatsapp_symptoms.status_events_24h || 0)} / inbound 24h: {number(diagnostics.whatsapp_symptoms.inbound_events_24h || 0)}</small>
+                  </div>
+                ) : null}
+                {(subscriptionCheck || (diagnostics?.whatsapp_subscription_checks || []).length) ? (
+                  <div className={`debug-result ${subscriptionCheck?.is_subscribed ? "ok" : subscriptionCheck?.ok === false ? "bad" : ""}`}>
+                    <strong>WABA subscribed_apps</strong>
+                    {subscriptionCheck ? (
+                      <>
+                        <span>{subscriptionCheck.is_subscribed ? "Suscrito correctamente a la app." : `Estado: ${subscriptionCheck.status || subscriptionCheck.error || "sin confirmar"}`}</span>
+                        <small>WABA: {subscriptionCheck.waba_id || "-"} / App: {subscriptionCheck.connected_app_id || subscriptionCheck.app_id || "-"} / Telefonos: {number((subscriptionCheck.phone_numbers || []).length)}</small>
+                        <small>Webhook local: {subscriptionCheck.webhook_status?.active ? "activo" : "no activo"} / Endpoint: {subscriptionCheck.webhook_status?.endpoint_key || "-"}</small>
+                      </>
+                    ) : null}
+                    {(diagnostics?.whatsapp_subscription_checks || []).slice(0, 3).map((item, idx) => (
+                      <small key={`${item.created_at}-${idx}`}>{compactDateTimeLabel(item.created_at)} - {item.waba_id}: {item.status} {item.auto_subscribe_attempted ? "(auto-subscribe)" : ""}</small>
+                    ))}
+                  </div>
+                ) : null}
               </article>
               <article className="panel glass-card">
                 <div className="panel-head"><h2>Simular mensaje entrante</h2><span>prueba pipeline interno</span></div>
