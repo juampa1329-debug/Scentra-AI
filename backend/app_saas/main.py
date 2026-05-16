@@ -17,8 +17,10 @@ from app_saas.campaigns.router import router as campaigns_router
 from app_saas.commerce.router import router as commerce_router
 from app_saas.config import settings
 from app_saas.crm.router import router as crm_router
+from app_saas.diagnostics.router import router as diagnostics_router
 from app_saas.health.router import router as health_router
 from app_saas.integrations.router import router as integrations_router
+from app_saas.knowledge.router import router as knowledge_router
 from app_saas.media.router import router as media_router
 from app_saas.tenants.router import router as tenants_router
 from app_saas.workers.dispatch import process_due_outbound_messages
@@ -143,6 +145,8 @@ app.include_router(broadcasts_router, prefix="/saas/v1")
 app.include_router(ads_router, prefix="/saas/v1")
 app.include_router(integrations_router, prefix="/saas/v1")
 app.include_router(api_credentials_router, prefix="/saas/v1")
+app.include_router(knowledge_router, prefix="/saas/v1")
+app.include_router(diagnostics_router, prefix="/saas/v1")
 app.include_router(ai_agent_router, prefix="/saas/v1")
 app.include_router(media_router, prefix="/saas/v1")
 app.include_router(billing_router, prefix="/saas/v1")

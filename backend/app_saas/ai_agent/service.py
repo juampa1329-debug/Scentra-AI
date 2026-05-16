@@ -16,6 +16,7 @@ from sqlalchemy.engine import Connection
 from app_saas.api_credentials.router import _ensure_api_credentials_table
 from app_saas.billing.limits import ensure_ai_token_quota, ensure_monthly_message_quota
 from app_saas.db import db_session, set_tenant_context
+from app_saas.knowledge.router import ensure_knowledge_tables
 from app_saas.shared.secrets import decrypt_secret
 from app_saas.workers.dispatch import (
     DispatchPermanentError,
@@ -344,7 +345,44 @@ def _recent_messages(conn: Connection, tenant_id: str, conversation_id: str, lim
     return messages
 
 
-def _prompt(settings: dict[str, Any], conversation: dict[str, Any], memory: dict[str, Any], messages: list[dict[str, Any]]) -> tuple[str, str]:
+def _knowledge_context(conn: Connection, tenant_id: str, messages: list[dict[str, Any]]) -> str:
+    ensure_knowledge_tables(conn)
+    last_text = " ".join(_clean(message.get("text"), 500) for message in messages[-6:] if str(message.get("direction")).lower() == "in")
+    words = [word.lower() for word in re.findall(r"[a-zA-ZáéíóúÁÉÍÓÚñÑ0-9]{4,}", last_text)[:10]]
+    rows = conn.execute(
+        text(
+            """
+            SELECT title, url, filename, content
+            FROM saas_knowledge_sources
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND status = 'active'
+            ORDER BY
+              CASE
+                WHEN :needle <> '' AND LOWER(content || ' ' || title) LIKE :needle THEN 0
+                ELSE 1
+              END,
+              updated_at DESC
+            LIMIT 8
+            """
+        ),
+        {"tenant_id": tenant_id, "needle": f"%{words[0]}%" if words else ""},
+    ).mappings().all()
+    snippets = []
+    for row in rows:
+        content = _clean(row.get("content"), 1800)
+        if words:
+            lowered = content.lower()
+            hit = next((word for word in words if word in lowered), "")
+            if hit:
+                pos = max(0, lowered.find(hit) - 420)
+                content = content[pos : pos + 1800]
+        title = _clean(row.get("title") or row.get("filename") or row.get("url") or "Fuente", 240)
+        source = _clean(row.get("url") or row.get("filename"), 320)
+        snippets.append(f"Fuente: {title}{f' ({source})' if source else ''}\n{content}")
+    return "\n\n---\n\n".join(snippets)
+
+
+def _prompt(settings: dict[str, Any], conversation: dict[str, Any], memory: dict[str, Any], messages: list[dict[str, Any]], knowledge_context: str = "") -> tuple[str, str]:
     system_prompt = _clean(settings.get("system_prompt") or DEFAULT_AGENT_PROMPT, 20000)
     facts = memory.get("facts_json") if isinstance(memory.get("facts_json"), dict) else {}
     transcript_lines = []
@@ -377,6 +415,9 @@ Memoria resumida de la conversacion:
 
 Hechos guardados:
 {json.dumps(facts, ensure_ascii=False)}
+
+Base de conocimiento disponible:
+{knowledge_context or "Sin fuentes activas. Si falta informacion, pregunta o indica que se debe verificar."}
 
 Conversacion reciente:
 {chr(10).join(transcript_lines[-24:])}
@@ -510,7 +551,8 @@ def generate_agent_result(conn: Connection, tenant_id: str, conversation: dict[s
     if fallback and fallback not in providers:
         providers.append(fallback)
     memory = get_memory(conn, tenant_id, str(conversation["id"]))
-    system_prompt, user_prompt = _prompt(settings, conversation, memory, messages)
+    knowledge_context = _knowledge_context(conn, tenant_id, messages)
+    system_prompt, user_prompt = _prompt(settings, conversation, memory, messages, knowledge_context)
     requested_tokens = estimate_tokens(system_prompt, user_prompt)
     ensure_ai_token_quota(conn, tenant_id, requested=requested_tokens)
 
@@ -1096,7 +1138,8 @@ def test_agent(conn: Connection, tenant_id: str, phone: str, message: str) -> di
         "last_message_id": "",
         "updated_at": "",
     }
-    system_prompt, user_prompt = _prompt(settings, pseudo_conversation, memory, pseudo_messages)
+    knowledge_context = _knowledge_context(conn, tenant_id, pseudo_messages)
+    system_prompt, user_prompt = _prompt(settings, pseudo_conversation, memory, pseudo_messages, knowledge_context)
     ensure_ai_token_quota(conn, tenant_id, requested=estimate_tokens(system_prompt, user_prompt))
     last_error = ""
     providers = [_clean(settings.get("provider_code"), 80).lower(), _clean(settings.get("fallback_provider_code"), 80).lower()]

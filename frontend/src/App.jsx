@@ -279,6 +279,7 @@ function App() {
   const metaAccessTokenRef = useRef(null);
   const metaAppSecretRef = useRef(null);
   const composerFileRef = useRef(null);
+  const knowledgeFileRef = useRef(null);
   const messagesPanelRef = useRef(null);
   const messagesEndRef = useRef(null);
   const mediaRecorderRef = useRef(null);
@@ -321,6 +322,11 @@ function App() {
   const [profileForm, setProfileForm] = useState({ fullName: "", email: "", phone: "", role: "", avatarUrl: "" });
   const [securityForm, setSecurityForm] = useState({ currentPassword: "", newPassword: "", confirmPassword: "", twoFactorEnabled: false });
   const [apiCredentials, setApiCredentials] = useState([]);
+  const [knowledgeSources, setKnowledgeSources] = useState([]);
+  const [knowledgeUrlForm, setKnowledgeUrlForm] = useState({ url: "", title: "", notes: "" });
+  const [knowledgeUploading, setKnowledgeUploading] = useState(false);
+  const [diagnostics, setDiagnostics] = useState(null);
+  const [diagnosticsRunning, setDiagnosticsRunning] = useState(false);
   const [credentialModal, setCredentialModal] = useState(null);
   const [credentialSaving, setCredentialSaving] = useState(false);
   const [credentialModels, setCredentialModels] = useState({});
@@ -537,7 +543,7 @@ function App() {
     clearComposerAttachment(); setEmojiOpen(false); setAttachMenuOpen(false); setInboxChannelFilter("all"); setInboxSearch(""); setIsRecording(false); setRecordingSeconds(0); setRecordingLevels(EMPTY_WAVEFORM);
     recordingLevelsRef.current = EMPTY_WAVEFORM;
     setIntegrations([]); setWebhooks([]); setWebhookEvents([]); setBillingOverview(null); setBillingPlans([]); setLastWebhookSecret(null);
-    setApiCredentials([]); setCredentialModal(null); setCredentialModels({});
+    setApiCredentials([]); setCredentialModal(null); setCredentialModels({}); setKnowledgeSources([]); setDiagnostics(null);
     setWhatsappPhones([]); setPhoneRegisterForm({ phone_number_id: "", pin: "" });
   };
 
@@ -573,6 +579,21 @@ function App() {
     if (!accessToken) return;
     try { setApiCredentials((await apiCall("/saas/v1/api-credentials")) || []); }
     catch (err) { showStatus(String(err.message || err), "error"); }
+  };
+
+  const loadKnowledgeSources = async () => {
+    if (!accessToken) return;
+    try { setKnowledgeSources((await apiCall("/saas/v1/knowledge/sources")) || []); }
+    catch (err) { showStatus(String(err.message || err), "error"); }
+  };
+
+  const loadDiagnostics = async (silent = false) => {
+    if (!accessToken) return;
+    try {
+      const data = await apiCall("/saas/v1/diagnostics/overview");
+      setDiagnostics(data);
+      if (!silent) showStatus("Diagnostico actualizado", "ok");
+    } catch (err) { showStatus(String(err.message || err), "error"); }
   };
 
   const loadAiSettings = async () => {
@@ -683,7 +704,7 @@ function App() {
   useEffect(() => { loadSession(); }, [accessToken]);
   useEffect(() => {
     if (accessToken && ["dashboard", "customers", "labels", "campaigns", "broadcast", "ads"].includes(activeView)) loadDashboard(true);
-    if (accessToken && activeView === "settings") Promise.all([loadIntegrations(), loadWebhooks(), loadBilling(), loadApiCredentials(), loadAiSettings()]);
+    if (accessToken && activeView === "settings") Promise.all([loadIntegrations(), loadWebhooks(), loadBilling(), loadApiCredentials(), loadAiSettings(), loadKnowledgeSources(), loadDiagnostics(true)]);
     if (accessToken && activeView === "inbox") loadInbox();
   }, [accessToken, activeView]);
 
@@ -1186,6 +1207,60 @@ function App() {
       showStatus(String(err.message || err), "error");
     }
   };
+  const uploadKnowledgeFile = async (file) => {
+    if (!file || knowledgeUploading) return;
+    setKnowledgeUploading(true);
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("title", file.name || "Archivo KB");
+      await apiCall("/saas/v1/knowledge/upload", { method: "POST", body: formData });
+      showStatus("Archivo agregado a Knowledge Base. La IA lo usara como contexto.", "ok");
+      await loadKnowledgeSources();
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    } finally {
+      setKnowledgeUploading(false);
+      if (knowledgeFileRef.current) knowledgeFileRef.current.value = "";
+    }
+  };
+  const addKnowledgeUrl = async (event) => {
+    event.preventDefault();
+    if (!knowledgeUrlForm.url.trim()) return showStatus("Ingresa una URL primero.", "neutral");
+    setKnowledgeUploading(true);
+    try {
+      await apiCall("/saas/v1/knowledge/url", { method: "POST", body: JSON.stringify(knowledgeUrlForm) });
+      setKnowledgeUrlForm({ url: "", title: "", notes: "" });
+      showStatus("Fuente web agregada a Knowledge Base.", "ok");
+      await loadKnowledgeSources();
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    } finally {
+      setKnowledgeUploading(false);
+    }
+  };
+  const deleteKnowledgeSource = async (sourceId) => {
+    try {
+      await apiCall(`/saas/v1/knowledge/sources/${encodeURIComponent(sourceId)}`, { method: "DELETE" });
+      showStatus("Fuente eliminada.", "ok");
+      await loadKnowledgeSources();
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    }
+  };
+  const runDiagnostics = async () => {
+    setDiagnosticsRunning(true);
+    try {
+      const data = await apiCall("/saas/v1/diagnostics/run?limit=50", { method: "POST" });
+      showStatus(`Procesado: webhooks ${data?.webhooks?.processed || 0}, IA ${data?.ai?.processed || 0}, outbound ${data?.outbound?.processed || 0}.`, "ok");
+      await loadDiagnostics(true);
+      await loadInbox();
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    } finally {
+      setDiagnosticsRunning(false);
+    }
+  };
   const saveProfileLocal = () => showStatus("Perfil preparado. Falta conectar persistencia de usuario y foto.", "ok");
   const saveSecurityLocal = () => showStatus("Seguridad preparada. Cambio de clave y 2FA requieren endpoints backend.", "neutral");
   const openCredentialModal = (provider, credentialKey = provider.env) => {
@@ -1540,7 +1615,7 @@ function App() {
           <AdsPanel apiCall={apiCall} showStatus={showStatus} onConnectMeta={() => { setActiveView("settings"); setSettingsTab("channels"); }} onOpenInbox={(conversation) => { setActiveView("inbox"); loadMessages(conversation); }} />
         ) : (
           <section className="settings-page">
-            <div className="settings-tabs glass-card">{[["ia","IA"],["channels","Canales"],["apis","APIs"],["users","Usuarios"],["profile","Perfil"],["security","Seguridad"],["plan","Plan"]].map(([key,label]) => <button key={key} type="button" className={settingsTab === key ? "active" : ""} onClick={() => setSettingsTab(key)}>{label}</button>)}</div>
+            <div className="settings-tabs glass-card">{[["ia","IA"],["channels","Canales"],["apis","APIs"],["debug","Debug"],["users","Usuarios"],["profile","Perfil"],["security","Seguridad"],["plan","Plan"]].map(([key,label]) => <button key={key} type="button" className={settingsTab === key ? "active" : ""} onClick={() => setSettingsTab(key)}>{label}</button>)}</div>
             {settingsTab === "ia" ? (
               <div className="settings-grid">
                 <article className="panel glass-card">
@@ -1606,12 +1681,36 @@ function App() {
                 </article>
                 <article className="panel glass-card">
                   <div className="panel-head"><h2>Knowledge Base</h2><span>fuentes</span></div>
-                  <div className="inline-form compact"><select><option>Mostrar: Todos</option></select><button type="button">Refrescar</button></div>
-                  <label>Notas<input placeholder="ej: catalogo 2026, politicas de envio..." /></label>
-                  <div className="upload-zone">Arrastra PDF/TXT aqui o elige archivo</div>
+                  <p className="soft-copy">Estas fuentes se inyectan como contexto para la IA. Sirven para politicas, catalogos, preguntas frecuentes, precios y procesos internos.</p>
+                  <div className="inline-form compact"><select><option>Mostrar: Todos</option></select><button type="button" onClick={loadKnowledgeSources}>Refrescar</button></div>
+                  <input ref={knowledgeFileRef} className="composer-file-input" type="file" accept=".txt,.md,.csv,.json,.pdf,text/plain,application/pdf" onChange={(event) => uploadKnowledgeFile(event.target.files?.[0])} />
+                  <div
+                    className="upload-zone actionable"
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => knowledgeFileRef.current?.click()}
+                    onKeyDown={(event) => { if (event.key === "Enter") knowledgeFileRef.current?.click(); }}
+                    onDragOver={(event) => event.preventDefault()}
+                    onDrop={(event) => { event.preventDefault(); uploadKnowledgeFile(event.dataTransfer.files?.[0]); }}
+                  >
+                    {knowledgeUploading ? "Procesando fuente..." : "Arrastra PDF/TXT aqui o haz clic para subir"}
+                  </div>
                   <h3>Fuentes Web</h3>
-                  <label>URL<input placeholder="https://tutienda.com/pagina-o-blog" /></label>
-                  <button type="button">Anadir fuente web</button>
+                  <form className="kb-url-form" onSubmit={addKnowledgeUrl}>
+                    <label>URL<input placeholder="https://tutienda.com/pagina-o-blog" value={knowledgeUrlForm.url} onChange={(event) => setKnowledgeUrlForm((prev) => ({ ...prev, url: event.target.value }))} /></label>
+                    <label>Titulo opcional<input placeholder="Politicas de envio" value={knowledgeUrlForm.title} onChange={(event) => setKnowledgeUrlForm((prev) => ({ ...prev, title: event.target.value }))} /></label>
+                    <label>Notas opcionales<input placeholder="Prioridad, uso interno, version..." value={knowledgeUrlForm.notes} onChange={(event) => setKnowledgeUrlForm((prev) => ({ ...prev, notes: event.target.value }))} /></label>
+                    <button type="submit" className="primary" disabled={knowledgeUploading}>{knowledgeUploading ? "Agregando..." : "Anadir fuente web"}</button>
+                  </form>
+                  <div className="kb-source-list">
+                    {knowledgeSources.map((source) => (
+                      <div className="kb-source" key={source.id}>
+                        <div><strong>{source.title || source.filename || source.url}</strong><span>{source.source_type} / {number(source.content_chars)} chars / {compactDateTimeLabel(source.updated_at)}</span><p>{source.content_preview}</p></div>
+                        <button type="button" onClick={() => deleteKnowledgeSource(source.id)}>Eliminar</button>
+                      </div>
+                    ))}
+                    {knowledgeSources.length === 0 ? <div className="empty">Aun no hay fuentes. Sube un TXT/PDF o agrega una URL para que la IA tenga contexto adicional.</div> : null}
+                  </div>
                 </article>
               </div>
             ) : null}
@@ -1800,6 +1899,49 @@ function App() {
                 <div className="api-card-grid channel-api-grid">{CHANNEL_API_PROVIDERS.map((provider) => <div className="api-card wide-api-card" key={provider.name}><div><strong>{provider.name}</strong><span>Principal: {provider.env}</span></div>{renderCredentialCard(provider)}<div className="api-field-list">{provider.fields.map((field) => renderCredentialCard({ ...provider, name: field, env: field, supportsModels: false }, field))}</div></div>)}</div>
               </article>
               <article className="panel glass-card"><div className="panel-head"><h2>API SaaS interna</h2><span>base URL</span></div><code className="code-block">{API_BASE || "sin configurar"}/saas/v1</code><p className="soft-copy">Usa Bearer JWT para endpoints privados. Los webhooks resuelven empresa por endpoint key.</p><div className="panel-actions"><button type="button" className="primary" onClick={loadApiCredentials}>Refrescar credenciales</button></div></article>
+            </div> : null}
+            {settingsTab === "debug" ? <div className="settings-stack">
+              <article className="panel glass-card">
+                <div className="panel-head"><h2>Diagnostico operativo</h2><span>Meta / IA / colas</span></div>
+                <p className="soft-copy">Usa este panel cuando un cliente no recibe mensajes, no entran webhooks o la IA no responde. No muestra secretos, solo estado y ultimos errores.</p>
+                <div className="panel-actions"><button type="button" className="primary" onClick={() => loadDiagnostics()} disabled={diagnosticsRunning}>Refrescar diagnostico</button><button type="button" onClick={runDiagnostics} disabled={diagnosticsRunning}>{diagnosticsRunning ? "Procesando..." : "Procesar pendientes"}</button></div>
+                <div className="debug-grid">
+                  <div><span>API</span><strong>{diagnostics?.runtime?.api_ok ? "OK" : "Sin datos"}</strong><small>Worker embebido: {diagnostics?.runtime?.embedded_worker_enabled ? "ON" : "OFF"}</small></div>
+                  <div><span>Empresa</span><strong>{diagnostics?.tenant?.name || activeCompany?.tenant_name || "-"}</strong><small>{diagnostics?.tenant?.status || lifecycleStatus}</small></div>
+                  <div><span>IA</span><strong>{diagnostics?.ai?.enabled ? "Activa" : "Inactiva"}</strong><small>{diagnostics?.ai?.provider || aiConfig.provider} / {diagnostics?.ai?.active_model || activeAiModel || "sin modelo"}</small></div>
+                  <div><span>Knowledge</span><strong>{number(diagnostics?.totals?.knowledge_sources || knowledgeSources.length)}</strong><small>fuentes activas</small></div>
+                  <div><span>Inbox</span><strong>{number(diagnostics?.totals?.conversations || conversations.length)}</strong><small>{number(diagnostics?.totals?.messages || 0)} mensajes</small></div>
+                  <div><span>Webhook</span><strong>{number((diagnostics?.webhooks?.endpoints || []).length)}</strong><small>endpoints configurados</small></div>
+                </div>
+              </article>
+              <article className="panel glass-card">
+                <div className="panel-head"><h2>Checklist de conexion</h2><span>lo minimo para enviar/recibir</span></div>
+                <div className="debug-checks">
+                  <span className={diagnostics?.integrations?.some((item) => item.channel === "whatsapp" && item.status === "connected") ? "ok" : "bad"}>WhatsApp conectado</span>
+                  <span className={diagnostics?.integrations?.some((item) => item.channel === "whatsapp" && item.dispatch_mode === "meta_cloud") ? "ok" : "warn"}>Modo Meta Cloud</span>
+                  <span className={diagnostics?.integrations?.some((item) => item.channel === "whatsapp" && item.has_token) ? "ok" : "bad"}>Token Meta guardado</span>
+                  <span className={(diagnostics?.webhooks?.endpoints || []).some((item) => item.is_active) ? "ok" : "bad"}>Webhook activo</span>
+                  <span className={diagnostics?.credentials?.some((item) => item.category === "ai" && item.has_secret) ? "ok" : "bad"}>API IA guardada</span>
+                  <span className={diagnostics?.ai?.active_model ? "ok" : "warn"}>Modelo IA seleccionado</span>
+                </div>
+              </article>
+              <article className="panel glass-card">
+                <div className="panel-head"><h2>Integraciones</h2><span>configuracion segura</span></div>
+                <div className="debug-table">{(diagnostics?.integrations || []).map((item, idx) => <div className="debug-row" key={`${item.provider}-${item.channel}-${idx}`}><strong>{item.provider} / {item.channel}</strong><span>{item.status} / {item.dispatch_mode || "-"}</span><small>Phone: {item.phone_number_id || "-"} / Token: {item.has_token ? "guardado" : "faltante"}</small></div>)}{!diagnostics?.integrations?.length ? <div className="empty">Sin integraciones registradas.</div> : null}</div>
+              </article>
+              <article className="panel glass-card">
+                <div className="panel-head"><h2>Colas y errores</h2><span>webhooks / IA / outbound</span></div>
+                <div className="queue-grid">
+                  <div><strong>Webhooks</strong>{(diagnostics?.webhooks?.events || []).map((item) => <span key={item.status}>{item.status}: {item.total}</span>)}</div>
+                  <div><strong>IA pendiente</strong>{(diagnostics?.queues?.ai_pending || []).map((item) => <span key={item.status}>{item.status}: {item.total}</span>)}</div>
+                  <div><strong>Outbound</strong>{(diagnostics?.queues?.outbound || []).map((item) => <span key={item.status}>{item.status}: {item.total}</span>)}</div>
+                </div>
+                <div className="debug-table">{(diagnostics?.queues?.outbound_errors || []).map((item, idx) => <div className="debug-row error" key={`${item.updated_at}-${idx}`}><strong>{item.status} / {item.channel}</strong><span>{item.recipient_external_id || "-"}</span><small>{item.error}</small></div>)}{!diagnostics?.queues?.outbound_errors?.length ? <div className="empty">Sin errores outbound recientes.</div> : null}</div>
+              </article>
+              <article className="panel glass-card">
+                <div className="panel-head"><h2>Ultimos webhooks</h2><span>entrada Meta</span></div>
+                <div className="debug-table">{(diagnostics?.webhooks?.last_events || []).map((item, idx) => <div className="debug-row" key={`${item.received_at}-${idx}`}><strong>{item.provider} / {item.status}</strong><span>{compactDateTimeLabel(item.received_at)}</span><small>{item.error || "sin error"}</small></div>)}{!diagnostics?.webhooks?.last_events?.length ? <div className="empty">No hay eventos webhook recientes. Si escribes por WhatsApp y esto sigue vacio, Meta no esta llegando a Scentra o el callback/token esta mal configurado.</div> : null}</div>
+              </article>
             </div> : null}
             {settingsTab === "users" ? <div className="settings-grid"><article className="panel glass-card"><div className="panel-head"><h2>Usuarios</h2><span>equipo</span></div><div className="table"><div className="row"><span>{me.email}</span><span>{me.role}</span><span>activo</span></div></div></article><article className="panel glass-card"><div className="panel-head"><h2>Invitar usuario</h2><span>proximo</span></div><label>Email<input placeholder="correo@empresa.com" /></label><label>Rol<select><option>agent</option><option>supervisor</option><option>admin</option></select></label><button type="button" className="primary" onClick={() => showStatus("Invitaciones de usuarios pendientes de backend.", "neutral")}>Enviar invitacion</button></article></div> : null}
             {settingsTab === "profile" ? <div className="settings-grid profile-grid">
