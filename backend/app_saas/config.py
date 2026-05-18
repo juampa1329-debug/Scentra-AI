@@ -38,6 +38,12 @@ class Settings(BaseSettings):
     saas_embedded_worker_enabled: bool = True
     saas_worker_idle_sec: int = 5
     saas_worker_batch_size: int = 25
+    scentra_api_public_url: str = "https://api.scentra-ai.online"
+    scentra_app_public_url: str = "https://app.scentra-ai.online"
+    scentra_meta_app_id: str = ""
+    scentra_meta_app_secret: str = ""
+    scentra_meta_graph_version: str = "v24.0"
+    scentra_instagram_webhook_verify_token: str = ""
 
     @property
     def cors_origins(self) -> list[str]:

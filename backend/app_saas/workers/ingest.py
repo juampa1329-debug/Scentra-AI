@@ -156,6 +156,72 @@ def _normalize_whatsapp_statuses(provider: str, payload: dict[str, Any]) -> list
     return out
 
 
+def _normalize_instagram_payload(payload: dict[str, Any], fallback_event_id: str) -> list[NormalizedMessage]:
+    out: list[NormalizedMessage] = []
+    for entry in _as_list(payload.get("entry")):
+        entry_dict = _as_dict(entry)
+        for event in _as_list(entry_dict.get("messaging")):
+            item = _as_dict(event)
+            sender = _clean(_as_dict(item.get("sender")).get("id"), 120)
+            if not sender:
+                continue
+            message = _as_dict(item.get("message"))
+            if bool(message.get("is_echo")):
+                continue
+            postback = _as_dict(item.get("postback"))
+            attachments = _as_list(message.get("attachments"))
+            msg_type = "text"
+            text_value = _clean(message.get("text"), 4000)
+            media_id = ""
+            mime_type = ""
+            if not text_value and postback:
+                msg_type = "postback"
+                text_value = _clean(postback.get("title") or postback.get("payload") or "[postback]", 4000)
+            if attachments:
+                first = _as_dict(attachments[0])
+                msg_type = _clean(first.get("type") or "attachment", 40).lower()
+                payload_value = _as_dict(first.get("payload"))
+                media_id = _clean(payload_value.get("url") or payload_value.get("id"), 1000)
+                text_value = text_value or f"[{msg_type}]"
+            out.append(
+                NormalizedMessage(
+                    channel="instagram",
+                    external_contact_id=sender,
+                    external_message_id=_clean(message.get("mid") or item.get("timestamp"), 240) or fallback_event_id,
+                    direction="in",
+                    msg_type=msg_type,
+                    text=text_value or "[instagram]",
+                    media_id=media_id,
+                    mime_type=mime_type,
+                    display_name="",
+                )
+            )
+
+        for change in _as_list(entry_dict.get("changes")):
+            change_dict = _as_dict(change)
+            field = _clean(change_dict.get("field"), 60).lower()
+            value = _as_dict(change_dict.get("value"))
+            if field not in {"comments", "mentions"}:
+                continue
+            sender_info = _as_dict(value.get("from"))
+            sender = _clean(sender_info.get("id") or value.get("sender_id") or value.get("user_id"), 120)
+            if not sender:
+                continue
+            text_value = _clean(value.get("text") or value.get("message") or f"[{field}]", 4000)
+            out.append(
+                NormalizedMessage(
+                    channel="instagram",
+                    external_contact_id=sender,
+                    external_message_id=_clean(value.get("id") or value.get("comment_id") or value.get("media_id"), 240) or fallback_event_id,
+                    direction="in",
+                    msg_type=field[:-1] if field.endswith("s") else field,
+                    text=text_value,
+                    display_name=_clean(sender_info.get("username") or sender_info.get("name"), 180),
+                )
+            )
+    return out
+
+
 def _normalize_generic_payload(provider: str, payload: dict[str, Any], fallback_event_id: str) -> list[NormalizedMessage]:
     sender = _clean(
         payload.get("from")
@@ -184,6 +250,10 @@ def _normalize_generic_payload(provider: str, payload: dict[str, Any], fallback_
 
 def normalize_event(provider: str, payload: dict[str, Any], fallback_event_id: str) -> list[NormalizedMessage]:
     provider_clean = _clean(provider, 50).lower()
+    if provider_clean == "instagram":
+        messages = _normalize_instagram_payload(payload, fallback_event_id)
+        if messages:
+            return messages
     messages = _normalize_whatsapp_payload(provider_clean, payload, fallback_event_id)
     if messages:
         return messages

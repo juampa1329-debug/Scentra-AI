@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
+from app_saas.config import settings
 from app_saas.db import db_session, set_tenant_context
 from app_saas.shared.secrets import decrypt_secret
 from app_saas.shared.security import (
@@ -217,6 +218,61 @@ def _load_endpoint(conn, provider: str, endpoint_key: str) -> dict:
     if not row or not bool(row["is_active"]):
         raise HTTPException(status_code=404, detail="webhook_endpoint_not_found")
     return dict(row)
+
+
+def _instagram_lookup_ids(payload: dict[str, Any]) -> list[str]:
+    ids: list[str] = []
+    for entry in payload.get("entry") if isinstance(payload.get("entry"), list) else []:
+        if not isinstance(entry, dict):
+            continue
+        for value in (
+            entry.get("id"),
+            ((entry.get("messaging") or [{}])[0] if isinstance(entry.get("messaging"), list) and entry.get("messaging") else {}).get("recipient", {}).get("id"),
+        ):
+            clean = str(value or "").strip()
+            if clean and clean not in ids:
+                ids.append(clean)
+        for change in entry.get("changes") if isinstance(entry.get("changes"), list) else []:
+            value = change.get("value") if isinstance(change, dict) else {}
+            if isinstance(value, dict):
+                for candidate in (value.get("id"), value.get("page_id"), value.get("instagram_business_account_id")):
+                    clean = str(candidate or "").strip()
+                    if clean and clean not in ids:
+                        ids.append(clean)
+    return ids
+
+
+def _load_instagram_target(conn, payload: dict[str, Any]) -> dict[str, Any] | None:
+    ids = _instagram_lookup_ids(payload)
+    if not ids:
+        return None
+    row = conn.execute(
+        text(
+            """
+            SELECT
+                i.tenant_id::text,
+                i.id::text AS integration_id,
+                e.id::text AS endpoint_id,
+                e.endpoint_key
+            FROM saas_integrations i
+            JOIN saas_webhook_endpoints e
+              ON e.tenant_id = i.tenant_id
+             AND e.provider = 'instagram'
+             AND e.is_active = TRUE
+            WHERE i.provider = 'meta'
+              AND i.channel = 'instagram'
+              AND i.status = 'connected'
+              AND (
+                i.config_json->>'instagram_business_account_id' = ANY(CAST(:ids AS text[]))
+                OR i.config_json->>'page_id' = ANY(CAST(:ids AS text[]))
+              )
+            ORDER BY i.updated_at DESC
+            LIMIT 1
+            """
+        ),
+        {"ids": ids},
+    ).mappings().first()
+    return dict(row) if row else None
 
 
 @router.get("/endpoints", response_model=list[WebhookEndpointOut])
@@ -517,6 +573,105 @@ def process_events_now(
 ):
     result = process_due_webhook_events(limit=limit, tenant_id=ctx.tenant_id)
     return {"ok": True, "tenant_id": ctx.tenant_id, "result": result}
+
+
+@router.get("/instagram")
+def verify_global_instagram_webhook(
+    mode: str = Query("", alias="hub.mode"),
+    verify_token: str = Query("", alias="hub.verify_token"),
+    challenge: str = Query("", alias="hub.challenge"),
+):
+    expected = str(settings.scentra_instagram_webhook_verify_token or "").strip()
+    if mode == "subscribe" and challenge and expected and verify_token == expected:
+        return Response(content=str(challenge), media_type="text/plain")
+    raise HTTPException(status_code=403, detail="instagram_webhook_verification_failed")
+
+
+@router.post("/instagram")
+async def receive_global_instagram_webhook(request: Request):
+    raw = await request.body()
+    raw_sha256 = hashlib.sha256(raw or b"").hexdigest()
+    payload = _safe_json(raw)
+    if not _is_meta_webhook_payload("instagram", payload):
+        raise HTTPException(status_code=400, detail="invalid_instagram_webhook_payload")
+
+    app_secret = str(settings.scentra_meta_app_secret or "").strip()
+    if app_secret:
+        signature_ok = verify_hmac_sha256_signature(
+            secret_value=app_secret,
+            raw_body=raw,
+            signature_header=_signature_header(request),
+        )
+        if not signature_ok:
+            raise HTTPException(status_code=403, detail="invalid_instagram_webhook_signature")
+
+    event_id = _extract_event_id("instagram", payload, raw_sha256)
+    with db_session() as conn:
+        target = _load_instagram_target(conn, payload)
+        if not target:
+            # Meta expects a fast 200; returning ok:false prevents retries while making the issue visible in API logs.
+            return {"ok": False, "provider": "instagram", "event_id": event_id, "stored": False, "reason": "instagram_tenant_not_matched"}
+        set_tenant_context(conn, target["tenant_id"])
+        result = conn.execute(
+            text(
+                """
+                INSERT INTO saas_webhook_events (
+                    tenant_id,
+                    endpoint_id,
+                    provider,
+                    event_id,
+                    status,
+                    headers_json,
+                    payload_json,
+                    raw_sha256
+                )
+                VALUES (
+                    CAST(:tenant_id AS uuid),
+                    CAST(:endpoint_id AS uuid),
+                    'instagram',
+                    :event_id,
+                    'received',
+                    CAST(:headers_json AS jsonb),
+                    CAST(:payload_json AS jsonb),
+                    :raw_sha256
+                )
+                ON CONFLICT (tenant_id, provider, event_id) DO NOTHING
+                """
+            ),
+            {
+                "tenant_id": target["tenant_id"],
+                "endpoint_id": target["endpoint_id"],
+                "event_id": event_id,
+                "headers_json": json.dumps(_safe_headers(request)),
+                "payload_json": json.dumps(payload),
+                "raw_sha256": raw_sha256,
+            },
+        )
+        inserted = int(result.rowcount or 0) > 0
+        conn.execute(
+            text(
+                """
+                UPDATE saas_webhook_endpoints
+                SET last_seen_at = NOW(), updated_at = NOW()
+                WHERE id = CAST(:endpoint_id AS uuid)
+                """
+            ),
+            {"endpoint_id": target["endpoint_id"]},
+        )
+    process_result: dict[str, Any] = {}
+    if inserted:
+        try:
+            process_result = process_due_webhook_events(limit=10, tenant_id=target["tenant_id"])
+        except Exception as exc:
+            process_result = {"errors": 1, "error": str(exc)[:300]}
+    return {
+        "ok": True,
+        "tenant_id": target["tenant_id"],
+        "provider": "instagram",
+        "event_id": event_id,
+        "duplicate": not inserted,
+        "process_result": process_result,
+    }
 
 
 @router.get("/{provider}/{endpoint_key}")

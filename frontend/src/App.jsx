@@ -24,6 +24,7 @@ const TTS_API_PROVIDERS = [
 
 const CHANNEL_API_PROVIDERS = [
   { code: "whatsapp_cloud", category: "channel", name: "WhatsApp Cloud API", env: "WHATSAPP_PERMANENT_TOKEN", fields: ["WHATSAPP_TOKEN", "META_ACCESS_TOKEN", "WHATSAPP_PHONE_NUMBER_ID", "WHATSAPP_WABA_ID", "META_APP_ID", "WHATSAPP_GRAPH_VERSION"] },
+  { code: "instagram_business", category: "channel", name: "Instagram Business", env: "SCENTRA_META_APP_ID", fields: ["SCENTRA_META_APP_SECRET", "SCENTRA_INSTAGRAM_WEBHOOK_VERIFY_TOKEN", "SCENTRA_API_PUBLIC_URL"] },
   { code: "woocommerce", category: "commerce", name: "WooCommerce", env: "WC_BASE_URL", fields: ["WC_CONSUMER_KEY", "WC_CONSUMER_SECRET"] },
 ];
 
@@ -417,6 +418,9 @@ function App() {
   const [knowledgeUploading, setKnowledgeUploading] = useState(false);
   const [diagnostics, setDiagnostics] = useState(null);
   const [diagnosticsRunning, setDiagnosticsRunning] = useState(false);
+  const [instagramOAuth, setInstagramOAuth] = useState({ state: "", assets: [], status: "", callbackUrl: "" });
+  const [instagramDiagnostics, setInstagramDiagnostics] = useState(null);
+  const [instagramBusy, setInstagramBusy] = useState(false);
   const [debugInboundForm, setDebugInboundForm] = useState({ from_phone: "573001112233", message: "Hola, prueba de webhook entrante", contact_name: "Cliente Debug" });
   const [debugInboundResult, setDebugInboundResult] = useState(null);
   const [subscriptionCheck, setSubscriptionCheck] = useState(null);
@@ -657,7 +661,7 @@ function App() {
     clearComposerAttachment(); setCatalogDraft(null); setEmojiOpen(false); setAttachMenuOpen(false); setInboxChannelFilter("all"); setInboxSearch(""); setIsRecording(false); setRecordingSeconds(0); setRecordingLevels(EMPTY_WAVEFORM);
     recordingLevelsRef.current = EMPTY_WAVEFORM;
     setIntegrations([]); setWebhooks([]); setWebhookEvents([]); setBillingOverview(null); setBillingPlans([]); setLastWebhookSecret(null);
-    setApiCredentials([]); setCredentialModal(null); setCredentialModels({}); setKnowledgeSources([]); setDiagnostics(null);
+    setApiCredentials([]); setCredentialModal(null); setCredentialModels({}); setKnowledgeSources([]); setDiagnostics(null); setInstagramDiagnostics(null); setInstagramOAuth({ state: "", assets: [], status: "", callbackUrl: "" });
     setDebugInboundResult(null); setSubscriptionCheck(null);
     setIntegrationSecretModal(null);
     setWhatsappPhones([]); setPhoneRegisterForm({ phone_number_id: "", pin: "" });
@@ -1032,6 +1036,69 @@ function App() {
       showStatus(String(err.message || err), "error");
     } finally {
       setPhoneSyncing(false);
+    }
+  };
+
+  const startInstagramOAuth = async () => {
+    setInstagramBusy(true);
+    try {
+      const data = await apiCall("/saas/v1/integrations/instagram/oauth/start", { method: "POST" });
+      setInstagramOAuth((prev) => ({ ...prev, state: data.state || "", assets: [], status: "oauth_started", callbackUrl: data.callback_url || "" }));
+      if (data.auth_url) window.open(data.auth_url, "_blank", "noopener,noreferrer");
+      showStatus("Facebook Login abierto. Al finalizar, vuelve y pulsa Cargar cuentas.", "ok");
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    } finally {
+      setInstagramBusy(false);
+    }
+  };
+
+  const loadInstagramAssets = async () => {
+    if (!instagramOAuth.state) return showStatus("Primero inicia Facebook Login.", "error");
+    setInstagramBusy(true);
+    try {
+      const data = await apiCall(`/saas/v1/integrations/instagram/oauth/assets?state=${encodeURIComponent(instagramOAuth.state)}`);
+      setInstagramOAuth((prev) => ({ ...prev, assets: data.assets || [], status: data.status || "" }));
+      showStatus(`Cuentas detectadas: ${(data.assets || []).filter((item) => item.connected).length}`, "ok");
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    } finally {
+      setInstagramBusy(false);
+    }
+  };
+
+  const connectInstagramAsset = async (asset) => {
+    if (!instagramOAuth.state) return showStatus("Estado OAuth faltante. Inicia Facebook Login de nuevo.", "error");
+    setInstagramBusy(true);
+    try {
+      const data = await apiCall("/saas/v1/integrations/instagram/connect", {
+        method: "POST",
+        body: JSON.stringify({
+          state: instagramOAuth.state,
+          page_id: asset.page_id,
+          instagram_business_account_id: asset.instagram_business_account_id,
+        }),
+      });
+      showStatus(data?.subscription?.final_subscribed ? "Instagram conectado y suscrito a webhooks." : "Instagram conectado, revisa diagnostics para confirmar webhooks.", data?.subscription?.final_subscribed ? "ok" : "neutral");
+      await loadIntegrations();
+      await loadInstagramDiagnostics();
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    } finally {
+      setInstagramBusy(false);
+    }
+  };
+
+  const loadInstagramDiagnostics = async () => {
+    setInstagramBusy(true);
+    try {
+      const data = await apiCall("/saas/v1/integrations/instagram/diagnostics");
+      setInstagramDiagnostics(data);
+      showStatus(data?.ok ? "Instagram Diagnostics actualizado." : "Instagram aun no esta conectado.", data?.ok ? "ok" : "neutral");
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    } finally {
+      setInstagramBusy(false);
     }
   };
 
@@ -2108,6 +2175,45 @@ function App() {
                     ))}
                     {whatsappPhones.length === 0 ? <div className="empty">Aun no hay numeros sincronizados. Guarda WABA ID y token permanente, luego pulsa Sincronizar numeros.</div> : null}
                   </div>
+                </article>
+
+                <article className="panel glass-card integration-card">
+                  <div className="panel-head">
+                    <div>
+                      <h2>Instagram Business</h2>
+                      <span>Facebook Login, discovery automatico y webhooks</span>
+                    </div>
+                    <button type="button" disabled={instagramBusy} onClick={loadInstagramDiagnostics}>Diagnostics IG</button>
+                  </div>
+                  <p className="soft-copy">Conecta Instagram sin buscar IDs manualmente. Scentra descubre Business Portfolios, paginas, Instagram Business Accounts, suscribe la Page a la app y deja el inbox listo para DMs.</p>
+                  <div className="panel-actions">
+                    <button type="button" className="primary" disabled={instagramBusy} onClick={startInstagramOAuth}>{instagramBusy ? "Procesando..." : "Conectar con Facebook Login"}</button>
+                    <button type="button" disabled={instagramBusy || !instagramOAuth.state} onClick={loadInstagramAssets}>Cargar cuentas detectadas</button>
+                  </div>
+                  {instagramOAuth.callbackUrl ? <div className="callback-box"><code>{instagramOAuth.callbackUrl}</code><button type="button" onClick={() => copyText(instagramOAuth.callbackUrl, "OAuth callback")}>Copiar OAuth callback</button></div> : null}
+                  <div className="phone-grid instagram-asset-grid">
+                    {(instagramOAuth.assets || []).map((asset) => (
+                      <div className={`phone-card ${asset.connected ? "" : "muted"}`} key={`${asset.page_id}-${asset.instagram_business_account_id || "none"}`}>
+                        <strong>{asset.instagram_username || "Sin Instagram Business"}</strong>
+                        <span>Pagina: {asset.page_name || "-"} / {asset.page_id}</span>
+                        <span>Business: {asset.business_name || "-"} / {asset.business_id || "-"}</span>
+                        <span>IG Business ID: {asset.instagram_business_account_id || "-"}</span>
+                        <mark>{asset.connected ? "Instagram detectado" : "Pagina sin Instagram Business"}</mark>
+                        <button type="button" className="primary" disabled={!asset.connected || instagramBusy} onClick={() => connectInstagramAsset(asset)}>Usar esta cuenta</button>
+                      </div>
+                    ))}
+                    {instagramOAuth.state && instagramOAuth.assets.length === 0 ? <div className="empty">Cuando termines Facebook Login, pulsa Cargar cuentas detectadas.</div> : null}
+                  </div>
+                  {instagramDiagnostics ? (
+                    <div className={`debug-result ${instagramDiagnostics.ok && instagramDiagnostics.subscription?.final_subscribed ? "ok" : "bad"}`}>
+                      <strong>Instagram Diagnostics</strong>
+                      <span>{instagramDiagnostics.ok ? `${instagramDiagnostics.instagram_username || "Instagram"} / Page ${instagramDiagnostics.page_id || "-"}` : (instagramDiagnostics.status || "sin conexion")}</span>
+                      {instagramDiagnostics.ok ? <small>IG Business ID: {instagramDiagnostics.instagram_business_account_id || "-"} / subscribed_apps: {instagramDiagnostics.subscription?.status || "-"}</small> : null}
+                      {instagramDiagnostics.ok ? <small>Webhook global: {instagramDiagnostics.webhook_callback_url || "-"} / Ultimo evento: {instagramDiagnostics.webhook_status?.last_seen_at || "sin eventos"}</small> : null}
+                      {instagramDiagnostics.last_message?.id ? <small>Ultimo mensaje: {instagramDiagnostics.last_message.display_name || instagramDiagnostics.last_message.external_contact_id} - {instagramDiagnostics.last_message.last_message_text}</small> : null}
+                      {(instagramDiagnostics.subscription_checks || []).slice(0, 3).map((item, idx) => <small key={`${item.created_at}-${idx}`}>{compactDateTimeLabel(item.created_at)} - {item.status} {item.error || item.meta_error_message || ""}</small>)}
+                    </div>
+                  ) : null}
                 </article>
 
                 <article className="panel glass-card webhook-panel">
