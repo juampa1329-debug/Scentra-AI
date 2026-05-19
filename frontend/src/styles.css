@@ -581,6 +581,60 @@ nav { display: grid; gap: 8px; width: 100%; }
   white-space: pre-wrap;
   font-size: 11px;
 }
+.agent-builder-section.actions {
+  border-color: rgba(96,165,250,0.22);
+  background:
+    radial-gradient(circle at 14% 10%, rgba(96,165,250,0.13), transparent 34%),
+    rgba(255,255,255,0.035);
+}
+.agent-action-form {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.2fr) minmax(110px, 0.55fr) minmax(110px, 0.55fr) minmax(180px, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+}
+.agent-action-form .wide {
+  grid-column: 1 / -2;
+}
+.agent-action-list {
+  display: grid;
+  gap: 8px;
+  max-height: 310px;
+  overflow: auto;
+  padding-right: 3px;
+}
+.agent-action-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(118px, 0.3fr);
+  gap: 10px;
+  border: 1px solid rgba(183,231,224,0.12);
+  border-radius: 17px;
+  padding: 12px;
+  background: rgba(0,0,0,0.14);
+}
+.agent-action-row.pending_approval { border-color: rgba(251,191,36,0.24); }
+.agent-action-row.approved { border-color: rgba(96,165,250,0.28); }
+.agent-action-row.executed { border-color: rgba(52,211,153,0.28); }
+.agent-action-row strong,
+.agent-action-row b,
+.agent-action-row span {
+  display: block;
+}
+.agent-action-row strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+.agent-action-row p {
+  margin: 6px 0 0;
+  color: var(--soft);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.agent-action-row span {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 11px;
+}
 .agent-run-list {
   display: grid;
   gap: 9px;
@@ -1532,7 +1586,8 @@ nav { display: grid; gap: 8px; width: 100%; }
   .advisor-input { grid-template-columns: 1fr; }
   .agents-hero-actions { display: grid; }
   .agent-card-grid, .template-agent-grid { grid-template-columns: 1fr; }
-  .agent-editor-grid, .agent-editor-grid.three, .agent-builder-section.two, .agent-note-form, .agent-runtime-test, .agent-health-grid, .agent-run-row { grid-template-columns: 1fr; }
+  .agent-editor-grid, .agent-editor-grid.three, .agent-builder-section.two, .agent-note-form, .agent-runtime-test, .agent-health-grid, .agent-run-row, .agent-action-form, .agent-action-row { grid-template-columns: 1fr; }
+  .agent-action-form .wide { grid-column: auto; }
   .agent-section-label { align-items: flex-start; flex-direction: column; }
   .agent-section-label span { text-align: left; }
 }

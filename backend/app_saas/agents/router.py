@@ -2,14 +2,16 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query
 
-from app_saas.agents.schemas import AgentEventIn, AiAgentCreateIn, AiAgentPatchIn
+from app_saas.agents.schemas import AgentActionDraftIn, AgentEventIn, AiAgentCreateIn, AiAgentPatchIn
 from app_saas.agents.service import (
     add_agent_event,
     agent_runtime_summary,
     builder_catalog,
+    create_agent_action_draft,
     create_agent,
     create_from_template,
     get_agent,
+    list_agent_action_drafts,
     list_agent_events,
     list_agents,
     list_templates,
@@ -81,6 +83,30 @@ def get_agent_runtime(agent_id: str, ctx: AuthContext = Depends(get_current_user
         set_tenant_context(conn, ctx.tenant_id)
         summary = agent_runtime_summary(conn, ctx.tenant_id, agent_id)
         return {"ok": True, "tenant_id": ctx.tenant_id, **summary}
+
+
+@router.get("/{agent_id}/action-drafts")
+def get_agent_action_drafts(
+    agent_id: str,
+    limit: int = Query(default=20, ge=1, le=100),
+    ctx: AuthContext = Depends(get_current_user),
+):
+    with db_session() as conn:
+        set_tenant_context(conn, ctx.tenant_id)
+        return {"ok": True, "actions": list_agent_action_drafts(conn, ctx.tenant_id, agent_id, limit=limit)}
+
+
+@router.post("/{agent_id}/action-drafts")
+def post_agent_action_draft(
+    agent_id: str,
+    payload: AgentActionDraftIn,
+    ctx: AuthContext = Depends(require_role("owner", "admin", "supervisor", "agent")),
+):
+    with db_session() as conn:
+        set_tenant_context(conn, ctx.tenant_id)
+        item = create_agent_action_draft(conn, ctx.tenant_id, ctx.user_id, agent_id, payload.model_dump())
+        summary = agent_runtime_summary(conn, ctx.tenant_id, agent_id)
+        return {"ok": True, "action": item, **summary}
 
 
 @router.patch("/{agent_id}")

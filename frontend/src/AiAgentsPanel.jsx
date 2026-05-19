@@ -20,12 +20,25 @@ const FALLBACK_ROUTES = [
   { code: "ops", label: "Operaciones" },
 ];
 
+const FALLBACK_ACTION_PRESETS = [
+  { tool_code: "advisor.actions", action_type: "advisor_action", target_module: "advisor", label: "Accion libre" },
+  { tool_code: "crm.update", action_type: "review_crm", target_module: "customers", label: "Revisar CRM" },
+  { tool_code: "campaigns.create_draft", action_type: "create_campaign_draft", target_module: "campaigns", label: "Campana draft" },
+  { tool_code: "triggers.suggest", action_type: "create_trigger_draft", target_module: "campaigns", label: "Trigger draft" },
+  { tool_code: "remarketing.suggest", action_type: "create_remarketing_flow_draft", target_module: "campaigns", label: "Remarketing draft" },
+  { tool_code: "webhooks.repair", action_type: "open_debug", target_module: "settings", label: "Debug Meta" },
+];
+
 const number = (value) => Number(value || 0).toLocaleString("es-CO");
 
 const statusLabel = (status) => ({
   active: "Activo",
   paused: "Pausado",
   draft: "Borrador",
+  pending_approval: "Pendiente",
+  approved: "Aprobado",
+  executed: "Ejecutado",
+  dismissed: "Descartado",
   archived: "Archivado",
 }[String(status || "").toLowerCase()] || status || "Borrador");
 
@@ -125,6 +138,13 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
   const [eventNote, setEventNote] = useState("");
   const [runtimeTest, setRuntimeTest] = useState({ message: "Hola, quiero saber que opciones tienen disponibles.", result: null });
   const [runtimeSummary, setRuntimeSummary] = useState(null);
+  const [actionDraft, setActionDraft] = useState({
+    preset: "advisor.actions",
+    title: "",
+    description: "",
+    impact: "medium",
+    risk_level: "medium",
+  });
   const [dirty, setDirty] = useState(false);
   const [loading, setLoading] = useState(false);
   const [busyKey, setBusyKey] = useState("");
@@ -141,12 +161,16 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
   const toolCatalog = asList(catalog.tools);
   const providerCatalog = asList(catalog.providers).length ? catalog.providers : FALLBACK_PROVIDERS;
   const routeCatalog = asList(catalog.provider_routes).length ? catalog.provider_routes : FALLBACK_ROUTES;
+  const actionPresetCatalog = asList(catalog.action_draft_presets).length ? catalog.action_draft_presets : FALLBACK_ACTION_PRESETS;
   const memoryFlags = asList(catalog.memory_flags);
   const approvalFlags = asList(catalog.approval_flags);
   const groupedTools = groupBy(toolCatalog, "group");
   const runtimeEnabledForSelected = selectedAgent && ["sales", "support"].includes(selectedAgent.agent_type);
   const runtimeMetrics = asObject(runtimeSummary?.metrics || selectedAgent?.metrics_json);
   const runtimeHealth = asObject(runtimeSummary?.health || runtimeMetrics.runtime_health);
+  const agentActionDrafts = asList(runtimeSummary?.actions);
+  const availableActionPresets = actionPresetCatalog.filter((preset) => !asList(editor?.tools).length || asList(editor?.tools).includes(preset.tool_code));
+  const selectedActionPreset = actionPresetCatalog.find((preset) => preset.tool_code === actionDraft.preset) || availableActionPresets[0] || actionPresetCatalog[0] || {};
 
   const loadAgents = async (silent = false) => {
     setLoading(true);
@@ -198,9 +222,18 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
     if (!selectedAgent?.id) return;
     setEditor(makeEditor(selectedAgent));
     setDirty(false);
+    const allowed = uniqueList(selectedAgent.tools_json);
+    const firstAllowedPreset = actionPresetCatalog.find((preset) => allowed.includes(preset.tool_code)) || actionPresetCatalog[0];
+    setActionDraft({
+      preset: firstAllowedPreset?.tool_code || "advisor.actions",
+      title: "",
+      description: "",
+      impact: "medium",
+      risk_level: "medium",
+    });
     loadEvents(selectedAgent.id);
     loadRuntime(selectedAgent.id);
-  }, [selectedAgent?.id]);
+  }, [selectedAgent?.id, actionPresetCatalog]);
 
   const patchEditor = (patch) => {
     setEditor((prev) => ({ ...(prev || {}), ...patch }));
@@ -342,6 +375,40 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
       showStatus("Runtime probado con AI Gateway", "ok");
     } catch (err) {
       setRuntimeTest((prev) => ({ ...prev, result: { error: String(err.message || err) } }));
+      showStatus(String(err.message || err), "error");
+    } finally {
+      setBusyKey("");
+    }
+  };
+
+  const createActionDraft = async () => {
+    if (!selectedAgent?.id) return;
+    const preset = actionPresetCatalog.find((item) => item.tool_code === actionDraft.preset) || actionPresetCatalog[0] || {};
+    const title = String(actionDraft.title || "").trim() || preset.label || "Accion sugerida por agente";
+    const description = String(actionDraft.description || "").trim() || preset.description || "Borrador creado desde AI Agents.";
+    setBusyKey(`action-draft:${selectedAgent.id}`);
+    try {
+      const data = await apiCall(`/saas/v1/agents/${encodeURIComponent(selectedAgent.id)}/action-drafts`, {
+        method: "POST",
+        body: JSON.stringify({
+          title,
+          description,
+          action_type: preset.action_type || "",
+          tool_code: preset.tool_code || actionDraft.preset,
+          target_module: preset.target_module || "",
+          impact: actionDraft.impact,
+          risk_level: actionDraft.risk_level,
+          payload_json: { ui_source: "ai_agents_builder" },
+        }),
+      });
+      setRuntimeSummary(data || null);
+      if (data?.agent?.id) {
+        setAgents((prev) => prev.map((agent) => (agent.id === data.agent.id ? data.agent : agent)));
+      }
+      setActionDraft((prev) => ({ ...prev, title: "", description: "" }));
+      await loadEvents(selectedAgent.id);
+      showStatus("Borrador de accion creado para aprobacion humana", "ok");
+    } catch (err) {
       showStatus(String(err.message || err), "error");
     } finally {
       setBusyKey("");
@@ -497,6 +564,7 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
                   <div><span>Errores 7d</span><strong>{number((runtimeMetrics.failed_runs_7d || 0) + (runtimeMetrics.skipped_runs_7d || 0))}</strong><small>{runtimeMetrics.last_error_code || "sin error reciente"}</small></div>
                   <div><span>Fallback</span><strong>{number(runtimeMetrics.fallback_runs_7d || 0)}</strong><small>{runtimeMetrics.last_provider || "sin proveedor"}</small></div>
                   <div><span>Latencia</span><strong>{number(runtimeMetrics.avg_latency_ms_7d || 0)}ms</strong><small>{runtimeMetrics.last_model || "sin modelo"}</small></div>
+                  <div><span>Acciones</span><strong>{number(runtimeMetrics.pending_action_drafts || 0)}</strong><small>{number(runtimeMetrics.action_drafts_7d || 0)} creadas 7d</small></div>
                 </div>
                 {asList(runtimeHealth.issues).length ? (
                   <div className="agent-issues">{asList(runtimeHealth.issues).map((issue) => <span key={issue}>{issue}</span>)}</div>
@@ -514,6 +582,81 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
                 ) : (
                   <div className="empty">Este tipo de agente aun opera como analitico. El primer runtime conversacional usa Sales y Support Agent.</div>
                 )}
+              </section>
+
+              <section className="agent-builder-section actions">
+                <div className="agent-section-label">
+                  <strong>Acciones asistidas fase 5</strong>
+                  <span>El agente crea borradores; un humano aprueba antes de ejecutar.</span>
+                </div>
+                <div className="agent-action-form">
+                  <label>Tipo de accion
+                    <select
+                      value={actionDraft.preset}
+                      onChange={(event) => setActionDraft((prev) => ({ ...prev, preset: event.target.value }))}
+                    >
+                      {(availableActionPresets.length ? availableActionPresets : actionPresetCatalog).map((preset) => (
+                        <option key={`${preset.tool_code}:${preset.action_type}`} value={preset.tool_code}>
+                          {preset.label} / {preset.tool_code}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>Impacto
+                    <select value={actionDraft.impact} onChange={(event) => setActionDraft((prev) => ({ ...prev, impact: event.target.value }))}>
+                      <option value="low">Bajo</option>
+                      <option value="medium">Medio</option>
+                      <option value="high">Alto</option>
+                      <option value="critical">Critico</option>
+                    </select>
+                  </label>
+                  <label>Riesgo
+                    <select value={actionDraft.risk_level} onChange={(event) => setActionDraft((prev) => ({ ...prev, risk_level: event.target.value }))}>
+                      <option value="low">Bajo</option>
+                      <option value="medium">Medio</option>
+                      <option value="high">Alto</option>
+                      <option value="critical">Critico</option>
+                    </select>
+                  </label>
+                  <label>Titulo
+                    <input
+                      value={actionDraft.title}
+                      onChange={(event) => setActionDraft((prev) => ({ ...prev, title: event.target.value }))}
+                      placeholder={selectedActionPreset.label || "Accion sugerida"}
+                    />
+                  </label>
+                  <label className="wide">Descripcion y contexto
+                    <textarea
+                      rows={3}
+                      value={actionDraft.description}
+                      onChange={(event) => setActionDraft((prev) => ({ ...prev, description: event.target.value }))}
+                      placeholder={selectedActionPreset.description || "Explica que deberia revisar o aprobar el equipo."}
+                    />
+                  </label>
+                  <button type="button" className="primary" disabled={!selectedAgent || busyKey.startsWith("action-draft:")} onClick={createActionDraft}>
+                    {busyKey.startsWith("action-draft:") ? "Creando..." : "Crear borrador seguro"}
+                  </button>
+                </div>
+                <div className="agent-action-list">
+                  {agentActionDrafts.map((action) => {
+                    const payload = asObject(action.payload_json);
+                    return (
+                      <div key={action.id} className={`agent-action-row ${action.status}`}>
+                        <div>
+                          <strong>{action.title}</strong>
+                          <span>{action.action_type} / {payload.tool_code || "tool"}</span>
+                          <p>{action.description}</p>
+                        </div>
+                        <div>
+                          <b>{statusLabel(action.status)}</b>
+                          <span>{action.impact} impacto</span>
+                          <span>{action.risk_level} riesgo</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {!agentActionDrafts.length ? <div className="empty">Sin borradores de accion para este agente. Crea uno para probar el approval layer.</div> : null}
+                </div>
               </section>
 
               <section className="agent-builder-section">

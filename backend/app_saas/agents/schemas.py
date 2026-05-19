@@ -37,3 +37,14 @@ class AgentEventIn(BaseModel):
     event_type: str = Field(default="manual_note", max_length=80)
     summary: str = Field(default="", max_length=500)
     details_json: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentActionDraftIn(BaseModel):
+    title: str = Field(default="", max_length=180)
+    description: str = Field(default="", max_length=1200)
+    action_type: str = Field(default="", max_length=120)
+    tool_code: str = Field(default="advisor.actions", max_length=120)
+    target_module: str = Field(default="", max_length=120)
+    impact: str = Field(default="medium", max_length=40)
+    risk_level: str = Field(default="medium", max_length=40)
+    payload_json: dict[str, Any] = Field(default_factory=dict)

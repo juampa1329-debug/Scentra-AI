@@ -59,6 +59,58 @@ TOOL_CATALOG: list[dict[str, str]] = [
     {"code": "workflows.create_draft", "group": "Workflows", "label": "Crear workflow draft", "description": "Disenar flujos sin publicarlos automaticamente."},
 ]
 
+ACTION_DRAFT_PRESETS: list[dict[str, str]] = [
+    {
+        "tool_code": "advisor.actions",
+        "action_type": "advisor_action",
+        "target_module": "advisor",
+        "label": "Accion libre del agente",
+        "description": "Prepara una recomendacion accionable para aprobacion humana.",
+    },
+    {
+        "tool_code": "crm.update",
+        "action_type": "review_crm",
+        "target_module": "customers",
+        "label": "Revisar o actualizar CRM",
+        "description": "Abre el CRM con una propuesta de cambios, sin modificar datos automaticamente.",
+    },
+    {
+        "tool_code": "campaigns.create_draft",
+        "action_type": "create_campaign_draft",
+        "target_module": "campaigns",
+        "label": "Crear borrador de campana",
+        "description": "Crea una campana en borrador despues de aprobacion.",
+    },
+    {
+        "tool_code": "triggers.suggest",
+        "action_type": "create_trigger_draft",
+        "target_module": "campaigns",
+        "label": "Crear borrador de trigger",
+        "description": "Propone un trigger desactivado para revision manual.",
+    },
+    {
+        "tool_code": "remarketing.suggest",
+        "action_type": "create_remarketing_flow_draft",
+        "target_module": "campaigns",
+        "label": "Crear flow de remarketing",
+        "description": "Prepara un flujo de remarketing en borrador.",
+    },
+    {
+        "tool_code": "webhooks.repair",
+        "action_type": "open_debug",
+        "target_module": "settings",
+        "label": "Revisar diagnostico Meta",
+        "description": "Dirige al debug antes de reparar integraciones o webhooks.",
+    },
+    {
+        "tool_code": "reports.create",
+        "action_type": "reports.create",
+        "target_module": "analytics",
+        "label": "Preparar reporte ejecutivo",
+        "description": "Deja un borrador de reporte para revisar antes de compartir.",
+    },
+]
+
 PROVIDER_ROUTE_CATALOG: list[dict[str, str]] = [
     {"code": "advisor", "label": "Advisor", "description": "Analisis estrategico y recomendaciones."},
     {"code": "sales", "label": "Ventas", "description": "Conversaciones comerciales y cierre."},
@@ -514,6 +566,7 @@ def builder_catalog() -> dict[str, Any]:
         "providers": AI_PROVIDER_CATALOG,
         "memory_flags": MEMORY_FLAG_CATALOG,
         "approval_flags": APPROVAL_FLAG_CATALOG,
+        "action_draft_presets": ACTION_DRAFT_PRESETS,
     }
 
 
@@ -619,6 +672,238 @@ def _runtime_runs(conn: Connection, tenant_id: str, agent_id: str, limit: int = 
     ]
 
 
+def ensure_agent_action_tables(conn: Connection) -> None:
+    conn.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS saas_advisor_actions (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                tenant_id UUID NOT NULL REFERENCES saas_tenants(id) ON DELETE CASCADE,
+                created_by UUID NULL REFERENCES saas_users(id) ON DELETE SET NULL,
+                recommendation_id UUID NULL,
+                insight_id UUID NULL,
+                action_type TEXT NOT NULL DEFAULT 'advisor_action',
+                title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                impact TEXT NOT NULL DEFAULT 'medium',
+                risk_level TEXT NOT NULL DEFAULT 'medium',
+                approval_required BOOLEAN NOT NULL DEFAULT TRUE,
+                status TEXT NOT NULL DEFAULT 'draft',
+                approved_by UUID NULL REFERENCES saas_users(id) ON DELETE SET NULL,
+                approved_at TIMESTAMP NULL,
+                executed_at TIMESTAMP NULL,
+                execution_result_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_saas_advisor_actions_tenant_status
+            ON saas_advisor_actions (tenant_id, status, updated_at DESC)
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_saas_advisor_actions_agent
+            ON saas_advisor_actions (tenant_id, ((payload_json->>'agent_id')), updated_at DESC)
+            """
+        )
+    )
+
+
+def _agent_action_out(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(row.get("id") or ""),
+        "action_type": str(row.get("action_type") or "advisor_action"),
+        "title": str(row.get("title") or ""),
+        "description": str(row.get("description") or ""),
+        "payload_json": _json_value(row.get("payload_json"), {}),
+        "impact": str(row.get("impact") or "medium"),
+        "risk_level": str(row.get("risk_level") or "medium"),
+        "approval_required": bool(row.get("approval_required", True)),
+        "status": str(row.get("status") or "draft"),
+        "approved_by": str(row.get("approved_by") or ""),
+        "approved_at": str(row.get("approved_at") or ""),
+        "executed_at": str(row.get("executed_at") or ""),
+        "execution_result_json": _json_value(row.get("execution_result_json"), {}),
+        "created_at": str(row.get("created_at") or ""),
+        "updated_at": str(row.get("updated_at") or ""),
+    }
+
+
+def _action_preset_for(tool_code: str, action_type: str = "") -> dict[str, str]:
+    clean_tool = _clean(tool_code, 120).lower()
+    clean_action = _clean(action_type, 120).lower()
+    for preset in ACTION_DRAFT_PRESETS:
+        if clean_tool and preset["tool_code"] == clean_tool:
+            return preset
+        if clean_action and preset["action_type"] == clean_action:
+            return preset
+    return ACTION_DRAFT_PRESETS[0]
+
+
+def _agent_action_metrics(conn: Connection, tenant_id: str, agent_id: str) -> dict[str, int]:
+    ensure_agent_action_tables(conn)
+    row = conn.execute(
+        text(
+            """
+            SELECT
+                COUNT(*) FILTER (WHERE status IN ('draft', 'pending_approval'))::int AS pending_action_drafts,
+                COUNT(*) FILTER (WHERE status = 'approved')::int AS approved_action_drafts,
+                COUNT(*) FILTER (WHERE status = 'executed')::int AS executed_action_drafts,
+                COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '7 days')::int AS action_drafts_7d
+            FROM saas_advisor_actions
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND payload_json->>'source' = 'ai_agent'
+              AND payload_json->>'agent_id' = :agent_id
+            """
+        ),
+        {"tenant_id": tenant_id, "agent_id": agent_id},
+    ).mappings().first()
+    return {key: int(value or 0) for key, value in dict(row or {}).items()}
+
+
+def list_agent_action_drafts(conn: Connection, tenant_id: str, agent_id: str, limit: int = 20) -> list[dict[str, Any]]:
+    ensure_agent_action_tables(conn)
+    get_agent(conn, tenant_id, agent_id)
+    rows = conn.execute(
+        text(
+            """
+            SELECT id::text, action_type, title, description, payload_json, impact, risk_level,
+                   approval_required, status, approved_by::text, approved_at::text, executed_at::text,
+                   execution_result_json, created_at::text, updated_at::text
+            FROM saas_advisor_actions
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND payload_json->>'source' = 'ai_agent'
+              AND payload_json->>'agent_id' = :agent_id
+            ORDER BY updated_at DESC
+            LIMIT :limit
+            """
+        ),
+        {"tenant_id": tenant_id, "agent_id": agent_id, "limit": max(1, min(int(limit or 20), 100))},
+    ).mappings().all()
+    return [_agent_action_out(dict(row)) for row in rows]
+
+
+def create_agent_action_draft(
+    conn: Connection,
+    tenant_id: str,
+    user_id: str,
+    agent_id: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    ensure_agent_action_tables(conn)
+    item = get_agent(conn, tenant_id, agent_id)
+    preset = _action_preset_for(str(payload.get("tool_code") or ""), str(payload.get("action_type") or ""))
+    tool_code = _clean(payload.get("tool_code") or preset["tool_code"], 120).lower()
+    action_type = _clean(payload.get("action_type") or preset["action_type"], 120).lower()
+    target_module = _clean(payload.get("target_module") or preset["target_module"], 120).lower()
+    allowed_tools = {str(value or "").strip().lower() for value in _json_value(item.get("tools_json"), [])}
+    if tool_code and allowed_tools and tool_code not in allowed_tools:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "agent_tool_not_allowed", "tool_code": tool_code, "agent_id": agent_id},
+        )
+    impact = _clean(payload.get("impact"), 40).lower() or "medium"
+    risk_level = _clean(payload.get("risk_level"), 40).lower() or "medium"
+    if impact not in {"low", "medium", "high", "critical"}:
+        impact = "medium"
+    if risk_level not in {"low", "medium", "high", "critical"}:
+        risk_level = "medium"
+    title = _clean(payload.get("title"), 180) or preset["label"]
+    description = _clean(payload.get("description"), 1200) or preset["description"]
+    extra_payload = payload.get("payload_json") if isinstance(payload.get("payload_json"), dict) else {}
+    action_payload = {
+        **extra_payload,
+        "source": "ai_agent",
+        "agent_id": item["id"],
+        "agent_type": item["agent_type"],
+        "agent_name": item["name"],
+        "tool_code": tool_code,
+        "target_module": target_module,
+        "requires_human_approval": True,
+        "action": {
+            "type": action_type,
+            "module": target_module,
+            "tool_code": tool_code,
+            "title": title,
+            "description": description,
+            "created_by_agent": item["name"],
+        },
+    }
+    row = conn.execute(
+        text(
+            """
+            INSERT INTO saas_advisor_actions (
+                tenant_id, created_by, action_type, title, description, payload_json,
+                impact, risk_level, approval_required, status, execution_result_json, updated_at
+            )
+            VALUES (
+                CAST(:tenant_id AS uuid),
+                CASE WHEN :user_id = '' THEN NULL ELSE CAST(:user_id AS uuid) END,
+                :action_type,
+                :title,
+                :description,
+                CAST(:payload_json AS jsonb),
+                :impact,
+                :risk_level,
+                TRUE,
+                'pending_approval',
+                CAST(:execution_result_json AS jsonb),
+                NOW()
+            )
+            RETURNING id::text, action_type, title, description, payload_json, impact, risk_level,
+                      approval_required, status, approved_by::text, approved_at::text, executed_at::text,
+                      execution_result_json, created_at::text, updated_at::text
+            """
+        ),
+        {
+            "tenant_id": tenant_id,
+            "user_id": user_id or "",
+            "action_type": action_type,
+            "title": title,
+            "description": description,
+            "payload_json": _json(action_payload),
+            "impact": impact,
+            "risk_level": risk_level,
+            "execution_result_json": _json(
+                {
+                    "state": "awaiting_human_approval",
+                    "source": "ai_agent",
+                    "agent_id": item["id"],
+                    "tool_code": tool_code,
+                    "approval_layer": "human_required",
+                }
+            ),
+        },
+    ).mappings().first()
+    action = _agent_action_out(dict(row))
+    _audit(
+        conn,
+        tenant_id=tenant_id,
+        agent_id=item["id"],
+        actor_user_id=user_id,
+        event_type="agent.action_draft_created",
+        summary=f"Borrador de accion preparado: {action['title']}",
+        details={
+            "action_id": action["id"],
+            "action_type": action["action_type"],
+            "tool_code": tool_code,
+            "target_module": target_module,
+            "impact": impact,
+            "risk_level": risk_level,
+        },
+    )
+    return action
+
+
 def _runtime_health(item: dict[str, Any], metrics: dict[str, Any]) -> dict[str, Any]:
     issues: list[str] = []
     status = "healthy"
@@ -718,6 +1003,7 @@ def _runtime_metrics(conn: Connection, item: dict[str, Any]) -> dict[str, Any]:
     metrics = {key: (int(value or 0) if str(key).endswith("_7d") or key in {"tokens_7d", "avg_latency_ms_7d"} else value) for key, value in dict(event_row or {}).items()}
     for key, value in dict(run_row or {}).items():
         metrics[key] = int(value or 0) if str(key).endswith("_7d") or key in {"tokens_7d", "avg_latency_ms_7d"} else value
+    metrics.update(_agent_action_metrics(conn, tenant_id, agent_id))
     if last_run:
         metrics.update(
             {
@@ -740,6 +1026,7 @@ def agent_runtime_summary(conn: Connection, tenant_id: str, agent_id: str) -> di
         "metrics": metrics,
         "runs": _runtime_runs(conn, tenant_id, agent_id, limit=12),
         "events": _runtime_events(conn, tenant_id, agent_id, limit=12),
+        "actions": list_agent_action_drafts(conn, tenant_id, agent_id, limit=12),
         "health": metrics.get("runtime_health") or _runtime_health(item, metrics),
     }
 
