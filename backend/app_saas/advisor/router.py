@@ -18,6 +18,7 @@ from app_saas.advisor.service import (
     dismiss_action,
     dismiss_insight,
     dismiss_recommendation,
+    execute_action,
     generate_seed_insights,
     list_actions,
     list_insights,
@@ -214,6 +215,16 @@ def dismiss_advisor_action(
     with db_session() as conn:
         set_tenant_context(conn, ctx.tenant_id)
         return {"ok": True, "item": dismiss_action(conn, ctx.tenant_id, action_id)}
+
+
+@router.post("/actions/{action_id}/execute")
+def execute_advisor_action(
+    action_id: str,
+    ctx: AuthContext = Depends(require_role("owner", "admin", "supervisor")),
+):
+    with db_session() as conn:
+        set_tenant_context(conn, ctx.tenant_id)
+        return execute_action(conn, ctx.tenant_id, ctx.user_id, action_id)
 
 
 @router.post("/insights/{insight_id}/dismiss")

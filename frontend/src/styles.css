@@ -928,6 +928,10 @@ nav { display: grid; gap: 8px; width: 100%; }
   border-color: rgba(52,211,153,0.34);
   background: rgba(52,211,153,0.08);
 }
+.advisor-action.executed {
+  border-color: rgba(96,165,250,0.32);
+  background: rgba(96,165,250,0.08);
+}
 .advisor-action span {
   color: var(--blue);
   font-size: 10px;

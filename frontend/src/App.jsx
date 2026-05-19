@@ -562,7 +562,8 @@ function App() {
     ads: ["Ads Manager", "Leads, comentarios y eventos de Meta conectados al inbox."],
     settings: ["Ajustes", "IA, canales, webhooks, APIs, usuarios y seguridad."],
   };
-  const advisorSignalCount = advisorInsights.length + advisorRecommendations.length + advisorActions.filter((item) => item.status !== "approved").length;
+  const advisorPendingActionCount = advisorActions.filter((item) => ["draft", "pending_approval", "approved"].includes(item.status)).length;
+  const advisorSignalCount = advisorInsights.length + advisorRecommendations.length + advisorPendingActionCount;
   const advisorQuickPrompts = [
     "Dame un resumen ejecutivo de la empresa hoy.",
     "Que oportunidades comerciales ves ahora?",
@@ -1970,6 +1971,21 @@ function App() {
     } catch (err) { showStatus(String(err.message || err), "error"); }
   };
 
+  const executeAdvisorAction = async (actionId) => {
+    if (!actionId) return;
+    try {
+      const data = await apiCall(`/saas/v1/advisor/actions/${encodeURIComponent(actionId)}/execute`, { method: "POST" });
+      if (data?.action?.id) {
+        setAdvisorActions((prev) => prev.map((item) => item.id === actionId ? data.action : item));
+        const navigation = data?.result?.navigation || data?.action?.execution_result_json?.navigation || {};
+        if (navigation.module) setActiveView(navigation.module);
+        if (navigation.tab) setSettingsTab(navigation.tab);
+        if (data.ok) showStatus("Accion ejecutada de forma segura", "ok");
+        else showStatus(data.error || "La accion requiere executor adicional", "error");
+      }
+    } catch (err) { showStatus(String(err.message || err), "error"); }
+  };
+
   const isLogged = Boolean(accessToken && me);
 
   if (!isLogged) {
@@ -2725,10 +2741,11 @@ function App() {
                     <div>
                       <span>{action.action_type} / riesgo {action.risk_level}</span>
                       <strong>{action.title}</strong>
-                      <small>{action.status === "approved" ? "Aprobada, lista para ejecucion asistida." : action.description}</small>
+                      <small>{action.status === "executed" ? "Ejecutada de forma segura." : action.status === "approved" ? "Aprobada, lista para ejecucion asistida." : action.description}</small>
                     </div>
                     <div className="advisor-action-buttons">
-                      {action.status !== "approved" ? <button type="button" className="primary" onClick={() => approveAdvisorAction(action.id)}>Aprobar</button> : null}
+                      {["draft", "pending_approval"].includes(action.status) ? <button type="button" className="primary" onClick={() => approveAdvisorAction(action.id)}>Aprobar</button> : null}
+                      {action.status === "approved" ? <button type="button" className="primary" onClick={() => executeAdvisorAction(action.id)}>Ejecutar</button> : null}
                       <button type="button" onClick={() => dismissAdvisorAction(action.id)}>Descartar</button>
                     </div>
                   </article>

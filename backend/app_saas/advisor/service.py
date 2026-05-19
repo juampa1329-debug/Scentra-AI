@@ -1159,6 +1159,241 @@ def dismiss_action(conn: Connection, tenant_id: str, action_id: str) -> dict[str
     return _row_dict(row)
 
 
+def _load_action(conn: Connection, tenant_id: str, action_id: str) -> dict[str, Any]:
+    ensure_advisor_tables(conn)
+    row = conn.execute(
+        text(
+            """
+            SELECT id::text, action_type, title, description, payload_json, impact, risk_level,
+                   approval_required, status, recommendation_id::text, insight_id::text,
+                   approved_by::text, approved_at::text, executed_at::text,
+                   execution_result_json, created_at::text, updated_at::text
+            FROM saas_advisor_actions
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND id = CAST(:action_id AS uuid)
+            LIMIT 1
+            """
+        ),
+        {"tenant_id": tenant_id, "action_id": action_id},
+    ).mappings().first()
+    return _action_out(_row_dict(row))
+
+
+def _complete_action_execution(
+    conn: Connection,
+    tenant_id: str,
+    action_id: str,
+    *,
+    status: str,
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    row = conn.execute(
+        text(
+            """
+            UPDATE saas_advisor_actions
+            SET status = :status,
+                executed_at = CASE WHEN :status = 'executed' THEN NOW() ELSE executed_at END,
+                execution_result_json = CAST(:execution_result_json AS jsonb),
+                updated_at = NOW()
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND id = CAST(:action_id AS uuid)
+            RETURNING id::text, action_type, title, description, payload_json, impact, risk_level,
+                      approval_required, status, recommendation_id::text, insight_id::text,
+                      approved_by::text, approved_at::text, executed_at::text,
+                      execution_result_json, created_at::text, updated_at::text
+            """
+        ),
+        {
+            "tenant_id": tenant_id,
+            "action_id": action_id,
+            "status": status,
+            "execution_result_json": _json(result),
+        },
+    ).mappings().first()
+    return _action_out(_row_dict(row))
+
+
+def _action_payload(action_row: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], str]:
+    payload = action_row.get("payload_json") if isinstance(action_row.get("payload_json"), dict) else {}
+    nested = payload.get("action") if isinstance(payload.get("action"), dict) else {}
+    action = nested or payload
+    action_type = _clean(action.get("type") or action_row.get("action_type"), 100).lower()
+    return payload, action, action_type
+
+
+def _safe_name(value: str, fallback: str, suffix: str) -> str:
+    base = _clean(value, 120) or fallback
+    tail = f" / Advisor {suffix[:8]}"
+    return f"{base[:160 - len(tail)]}{tail}"
+
+
+def _execute_navigation_action(conn: Connection, tenant_id: str, action_id: str, action: dict[str, Any], action_type: str) -> dict[str, Any]:
+    module_map = {
+        "open_inbox": "inbox",
+        "review_crm": "customers",
+        "open_debug": "settings",
+        "open_campaigns": "campaigns",
+        "open_broadcast": "broadcast",
+        "open_ads": "ads",
+        "open_settings": "settings",
+    }
+    module = _clean(action.get("module") or module_map.get(action_type), 80)
+    tab = _clean(action.get("tab"), 80)
+    result = {
+        "state": "executed",
+        "mode": "navigation",
+        "message": "Accion ejecutada como navegacion asistida. No se enviaron mensajes ni se modificaron secretos.",
+        "navigation": {"module": module, "tab": tab},
+    }
+    return _complete_action_execution(conn, tenant_id, action_id, status="executed", result=result)
+
+
+def _execute_campaign_draft(conn: Connection, tenant_id: str, user_id: str, action_id: str, row: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
+    draft = action.get("campaign") if isinstance(action.get("campaign"), dict) else action
+    campaign = conn.execute(
+        text(
+            """
+            INSERT INTO saas_campaigns (
+                tenant_id, name, channel, objective, status, audience_count, created_by_user_id
+            )
+            VALUES (
+                CAST(:tenant_id AS uuid), :name, :channel, :objective, 'draft', 0, CAST(:user_id AS uuid)
+            )
+            RETURNING id::text, name, channel, objective, status, created_at::text, updated_at::text
+            """
+        ),
+        {
+            "tenant_id": tenant_id,
+            "user_id": user_id,
+            "name": _safe_name(draft.get("name") or row.get("title"), "Campana sugerida", action_id),
+            "channel": _clean(draft.get("channel"), 40).lower() or "whatsapp",
+            "objective": _clean(draft.get("objective") or row.get("description"), 1000),
+        },
+    ).mappings().first()
+    result = {
+        "state": "executed",
+        "mode": "draft_created",
+        "artifact_type": "campaign",
+        "artifact": _row_dict(campaign),
+        "navigation": {"module": "campaigns"},
+    }
+    return _complete_action_execution(conn, tenant_id, action_id, status="executed", result=result)
+
+
+def _execute_trigger_draft(conn: Connection, tenant_id: str, user_id: str, action_id: str, row: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
+    draft = action.get("trigger") if isinstance(action.get("trigger"), dict) else action
+    trigger = conn.execute(
+        text(
+            """
+            INSERT INTO saas_crm_triggers (
+                tenant_id, name, channel, event_type, trigger_type, flow_event, conditions_json, actions_json,
+                priority, cooldown_minutes, is_active, assistant_enabled, assistant_message_type,
+                block_ai, stop_on_match, only_when_no_takeover, created_by_user_id
+            )
+            VALUES (
+                CAST(:tenant_id AS uuid), :name, :channel, :event_type, :trigger_type, :flow_event,
+                CAST(:conditions_json AS jsonb), CAST(:actions_json AS jsonb), :priority, :cooldown_minutes,
+                FALSE, :assistant_enabled, :assistant_message_type, TRUE, TRUE, TRUE, CAST(:user_id AS uuid)
+            )
+            RETURNING id::text, name, channel, event_type, trigger_type, flow_event, conditions_json, actions_json,
+                      priority, cooldown_minutes, is_active, assistant_enabled, assistant_message_type,
+                      block_ai, stop_on_match, only_when_no_takeover, created_at::text, updated_at::text
+            """
+        ),
+        {
+            "tenant_id": tenant_id,
+            "user_id": user_id,
+            "name": _safe_name(draft.get("name") or row.get("title"), "Trigger sugerido", action_id),
+            "channel": _clean(draft.get("channel"), 40).lower() or "whatsapp",
+            "event_type": _clean(draft.get("event_type"), 80).lower() or "message_in",
+            "trigger_type": _clean(draft.get("trigger_type"), 80).lower() or "message_flow",
+            "flow_event": _clean(draft.get("flow_event"), 40).lower() or "received",
+            "conditions_json": _json(draft.get("conditions_json") or draft.get("conditions") or {"conditions": []}),
+            "actions_json": _json(draft.get("actions_json") or draft.get("actions") or {"actions": []}),
+            "priority": int(draft.get("priority") or 100),
+            "cooldown_minutes": int(draft.get("cooldown_minutes") or 60),
+            "assistant_enabled": bool(draft.get("assistant_enabled", False)),
+            "assistant_message_type": _clean(draft.get("assistant_message_type"), 40).lower() or "auto",
+        },
+    ).mappings().first()
+    result = {
+        "state": "executed",
+        "mode": "draft_created",
+        "artifact_type": "trigger",
+        "artifact": _row_dict(trigger),
+        "safety": "El trigger fue creado desactivado para revision manual.",
+        "navigation": {"module": "campaigns"},
+    }
+    return _complete_action_execution(conn, tenant_id, action_id, status="executed", result=result)
+
+
+def _execute_remarketing_draft(conn: Connection, tenant_id: str, user_id: str, action_id: str, row: dict[str, Any], action: dict[str, Any]) -> dict[str, Any]:
+    draft = action.get("flow") if isinstance(action.get("flow"), dict) else action
+    flow = conn.execute(
+        text(
+            """
+            INSERT INTO saas_remarketing_flows (
+                tenant_id, name, description, channel, status, entry_rules_json, exit_rules_json, steps_json, created_by_user_id
+            )
+            VALUES (
+                CAST(:tenant_id AS uuid), :name, :description, :channel, 'draft',
+                CAST(:entry_rules_json AS jsonb), CAST(:exit_rules_json AS jsonb), CAST(:steps_json AS jsonb), CAST(:user_id AS uuid)
+            )
+            RETURNING id::text, name, description, channel, status, entry_rules_json, exit_rules_json, steps_json, created_at::text, updated_at::text
+            """
+        ),
+        {
+            "tenant_id": tenant_id,
+            "user_id": user_id,
+            "name": _safe_name(draft.get("name") or row.get("title"), "Flow remarketing sugerido", action_id),
+            "description": _clean(draft.get("description") or row.get("description"), 1000),
+            "channel": _clean(draft.get("channel"), 40).lower() or "whatsapp",
+            "entry_rules_json": _json(draft.get("entry_rules_json") or {}),
+            "exit_rules_json": _json(draft.get("exit_rules_json") or {}),
+            "steps_json": _json(draft.get("steps_json") or []),
+        },
+    ).mappings().first()
+    result = {
+        "state": "executed",
+        "mode": "draft_created",
+        "artifact_type": "remarketing_flow",
+        "artifact": _row_dict(flow),
+        "navigation": {"module": "campaigns"},
+    }
+    return _complete_action_execution(conn, tenant_id, action_id, status="executed", result=result)
+
+
+def execute_action(conn: Connection, tenant_id: str, user_id: str, action_id: str) -> dict[str, Any]:
+    row = _load_action(conn, tenant_id, action_id)
+    if not row:
+        return {"ok": False, "error": "action_not_found"}
+    if row.get("status") != "approved":
+        return {"ok": False, "error": "action_must_be_approved", "action": row}
+    _payload, action, action_type = _action_payload(row)
+    try:
+        if action_type in {"open_inbox", "review_crm", "open_debug", "open_campaigns", "open_broadcast", "open_ads", "open_settings"}:
+            updated = _execute_navigation_action(conn, tenant_id, action_id, action, action_type)
+        elif action_type in {"create_campaign_draft", "campaign_draft", "draft_campaign"}:
+            updated = _execute_campaign_draft(conn, tenant_id, user_id, action_id, row, action)
+        elif action_type in {"create_trigger_draft", "trigger_draft", "draft_trigger"}:
+            updated = _execute_trigger_draft(conn, tenant_id, user_id, action_id, row, action)
+        elif action_type in {"create_remarketing_flow_draft", "remarketing_flow_draft", "draft_remarketing_flow"}:
+            updated = _execute_remarketing_draft(conn, tenant_id, user_id, action_id, row, action)
+        else:
+            result = {
+                "state": "unsupported_action",
+                "message": "Esta accion requiere un executor especifico antes de poder ejecutarse automaticamente.",
+                "action_type": action_type,
+            }
+            updated = _complete_action_execution(conn, tenant_id, action_id, status="approved", result=result)
+            return {"ok": False, "error": "unsupported_action_type", "action": updated}
+    except Exception as exc:
+        result = {"state": "execution_failed", "error": _clean(exc, 1000), "action_type": action_type}
+        updated = _complete_action_execution(conn, tenant_id, action_id, status="approved", result=result)
+        return {"ok": False, "error": "execution_failed", "action": updated}
+    return {"ok": True, "action": updated, "result": updated.get("execution_result_json") or {}}
+
+
 def advisor_chat(
     conn: Connection,
     *,
