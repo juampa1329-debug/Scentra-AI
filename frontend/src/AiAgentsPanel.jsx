@@ -36,6 +36,13 @@ const statusTone = (status) => ({
   archived: "muted",
 }[String(status || "").toLowerCase()] || "neutral");
 
+const healthTone = (status) => ({
+  healthy: "ok",
+  warning: "warn",
+  critical: "warn",
+  idle: "muted",
+}[String(status || "").toLowerCase()] || "muted");
+
 const typeLabel = (type) => ({
   advisor: "Advisor",
   sales: "Ventas",
@@ -117,6 +124,7 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
   const [editor, setEditor] = useState(null);
   const [eventNote, setEventNote] = useState("");
   const [runtimeTest, setRuntimeTest] = useState({ message: "Hola, quiero saber que opciones tienen disponibles.", result: null });
+  const [runtimeSummary, setRuntimeSummary] = useState(null);
   const [dirty, setDirty] = useState(false);
   const [loading, setLoading] = useState(false);
   const [busyKey, setBusyKey] = useState("");
@@ -137,6 +145,8 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
   const approvalFlags = asList(catalog.approval_flags);
   const groupedTools = groupBy(toolCatalog, "group");
   const runtimeEnabledForSelected = selectedAgent && ["sales", "support"].includes(selectedAgent.agent_type);
+  const runtimeMetrics = asObject(runtimeSummary?.metrics || selectedAgent?.metrics_json);
+  const runtimeHealth = asObject(runtimeSummary?.health || runtimeMetrics.runtime_health);
 
   const loadAgents = async (silent = false) => {
     setLoading(true);
@@ -170,12 +180,26 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
     }
   };
 
+  const loadRuntime = async (agentId) => {
+    if (!agentId) return;
+    try {
+      const data = await apiCall(`/saas/v1/agents/${encodeURIComponent(agentId)}/runtime`);
+      setRuntimeSummary(data || null);
+      if (data?.agent?.id) {
+        setAgents((prev) => prev.map((agent) => (agent.id === data.agent.id ? data.agent : agent)));
+      }
+    } catch {
+      setRuntimeSummary(null);
+    }
+  };
+
   useEffect(() => { loadAgents(true); }, []);
   useEffect(() => {
     if (!selectedAgent?.id) return;
     setEditor(makeEditor(selectedAgent));
     setDirty(false);
     loadEvents(selectedAgent.id);
+    loadRuntime(selectedAgent.id);
   }, [selectedAgent?.id]);
 
   const patchEditor = (patch) => {
@@ -255,6 +279,7 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
       if (data?.limits) setLimits(data.limits);
       setDirty(false);
       await loadEvents(selectedAgent.id);
+      await loadRuntime(selectedAgent.id);
       showStatus("Configuracion del agente guardada", "ok");
     } catch (err) {
       showStatus(String(err.message || err), "error");
@@ -270,6 +295,7 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
       await apiCall(`/saas/v1/agents/${encodeURIComponent(agent.id)}/${path}`, { method: "POST" });
       await loadAgents(true);
       await loadEvents(agent.id);
+      await loadRuntime(agent.id);
       showStatus(nextStatus === "active" ? "Agente activado" : nextStatus === "paused" ? "Agente pausado" : "Agente archivado", "ok");
     } catch (err) {
       showStatus(String(err.message || err), "error");
@@ -290,6 +316,7 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
       });
       setEvents(data?.events || []);
       setEventNote("");
+      await loadRuntime(selectedAgent.id);
       showStatus("Nota agregada al agente", "ok");
     } catch (err) {
       showStatus(String(err.message || err), "error");
@@ -308,7 +335,10 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
         body: JSON.stringify({ phone: "runtime-test", message }),
       });
       setRuntimeTest((prev) => ({ ...prev, result: data?.result || data }));
-      if (selectedAgent?.id) await loadEvents(selectedAgent.id);
+      if (selectedAgent?.id) {
+        await loadEvents(selectedAgent.id);
+        await loadRuntime(selectedAgent.id);
+      }
       showStatus("Runtime probado con AI Gateway", "ok");
     } catch (err) {
       setRuntimeTest((prev) => ({ ...prev, result: { error: String(err.message || err) } }));
@@ -337,6 +367,7 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
         <article className="metric-card blue"><span>Activos</span><strong>{number(activeAgents)} / {number(limits?.max_active_ai_agents || 0)}</strong><small>{number(remainingActive)} activaciones disponibles</small></article>
         <article className="metric-card amber"><span>Builder</span><strong>{limits?.builder_enabled ? "ON" : "OFF"}</strong><small>{limits?.notes || "Limites por plan aplicados"}</small></article>
         <article className="metric-card violet"><span>Catalogo</span><strong>{number(toolCatalog.length)}</strong><small>tools disponibles para conectar</small></article>
+        <article className="metric-card rose"><span>Runtime seleccionado</span><strong>{runtimeHealth.label || "Sin datos"}</strong><small>{number(runtimeMetrics.runs_7d || 0)} runs / {number(runtimeMetrics.tokens_7d || 0)} tokens 7d</small></article>
       </section>
 
       <section className="agents-layout builder">
@@ -347,6 +378,7 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
           <div className="agent-card-grid">
             {agents.map((agent) => {
               const metrics = agent.metrics_json || {};
+              const health = asObject(metrics.runtime_health);
               return (
                 <button type="button" className={`agent-card ${selectedAgent?.id === agent.id ? "active" : ""}`} key={agent.id} onClick={() => setSelectedAgentId(agent.id)}>
                   <div className="agent-card-head">
@@ -360,8 +392,9 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
                     {asList(agent.tools_json).length ? <span>{number(asList(agent.tools_json).length)} tools</span> : null}
                   </div>
                   <div className="agent-mini-metrics">
-                    <span>{number(metrics.pending_actions || 0)} acciones</span>
-                    <span>{number(metrics.open_insights || 0)} insights</span>
+                    <span>{number(metrics.runs_7d || metrics.assistant_messages_7d || 0)} runs 7d</span>
+                    <span>{number(metrics.failed_runs_7d || metrics.failed_events_7d || 0)} fallos</span>
+                    {health.label ? <span className={`agent-health-pill ${healthTone(health.status)}`}>{health.label}</span> : null}
                   </div>
                 </button>
               );
@@ -450,14 +483,24 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
 
               <section className="agent-builder-section runtime">
                 <div className="agent-section-label">
-                  <strong>Runtime fase 3</strong>
-                  <span>Los agentes activos de ventas/soporte ya gobiernan respuestas, proveedor, fallback, herramientas y memoria conversacional.</span>
+                  <strong>Runtime y observabilidad fase 4</strong>
+                  <span>Salud, tokens, latencia, fallos y fallback del agente seleccionado.</span>
                 </div>
                 <div className="agent-runtime-status">
                   <span className={`agent-status ${selectedAgent.status === "active" ? "ok" : "paused"}`}>{selectedAgent.status === "active" ? "runtime activo" : "requiere activar"}</span>
                   <span>{runtimeEnabledForSelected ? "conversacional" : "interno/analitico"}</span>
                   <span>{editor.tools.includes("conversation.reply") ? "puede responder" : "sin tool conversation.reply"}</span>
+                  <span className={`agent-status ${healthTone(runtimeHealth.status)}`}>{runtimeHealth.label || "sin salud"}</span>
                 </div>
+                <div className="agent-health-grid">
+                  <div><span>Runs 7d</span><strong>{number(runtimeMetrics.runs_7d || 0)}</strong><small>{number(runtimeMetrics.success_runs_7d || 0)} exitosos</small></div>
+                  <div><span>Errores 7d</span><strong>{number((runtimeMetrics.failed_runs_7d || 0) + (runtimeMetrics.skipped_runs_7d || 0))}</strong><small>{runtimeMetrics.last_error_code || "sin error reciente"}</small></div>
+                  <div><span>Fallback</span><strong>{number(runtimeMetrics.fallback_runs_7d || 0)}</strong><small>{runtimeMetrics.last_provider || "sin proveedor"}</small></div>
+                  <div><span>Latencia</span><strong>{number(runtimeMetrics.avg_latency_ms_7d || 0)}ms</strong><small>{runtimeMetrics.last_model || "sin modelo"}</small></div>
+                </div>
+                {asList(runtimeHealth.issues).length ? (
+                  <div className="agent-issues">{asList(runtimeHealth.issues).map((issue) => <span key={issue}>{issue}</span>)}</div>
+                ) : null}
                 {runtimeEnabledForSelected ? (
                   <div className="agent-runtime-test">
                     <textarea rows={3} value={runtimeTest.message} onChange={(event) => setRuntimeTest((prev) => ({ ...prev, message: event.target.value }))} />
@@ -555,6 +598,23 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
                 </article>
               );
             })}
+          </div>
+        </article>
+
+        <article className="panel glass-card">
+          <div className="panel-head">
+            <div><h2>Runs AI Gateway</h2><span>ultimas ejecuciones del agente</span></div>
+          </div>
+          <div className="agent-run-list">
+            {asList(runtimeSummary?.runs).map((run) => (
+              <div key={run.id} className={`agent-run-row ${run.status}`}>
+                <div><strong>{run.provider_code || "provider"}</strong><span>{run.model || "modelo"}</span></div>
+                <div><b>{run.status}</b><span>{number(run.total_tokens || 0)} tokens</span></div>
+                <div><b>{number(run.latency_ms || 0)}ms</b><span>{run.fallback_used ? "fallback" : "primary"}</span></div>
+                <small>{run.error_code || run.created_at}</small>
+              </div>
+            ))}
+            {!asList(runtimeSummary?.runs).length ? <div className="empty">Sin runs todavia. Usa Probar runtime o espera una conversacion entrante.</div> : null}
           </div>
         </article>
 

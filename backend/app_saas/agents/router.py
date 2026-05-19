@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, Query
 from app_saas.agents.schemas import AgentEventIn, AiAgentCreateIn, AiAgentPatchIn
 from app_saas.agents.service import (
     add_agent_event,
+    agent_runtime_summary,
     builder_catalog,
     create_agent,
     create_from_template,
@@ -72,6 +73,14 @@ def get_agent_detail(agent_id: str, ctx: AuthContext = Depends(get_current_user)
     with db_session() as conn:
         set_tenant_context(conn, ctx.tenant_id)
         return {"ok": True, "agent": get_agent(conn, ctx.tenant_id, agent_id)}
+
+
+@router.get("/{agent_id}/runtime")
+def get_agent_runtime(agent_id: str, ctx: AuthContext = Depends(get_current_user)):
+    with db_session() as conn:
+        set_tenant_context(conn, ctx.tenant_id)
+        summary = agent_runtime_summary(conn, ctx.tenant_id, agent_id)
+        return {"ok": True, "tenant_id": ctx.tenant_id, **summary}
 
 
 @router.patch("/{agent_id}")

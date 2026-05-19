@@ -276,6 +276,8 @@ def _record_run(
 ) -> str:
     input_tokens = int((result.input_tokens if result else 0) or estimate_tokens(request.system_prompt, request.user_prompt))
     output_tokens = int((result.output_tokens if result else 0) or 0)
+    request_metadata = _metadata((request.settings or {}).get("metadata_json"))
+    run_metadata = {**request_metadata, **(result.metadata if result else {}), **(metadata or {})}
     row = conn.execute(
         text(
             """
@@ -312,7 +314,7 @@ def _record_run(
             "fallback_used": bool(fallback_used),
             "error_code": _clean(error_code, 120),
             "error_message": _clean(error_message, 1200),
-            "metadata_json": _json(metadata or (result.metadata if result else {})),
+            "metadata_json": _json(run_metadata),
         },
     ).mappings().first()
     return str(row["id"] if row else "")
@@ -477,4 +479,3 @@ def route_catalog(conn: Connection, tenant_id: str) -> list[dict[str, Any]]:
         {"tenant_id": tenant_id},
     ).mappings().all()
     return [dict(row) for row in rows]
-

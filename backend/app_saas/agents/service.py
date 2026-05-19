@@ -7,6 +7,7 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
+from app_saas.ai_gateway.service import ensure_ai_gateway_tables
 from app_saas.billing.limits import ensure_feature_enabled, ensure_tenant_operational
 
 ALL_AGENT_TYPES = [
@@ -563,6 +564,184 @@ def record_agent_runtime_event(
         summary=summary,
         details=details or {},
     )
+
+
+def _runtime_events(conn: Connection, tenant_id: str, agent_id: str, limit: int = 12) -> list[dict[str, Any]]:
+    _ensure_tables(conn)
+    rows = conn.execute(
+        text(
+            """
+            SELECT id::text, tenant_id::text, agent_id::text, actor_user_id::text,
+                   event_type, summary, details_json, created_at::text
+            FROM saas_ai_agent_events
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND agent_id = CAST(:agent_id AS uuid)
+              AND event_type LIKE 'agent.runtime_%'
+            ORDER BY created_at DESC
+            LIMIT :limit
+            """
+        ),
+        {"tenant_id": tenant_id, "agent_id": agent_id, "limit": max(1, min(int(limit or 12), 100))},
+    ).mappings().all()
+    return [
+        {
+            **dict(row),
+            "details_json": _json_value(row.get("details_json"), {}),
+        }
+        for row in rows
+    ]
+
+
+def _runtime_runs(conn: Connection, tenant_id: str, agent_id: str, limit: int = 12) -> list[dict[str, Any]]:
+    ensure_ai_gateway_tables(conn)
+    rows = conn.execute(
+        text(
+            """
+            SELECT id::text, COALESCE(conversation_id::text, '') AS conversation_id,
+                   agent_type, task_type, route_code, provider_code, model, status,
+                   input_tokens, output_tokens, total_tokens, latency_ms, fallback_used,
+                   error_code, error_message, metadata_json, created_at::text
+            FROM saas_ai_runs
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND metadata_json->>'runtime_agent_id' = :agent_id
+            ORDER BY created_at DESC
+            LIMIT :limit
+            """
+        ),
+        {"tenant_id": tenant_id, "agent_id": agent_id, "limit": max(1, min(int(limit or 12), 100))},
+    ).mappings().all()
+    return [
+        {
+            **dict(row),
+            "metadata_json": _json_value(row.get("metadata_json"), {}),
+        }
+        for row in rows
+    ]
+
+
+def _runtime_health(item: dict[str, Any], metrics: dict[str, Any]) -> dict[str, Any]:
+    issues: list[str] = []
+    status = "healthy"
+    agent_type = str(item.get("agent_type") or "")
+    channels = {str(value or "").strip().lower() for value in _json_value(item.get("channels_json"), [])}
+    tools = {str(value or "").strip().lower() for value in _json_value(item.get("tools_json"), [])}
+    approval = _json_value(item.get("approval_policy_json"), {})
+    if item.get("status") != "active":
+        issues.append("agent_not_active")
+    if agent_type in {"sales", "support"}:
+        if not (channels & {"whatsapp", "instagram", "facebook", "web"}):
+            issues.append("no_conversational_channel")
+        if tools and "conversation.reply" not in tools:
+            issues.append("conversation_reply_tool_missing")
+        if isinstance(approval, dict) and approval.get("can_send_messages") is False:
+            issues.append("send_permission_disabled")
+    runs_7d = int(metrics.get("runs_7d") or 0)
+    failed_7d = int(metrics.get("failed_runs_7d") or 0) + int(metrics.get("skipped_runs_7d") or 0)
+    success_7d = int(metrics.get("success_runs_7d") or 0)
+    if runs_7d and failed_7d and not success_7d:
+        issues.append("runtime_failing")
+        status = "critical"
+    elif failed_7d:
+        issues.append("runtime_has_errors")
+        status = "warning"
+    if issues and status == "healthy":
+        status = "warning"
+    if item.get("status") == "active" and agent_type in {"sales", "support"} and not runs_7d and not int(metrics.get("runtime_events_7d") or 0):
+        status = "idle"
+        issues.append("no_recent_runtime_activity")
+    labels = {
+        "healthy": "Operativo",
+        "warning": "Revisar",
+        "critical": "Critico",
+        "idle": "Sin actividad",
+    }
+    return {"status": status, "label": labels.get(status, status), "issues": issues}
+
+
+def _runtime_metrics(conn: Connection, item: dict[str, Any]) -> dict[str, Any]:
+    tenant_id = str(item.get("tenant_id") or "")
+    agent_id = str(item.get("id") or "")
+    if not tenant_id or not agent_id:
+        return {}
+    ensure_ai_gateway_tables(conn)
+    event_row = conn.execute(
+        text(
+            """
+            SELECT
+                COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '7 days')::int AS runtime_events_7d,
+                COUNT(*) FILTER (WHERE event_type = 'agent.runtime_generated' AND created_at >= NOW() - INTERVAL '7 days')::int AS generated_7d,
+                COUNT(*) FILTER (WHERE event_type = 'agent.runtime_completed' AND created_at >= NOW() - INTERVAL '7 days')::int AS completed_7d,
+                COUNT(*) FILTER (WHERE event_type = 'agent.runtime_failed' AND created_at >= NOW() - INTERVAL '7 days')::int AS failed_events_7d,
+                COUNT(*) FILTER (WHERE event_type = 'agent.runtime_skipped' AND created_at >= NOW() - INTERVAL '7 days')::int AS skipped_events_7d,
+                COUNT(*) FILTER (WHERE event_type = 'agent.runtime_tested' AND created_at >= NOW() - INTERVAL '7 days')::int AS tests_7d,
+                COALESCE(MAX(created_at)::text, '') AS last_runtime_event_at
+            FROM saas_ai_agent_events
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND agent_id = CAST(:agent_id AS uuid)
+              AND event_type LIKE 'agent.runtime_%'
+            """
+        ),
+        {"tenant_id": tenant_id, "agent_id": agent_id},
+    ).mappings().first()
+    run_row = conn.execute(
+        text(
+            """
+            SELECT
+                COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '7 days')::int AS runs_7d,
+                COUNT(*) FILTER (WHERE status = 'success' AND created_at >= NOW() - INTERVAL '7 days')::int AS success_runs_7d,
+                COUNT(*) FILTER (WHERE status = 'failed' AND created_at >= NOW() - INTERVAL '7 days')::int AS failed_runs_7d,
+                COUNT(*) FILTER (WHERE status = 'skipped' AND created_at >= NOW() - INTERVAL '7 days')::int AS skipped_runs_7d,
+                COUNT(*) FILTER (WHERE fallback_used AND created_at >= NOW() - INTERVAL '7 days')::int AS fallback_runs_7d,
+                COALESCE(SUM(total_tokens) FILTER (WHERE created_at >= NOW() - INTERVAL '7 days'), 0)::int AS tokens_7d,
+                COALESCE(ROUND(AVG(latency_ms) FILTER (WHERE created_at >= NOW() - INTERVAL '7 days')), 0)::int AS avg_latency_ms_7d,
+                COALESCE(MAX(created_at)::text, '') AS last_ai_run_at
+            FROM saas_ai_runs
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND metadata_json->>'runtime_agent_id' = :agent_id
+            """
+        ),
+        {"tenant_id": tenant_id, "agent_id": agent_id},
+    ).mappings().first()
+    last_run = conn.execute(
+        text(
+            """
+            SELECT provider_code, model, status, error_code, error_message, created_at::text
+            FROM saas_ai_runs
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND metadata_json->>'runtime_agent_id' = :agent_id
+            ORDER BY created_at DESC
+            LIMIT 1
+            """
+        ),
+        {"tenant_id": tenant_id, "agent_id": agent_id},
+    ).mappings().first()
+    metrics = {key: (int(value or 0) if str(key).endswith("_7d") or key in {"tokens_7d", "avg_latency_ms_7d"} else value) for key, value in dict(event_row or {}).items()}
+    for key, value in dict(run_row or {}).items():
+        metrics[key] = int(value or 0) if str(key).endswith("_7d") or key in {"tokens_7d", "avg_latency_ms_7d"} else value
+    if last_run:
+        metrics.update(
+            {
+                "last_provider": str(last_run.get("provider_code") or ""),
+                "last_model": str(last_run.get("model") or ""),
+                "last_run_status": str(last_run.get("status") or ""),
+                "last_error_code": str(last_run.get("error_code") or ""),
+                "last_error_message": str(last_run.get("error_message") or ""),
+            }
+        )
+    metrics["runtime_health"] = _runtime_health(item, metrics)
+    return metrics
+
+
+def agent_runtime_summary(conn: Connection, tenant_id: str, agent_id: str) -> dict[str, Any]:
+    item = get_agent(conn, tenant_id, agent_id)
+    metrics = _runtime_metrics(conn, item)
+    return {
+        "agent": {**item, "metrics_json": {**(item.get("metrics_json") or {}), **metrics}},
+        "metrics": metrics,
+        "runs": _runtime_runs(conn, tenant_id, agent_id, limit=12),
+        "events": _runtime_events(conn, tenant_id, agent_id, limit=12),
+        "health": metrics.get("runtime_health") or _runtime_health(item, metrics),
+    }
 
 
 def _template_payload(agent_type: str) -> dict[str, Any]:
