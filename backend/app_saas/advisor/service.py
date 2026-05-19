@@ -148,6 +148,58 @@ def ensure_advisor_tables(conn: Connection) -> None:
             """
         )
     )
+    conn.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS saas_advisor_audit_events (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                tenant_id UUID NOT NULL REFERENCES saas_tenants(id) ON DELETE CASCADE,
+                user_id UUID NULL REFERENCES saas_users(id) ON DELETE SET NULL,
+                thread_id UUID NULL REFERENCES saas_advisor_threads(id) ON DELETE SET NULL,
+                message_id UUID NULL REFERENCES saas_advisor_messages(id) ON DELETE SET NULL,
+                action_id UUID NULL REFERENCES saas_advisor_actions(id) ON DELETE SET NULL,
+                event_type TEXT NOT NULL,
+                severity TEXT NOT NULL DEFAULT 'info',
+                summary TEXT NOT NULL DEFAULT '',
+                details_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_saas_advisor_audit_tenant_created
+            ON saas_advisor_audit_events (tenant_id, created_at DESC)
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS saas_advisor_feedback (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                tenant_id UUID NOT NULL REFERENCES saas_tenants(id) ON DELETE CASCADE,
+                user_id UUID NULL REFERENCES saas_users(id) ON DELETE SET NULL,
+                message_id UUID NOT NULL REFERENCES saas_advisor_messages(id) ON DELETE CASCADE,
+                rating TEXT NOT NULL,
+                note TEXT NOT NULL DEFAULT '',
+                created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                UNIQUE (tenant_id, user_id, message_id)
+            )
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_saas_advisor_feedback_tenant_rating
+            ON saas_advisor_feedback (tenant_id, rating, updated_at DESC)
+            """
+        )
+    )
 
 
 def _ensure_insight_tables(conn: Connection) -> None:
@@ -259,6 +311,21 @@ def _action_out(row: dict[str, Any]) -> dict[str, Any]:
         "execution_result_json": _safe_json(row.get("execution_result_json")),
         "created_at": str(row.get("created_at") or ""),
         "updated_at": str(row.get("updated_at") or ""),
+    }
+
+
+def _event_out(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(row.get("id") or ""),
+        "event_type": str(row.get("event_type") or ""),
+        "severity": str(row.get("severity") or "info"),
+        "summary": str(row.get("summary") or ""),
+        "details_json": _safe_json(row.get("details_json")),
+        "thread_id": str(row.get("thread_id") or ""),
+        "message_id": str(row.get("message_id") or ""),
+        "action_id": str(row.get("action_id") or ""),
+        "user_id": str(row.get("user_id") or ""),
+        "created_at": str(row.get("created_at") or ""),
     }
 
 
@@ -913,6 +980,187 @@ def _source_action_type(source_type: str, row: dict[str, Any], action: dict[str,
     return _clean(row.get("recommendation_type") or row.get("insight_type") or source_type, 100) or "advisor_action"
 
 
+def record_advisor_event(
+    conn: Connection,
+    tenant_id: str,
+    *,
+    event_type: str,
+    summary: str,
+    user_id: str = "",
+    severity: str = "info",
+    details: dict[str, Any] | None = None,
+    thread_id: str = "",
+    message_id: str = "",
+    action_id: str = "",
+) -> dict[str, Any]:
+    ensure_advisor_tables(conn)
+    row = conn.execute(
+        text(
+            """
+            INSERT INTO saas_advisor_audit_events (
+                tenant_id, user_id, thread_id, message_id, action_id, event_type, severity, summary, details_json
+            )
+            VALUES (
+                CAST(:tenant_id AS uuid),
+                CAST(NULLIF(:user_id, '') AS uuid),
+                CAST(NULLIF(:thread_id, '') AS uuid),
+                CAST(NULLIF(:message_id, '') AS uuid),
+                CAST(NULLIF(:action_id, '') AS uuid),
+                :event_type, :severity, :summary, CAST(:details_json AS jsonb)
+            )
+            RETURNING id::text, event_type, severity, summary, details_json,
+                      thread_id::text, message_id::text, action_id::text, user_id::text, created_at::text
+            """
+        ),
+        {
+            "tenant_id": tenant_id,
+            "user_id": _clean(user_id, 80),
+            "thread_id": _clean(thread_id, 80),
+            "message_id": _clean(message_id, 80),
+            "action_id": _clean(action_id, 80),
+            "event_type": _clean(event_type, 100) or "advisor_event",
+            "severity": _clean(severity, 40) or "info",
+            "summary": _clean(summary, 500),
+            "details_json": _json(details or {}),
+        },
+    ).mappings().first()
+    return _event_out(_row_dict(row))
+
+
+def list_advisor_events(conn: Connection, tenant_id: str, limit: int = 30) -> list[dict[str, Any]]:
+    ensure_advisor_tables(conn)
+    rows = conn.execute(
+        text(
+            """
+            SELECT id::text, event_type, severity, summary, details_json,
+                   thread_id::text, message_id::text, action_id::text, user_id::text, created_at::text
+            FROM saas_advisor_audit_events
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+            ORDER BY created_at DESC
+            LIMIT :limit
+            """
+        ),
+        {"tenant_id": tenant_id, "limit": max(1, min(int(limit or 30), 100))},
+    ).mappings().all()
+    return [_event_out(_row_dict(row)) for row in rows]
+
+
+def advisor_metrics(conn: Connection, tenant_id: str) -> dict[str, Any]:
+    ensure_advisor_tables(conn)
+    action_rows = conn.execute(
+        text(
+            """
+            SELECT status, COUNT(*)::int AS total
+            FROM saas_advisor_actions
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+            GROUP BY status
+            """
+        ),
+        {"tenant_id": tenant_id},
+    ).mappings().all()
+    feedback_rows = conn.execute(
+        text(
+            """
+            SELECT rating, COUNT(*)::int AS total
+            FROM saas_advisor_feedback
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND updated_at >= NOW() - INTERVAL '30 days'
+            GROUP BY rating
+            """
+        ),
+        {"tenant_id": tenant_id},
+    ).mappings().all()
+    open_counts = conn.execute(
+        text(
+            """
+            SELECT
+                (SELECT COUNT(*)::int FROM saas_ai_insights WHERE tenant_id = CAST(:tenant_id AS uuid) AND status = 'open') AS open_insights,
+                (SELECT COUNT(*)::int FROM saas_ai_recommendations WHERE tenant_id = CAST(:tenant_id AS uuid) AND status = 'open') AS open_recommendations,
+                (SELECT COUNT(*)::int FROM saas_advisor_audit_events WHERE tenant_id = CAST(:tenant_id AS uuid) AND created_at >= NOW() - INTERVAL '24 hours') AS events_24h,
+                (SELECT COUNT(*)::int FROM saas_advisor_messages WHERE tenant_id = CAST(:tenant_id AS uuid) AND role = 'assistant' AND created_at >= NOW() - INTERVAL '7 days') AS assistant_messages_7d
+            """
+        ),
+        {"tenant_id": tenant_id},
+    ).mappings().first()
+    actions_by_status = {str(row["status"]): int(row["total"] or 0) for row in action_rows}
+    feedback_by_rating = {str(row["rating"]): int(row["total"] or 0) for row in feedback_rows}
+    return {
+        **_row_dict(open_counts),
+        "actions": actions_by_status,
+        "feedback": feedback_by_rating,
+        "pending_actions": int(actions_by_status.get("draft", 0)) + int(actions_by_status.get("pending_approval", 0)),
+        "approved_actions": int(actions_by_status.get("approved", 0)),
+        "executed_actions": int(actions_by_status.get("executed", 0)),
+        "negative_feedback": int(feedback_by_rating.get("not_helpful", 0)) + int(feedback_by_rating.get("unsafe", 0)),
+    }
+
+
+def submit_advisor_feedback(
+    conn: Connection,
+    tenant_id: str,
+    user_id: str,
+    message_id: str,
+    *,
+    rating: str,
+    note: str = "",
+) -> dict[str, Any]:
+    ensure_advisor_tables(conn)
+    allowed = {"helpful", "not_helpful", "unsafe", "irrelevant"}
+    rating_value = _clean(rating, 40).lower()
+    if rating_value not in allowed:
+        rating_value = "not_helpful"
+    target = conn.execute(
+        text(
+            """
+            SELECT id::text, thread_id::text, role
+            FROM saas_advisor_messages
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND id = CAST(:message_id AS uuid)
+            LIMIT 1
+            """
+        ),
+        {"tenant_id": tenant_id, "message_id": message_id},
+    ).mappings().first()
+    target_row = _row_dict(target)
+    if not target_row:
+        return {}
+    row = conn.execute(
+        text(
+            """
+            INSERT INTO saas_advisor_feedback (
+                tenant_id, user_id, message_id, rating, note, updated_at
+            )
+            VALUES (
+                CAST(:tenant_id AS uuid), CAST(:user_id AS uuid), CAST(:message_id AS uuid), :rating, :note, NOW()
+            )
+            ON CONFLICT (tenant_id, user_id, message_id)
+            DO UPDATE SET rating = EXCLUDED.rating, note = EXCLUDED.note, updated_at = NOW()
+            RETURNING id::text, message_id::text, rating, note, created_at::text, updated_at::text
+            """
+        ),
+        {
+            "tenant_id": tenant_id,
+            "user_id": user_id,
+            "message_id": message_id,
+            "rating": rating_value,
+            "note": _clean(note, 1000),
+        },
+    ).mappings().first()
+    feedback = _row_dict(row)
+    record_advisor_event(
+        conn,
+        tenant_id,
+        user_id=user_id,
+        thread_id=str(target_row.get("thread_id") or ""),
+        message_id=message_id,
+        event_type="feedback_recorded",
+        severity="warning" if rating_value in {"unsafe", "not_helpful"} else "info",
+        summary=f"Feedback Advisor: {rating_value}",
+        details={"rating": rating_value, "note": _clean(note, 1000), "message_role": target_row.get("role")},
+    )
+    return feedback
+
+
 def create_action_from_recommendation(
     conn: Connection,
     tenant_id: str,
@@ -971,7 +1219,17 @@ def create_action_from_recommendation(
         },
     ).mappings().first()
     if result:
-        return _action_out(_row_dict(result))
+        item = _action_out(_row_dict(result))
+        record_advisor_event(
+            conn,
+            tenant_id,
+            user_id=user_id,
+            action_id=item["id"],
+            event_type="action_prepared",
+            summary=f"Accion preparada desde recomendacion: {item['title']}",
+            details={"source": "recommendation", "recommendation_id": recommendation_id, "action_type": item["action_type"]},
+        )
+        return item
     existing = conn.execute(
         text(
             """
@@ -989,7 +1247,18 @@ def create_action_from_recommendation(
         ),
         {"tenant_id": tenant_id, "recommendation_id": recommendation_id},
     ).mappings().first()
-    return _action_out(_row_dict(existing))
+    item = _action_out(_row_dict(existing))
+    if item:
+        record_advisor_event(
+            conn,
+            tenant_id,
+            user_id=user_id,
+            action_id=item["id"],
+            event_type="action_reused",
+            summary=f"Accion existente reutilizada: {item['title']}",
+            details={"source": "recommendation", "recommendation_id": recommendation_id},
+        )
+    return item
 
 
 def create_action_from_insight(conn: Connection, tenant_id: str, user_id: str, insight_id: str) -> dict[str, Any]:
@@ -1045,7 +1314,17 @@ def create_action_from_insight(conn: Connection, tenant_id: str, user_id: str, i
         },
     ).mappings().first()
     if result:
-        return _action_out(_row_dict(result))
+        item = _action_out(_row_dict(result))
+        record_advisor_event(
+            conn,
+            tenant_id,
+            user_id=user_id,
+            action_id=item["id"],
+            event_type="action_prepared",
+            summary=f"Accion preparada desde insight: {item['title']}",
+            details={"source": "insight", "insight_id": insight_id, "action_type": item["action_type"]},
+        )
+        return item
     existing = conn.execute(
         text(
             """
@@ -1063,7 +1342,18 @@ def create_action_from_insight(conn: Connection, tenant_id: str, user_id: str, i
         ),
         {"tenant_id": tenant_id, "insight_id": insight_id},
     ).mappings().first()
-    return _action_out(_row_dict(existing))
+    item = _action_out(_row_dict(existing))
+    if item:
+        record_advisor_event(
+            conn,
+            tenant_id,
+            user_id=user_id,
+            action_id=item["id"],
+            event_type="action_reused",
+            summary=f"Accion existente reutilizada: {item['title']}",
+            details={"source": "insight", "insight_id": insight_id},
+        )
+    return item
 
 
 def create_custom_action(
@@ -1109,7 +1399,18 @@ def create_custom_action(
             "execution_result_json": _json({"state": "awaiting_human_approval"}),
         },
     ).mappings().first()
-    return _action_out(_row_dict(row))
+    item = _action_out(_row_dict(row))
+    if item:
+        record_advisor_event(
+            conn,
+            tenant_id,
+            user_id=user_id,
+            action_id=item["id"],
+            event_type="action_prepared",
+            summary=f"Accion manual preparada: {item['title']}",
+            details={"source": "custom", "action_type": item["action_type"], "risk_level": item["risk_level"]},
+        )
+    return item
 
 
 def approve_action(conn: Connection, tenant_id: str, user_id: str, action_id: str) -> dict[str, Any]:
@@ -1139,7 +1440,18 @@ def approve_action(conn: Connection, tenant_id: str, user_id: str, action_id: st
         ),
         {"tenant_id": tenant_id, "user_id": user_id, "action_id": action_id},
     ).mappings().first()
-    return _action_out(_row_dict(row))
+    item = _action_out(_row_dict(row))
+    if item:
+        record_advisor_event(
+            conn,
+            tenant_id,
+            user_id=user_id,
+            action_id=item["id"],
+            event_type="action_approved",
+            summary=f"Accion aprobada: {item['title']}",
+            details={"action_type": item["action_type"], "risk_level": item["risk_level"]},
+        )
+    return item
 
 
 def dismiss_action(conn: Connection, tenant_id: str, action_id: str) -> dict[str, Any]:
@@ -1156,7 +1468,17 @@ def dismiss_action(conn: Connection, tenant_id: str, action_id: str) -> dict[str
         ),
         {"tenant_id": tenant_id, "action_id": action_id},
     ).mappings().first()
-    return _row_dict(row)
+    item = _row_dict(row)
+    if item:
+        record_advisor_event(
+            conn,
+            tenant_id,
+            action_id=action_id,
+            event_type="action_dismissed",
+            summary="Accion del Advisor descartada",
+            details={"action_id": action_id},
+        )
+    return item
 
 
 def _load_action(conn: Connection, tenant_id: str, action_id: str) -> dict[str, Any]:
@@ -1386,11 +1708,40 @@ def execute_action(conn: Connection, tenant_id: str, user_id: str, action_id: st
                 "action_type": action_type,
             }
             updated = _complete_action_execution(conn, tenant_id, action_id, status="approved", result=result)
+            record_advisor_event(
+                conn,
+                tenant_id,
+                user_id=user_id,
+                action_id=action_id,
+                event_type="action_execution_blocked",
+                severity="warning",
+                summary=f"Executor no disponible para accion: {action_type}",
+                details=result,
+            )
             return {"ok": False, "error": "unsupported_action_type", "action": updated}
     except Exception as exc:
         result = {"state": "execution_failed", "error": _clean(exc, 1000), "action_type": action_type}
         updated = _complete_action_execution(conn, tenant_id, action_id, status="approved", result=result)
+        record_advisor_event(
+            conn,
+            tenant_id,
+            user_id=user_id,
+            action_id=action_id,
+            event_type="action_execution_failed",
+            severity="critical",
+            summary=f"Fallo ejecutando accion Advisor: {action_type}",
+            details=result,
+        )
         return {"ok": False, "error": "execution_failed", "action": updated}
+    record_advisor_event(
+        conn,
+        tenant_id,
+        user_id=user_id,
+        action_id=action_id,
+        event_type="action_executed",
+        summary=f"Accion ejecutada: {updated.get('title') or action_type}",
+        details=updated.get("execution_result_json") or {},
+    )
     return {"ok": True, "action": updated, "result": updated.get("execution_result_json") or {}}
 
 
@@ -1458,6 +1809,17 @@ def advisor_chat(
             content=fallback_answer,
             metadata={"fallback_reason": reason, "context_type": context_type, "context_id": context_id},
         )
+        record_advisor_event(
+            conn,
+            tenant_id,
+            user_id=user_id,
+            thread_id=str(thread["id"]),
+            message_id=str(assistant_msg.get("id") or ""),
+            event_type="chat_fallback",
+            severity="warning",
+            summary="Advisor respondio con fallback por falta de modelo o credencial",
+            details={"reason": reason, "module": module, "context_type": context_type, "context_id": context_id},
+        )
         memory = update_advisor_memory(
             conn,
             tenant_id=tenant_id,
@@ -1495,6 +1857,24 @@ def advisor_chat(
             "context_id": context_id,
         },
         ai_run_id=str(gateway.get("run_id") or ""),
+    )
+    record_advisor_event(
+        conn,
+        tenant_id,
+        user_id=user_id,
+        thread_id=str(thread["id"]),
+        message_id=str(assistant_msg.get("id") or ""),
+        event_type="chat_response",
+        summary="Advisor genero una respuesta",
+        details={
+            "provider_code": gateway.get("provider_code"),
+            "model": gateway.get("model"),
+            "fallback_used": gateway.get("fallback_used"),
+            "latency_ms": gateway.get("latency_ms"),
+            "module": module,
+            "context_type": context_type,
+            "context_id": context_id,
+        },
     )
     memory = update_advisor_memory(
         conn,

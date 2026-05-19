@@ -812,6 +812,56 @@ nav { display: grid; gap: 8px; width: 100%; }
   background: var(--mint);
   box-shadow: 0 0 0 6px rgba(52,211,153,0.10);
 }
+.advisor-pulse {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+.advisor-pulse div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  border: 1px solid rgba(183,231,224,0.12);
+  border-radius: 14px;
+  padding: 8px;
+  background: rgba(255,255,255,0.045);
+}
+.advisor-pulse strong {
+  color: var(--ink);
+  font-size: 15px;
+}
+.advisor-pulse span {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 900;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.advisor-activity {
+  display: grid;
+  gap: 6px;
+  border: 1px solid rgba(96,165,250,0.18);
+  border-radius: 18px;
+  padding: 9px 10px;
+  background: rgba(96,165,250,0.06);
+}
+.advisor-activity strong {
+  color: var(--blue);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.advisor-activity span {
+  display: block;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.advisor-activity span.warning { color: var(--warn); }
+.advisor-activity span.critical { color: var(--danger); }
 .advisor-signals {
   display: grid;
   gap: 8px;
@@ -1026,6 +1076,22 @@ nav { display: grid; gap: 8px; width: 100%; }
   color: var(--soft);
   line-height: 1.45;
   white-space: pre-wrap;
+}
+.advisor-feedback {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+.advisor-feedback button {
+  min-height: 26px;
+  padding: 0 9px;
+  border-radius: 999px;
+  font-size: 10px;
+}
+.advisor-feedback button.active {
+  border-color: rgba(52,211,153,0.45);
+  color: var(--mint);
+  background: rgba(52,211,153,0.12);
 }
 .advisor-empty {
   display: grid;

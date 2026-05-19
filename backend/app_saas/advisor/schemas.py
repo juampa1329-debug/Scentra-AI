@@ -49,3 +49,8 @@ class AdvisorActionCreateIn(BaseModel):
     payload_json: dict[str, Any] = Field(default_factory=dict)
     impact: str = Field(default="medium", max_length=40)
     risk_level: str = Field(default="medium", max_length=40)
+
+
+class AdvisorFeedbackIn(BaseModel):
+    rating: str = Field(max_length=40)
+    note: str = Field(default="", max_length=1000)

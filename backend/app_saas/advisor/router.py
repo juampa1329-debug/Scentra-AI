@@ -6,9 +6,10 @@ import time
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
 
-from app_saas.advisor.schemas import AdvisorActionCreateIn, AdvisorChatIn, AdvisorChatOut
+from app_saas.advisor.schemas import AdvisorActionCreateIn, AdvisorChatIn, AdvisorChatOut, AdvisorFeedbackIn
 from app_saas.advisor.service import (
     approve_action,
+    advisor_metrics,
     advisor_chat,
     advisor_memory,
     chunk_advisor_text,
@@ -20,10 +21,12 @@ from app_saas.advisor.service import (
     dismiss_recommendation,
     execute_action,
     generate_seed_insights,
+    list_advisor_events,
     list_actions,
     list_insights,
     list_recommendations,
     list_threads,
+    submit_advisor_feedback,
     thread_messages,
 )
 from app_saas.db import db_session, set_tenant_context
@@ -58,6 +61,42 @@ def get_advisor_memory(ctx: AuthContext = Depends(get_current_user)):
     with db_session() as conn:
         set_tenant_context(conn, ctx.tenant_id)
         return {"ok": True, "memory": advisor_memory(conn, ctx.tenant_id, ctx.user_id)}
+
+
+@router.get("/metrics")
+def get_advisor_metrics(ctx: AuthContext = Depends(get_current_user)):
+    with db_session() as conn:
+        set_tenant_context(conn, ctx.tenant_id)
+        return {"ok": True, "metrics": advisor_metrics(conn, ctx.tenant_id)}
+
+
+@router.get("/activity")
+def get_advisor_activity(
+    limit: int = Query(default=30, ge=1, le=100),
+    ctx: AuthContext = Depends(get_current_user),
+):
+    with db_session() as conn:
+        set_tenant_context(conn, ctx.tenant_id)
+        return {"ok": True, "events": list_advisor_events(conn, ctx.tenant_id, limit=limit)}
+
+
+@router.post("/messages/{message_id}/feedback")
+def post_advisor_feedback(
+    message_id: str,
+    payload: AdvisorFeedbackIn,
+    ctx: AuthContext = Depends(require_role("owner", "admin", "supervisor", "agent")),
+):
+    with db_session() as conn:
+        set_tenant_context(conn, ctx.tenant_id)
+        item = submit_advisor_feedback(
+            conn,
+            ctx.tenant_id,
+            ctx.user_id,
+            message_id,
+            rating=payload.rating,
+            note=payload.note,
+        )
+        return {"ok": bool(item), "feedback": item}
 
 
 @router.post("/chat", response_model=AdvisorChatOut)
