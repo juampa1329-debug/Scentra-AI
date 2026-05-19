@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, Query
 from app_saas.agents.schemas import AgentEventIn, AiAgentCreateIn, AiAgentPatchIn
 from app_saas.agents.service import (
     add_agent_event,
+    builder_catalog,
     create_agent,
     create_from_template,
     get_agent,
@@ -31,6 +32,11 @@ def get_agent_limits(ctx: AuthContext = Depends(get_current_user)):
     with db_session() as conn:
         set_tenant_context(conn, ctx.tenant_id)
         return {"ok": True, "limits": plan_limits(conn, ctx.tenant_id)}
+
+
+@router.get("/catalog")
+def get_agent_builder_catalog(ctx: AuthContext = Depends(get_current_user)):
+    return {"ok": True, "tenant_id": ctx.tenant_id, "catalog": builder_catalog()}
 
 
 @router.get("")

@@ -24,6 +24,78 @@ ALL_AGENT_TYPES = [
 
 EDITABLE_STATUSES = {"draft", "active", "paused", "archived"}
 
+CHANNEL_CATALOG: list[dict[str, str]] = [
+    {"code": "global", "label": "Global", "description": "Analisis y acciones internas sin canal conversacional directo."},
+    {"code": "whatsapp", "label": "WhatsApp", "description": "Conversaciones, plantillas, remarketing y mensajes Cloud API."},
+    {"code": "instagram", "label": "Instagram", "description": "DMs, comentarios, menciones y activos Instagram Business."},
+    {"code": "facebook", "label": "Facebook", "description": "Messenger, comentarios y paginas Meta conectadas."},
+    {"code": "web", "label": "Web", "description": "Widget, formularios, sitio web y landing pages."},
+]
+
+TOOL_CATALOG: list[dict[str, str]] = [
+    {"code": "advisor.actions", "group": "Advisor", "label": "Acciones Advisor", "description": "Crear acciones con aprobacion humana."},
+    {"code": "advisor.summarize", "group": "Advisor", "label": "Resumenes", "description": "Crear balances ejecutivos y resumenes operativos."},
+    {"code": "analytics.read", "group": "Analytics", "label": "Leer analytics", "description": "Consultar KPIs, conversion y actividad."},
+    {"code": "campaigns.create_draft", "group": "Campanas", "label": "Crear borradores", "description": "Proponer campanas antes de publicarlas."},
+    {"code": "campaigns.suggest", "group": "Campanas", "label": "Sugerir campanas", "description": "Recomendar campanas segun comportamiento."},
+    {"code": "catalog.search", "group": "Commerce", "label": "Buscar catalogo", "description": "Consultar productos WooCommerce o Shopify."},
+    {"code": "conversation.reply", "group": "Inbox", "label": "Responder conversaciones", "description": "Preparar o enviar respuestas conversacionales."},
+    {"code": "crm.read", "group": "CRM", "label": "Leer CRM", "description": "Consultar clientes, etapas, etiquetas e historial."},
+    {"code": "crm.update", "group": "CRM", "label": "Actualizar CRM", "description": "Actualizar datos del cliente con reglas de seguridad."},
+    {"code": "diagnostics.read", "group": "Operaciones", "label": "Leer diagnosticos", "description": "Consultar health checks y errores recientes."},
+    {"code": "knowledge.audit", "group": "Knowledge", "label": "Auditar knowledge", "description": "Detectar huecos o fuentes desactualizadas."},
+    {"code": "knowledge.search", "group": "Knowledge", "label": "Buscar knowledge", "description": "Usar RAG y fuentes internas."},
+    {"code": "logs.read", "group": "Operaciones", "label": "Leer logs", "description": "Revisar eventos operacionales."},
+    {"code": "meta.checks", "group": "Meta", "label": "Checks Meta", "description": "Validar tokens, suscripciones y webhooks Meta."},
+    {"code": "rag.evaluate", "group": "Knowledge", "label": "Evaluar RAG", "description": "Medir calidad de recuperacion de contexto."},
+    {"code": "remarketing.suggest", "group": "Remarketing", "label": "Sugerir remarketing", "description": "Proponer recuperaciones y flujos por etapa."},
+    {"code": "reports.create", "group": "Analytics", "label": "Crear reportes", "description": "Preparar reportes ejecutivos."},
+    {"code": "segments.create", "group": "CRM", "label": "Crear segmentos", "description": "Proponer segmentos para campanas y seguimiento."},
+    {"code": "templates.read", "group": "Plantillas", "label": "Leer plantillas", "description": "Consultar plantillas aprobadas, pendientes y rechazadas."},
+    {"code": "tickets.create", "group": "Soporte", "label": "Crear tickets", "description": "Escalar casos de soporte."},
+    {"code": "triggers.suggest", "group": "Triggers", "label": "Sugerir triggers", "description": "Proponer reglas por palabra clave, tiempo o estado."},
+    {"code": "webhooks.repair", "group": "Operaciones", "label": "Reparar webhooks", "description": "Preparar reparaciones seguras para webhooks."},
+    {"code": "workflows.create_draft", "group": "Workflows", "label": "Crear workflow draft", "description": "Disenar flujos sin publicarlos automaticamente."},
+]
+
+PROVIDER_ROUTE_CATALOG: list[dict[str, str]] = [
+    {"code": "advisor", "label": "Advisor", "description": "Analisis estrategico y recomendaciones."},
+    {"code": "sales", "label": "Ventas", "description": "Conversaciones comerciales y cierre."},
+    {"code": "support", "label": "Soporte", "description": "FAQs, politicas y escalacion."},
+    {"code": "classification", "label": "Clasificacion", "description": "Scoring, etiquetas y segmentacion."},
+    {"code": "campaigns", "label": "Campanas", "description": "Estrategia, copies y automatizaciones."},
+    {"code": "analysis", "label": "Analisis", "description": "Patrones, riesgo y oportunidades."},
+    {"code": "ops", "label": "Operaciones", "description": "Diagnostico tecnico y self-healing."},
+    {"code": "summaries", "label": "Resumenes", "description": "Reportes y balances ejecutivos."},
+    {"code": "rag", "label": "RAG", "description": "Knowledge base y respuestas fundamentadas."},
+    {"code": "workflow_reasoning", "label": "Workflows", "description": "Diseno de flujos y reasoning operacional."},
+]
+
+AI_PROVIDER_CATALOG: list[dict[str, str]] = [
+    {"code": "gemini", "label": "Google Gemini", "description": "Buen balance para resumenes, RAG y respuestas comerciales."},
+    {"code": "mistral", "label": "Mistral", "description": "Clasificacion, scoring y tareas de bajo costo."},
+    {"code": "openrouter", "label": "OpenRouter", "description": "Fallback flexible y acceso a catalogo amplio."},
+    {"code": "kimi", "label": "Kimi", "description": "Reasoning, contexto largo y analisis complejo."},
+]
+
+MEMORY_FLAG_CATALOG: list[dict[str, str]] = [
+    {"code": "short_term", "label": "Memoria corta", "description": "Usa el contexto reciente del modulo o conversacion."},
+    {"code": "semantic", "label": "Memoria semantica", "description": "Recupera conocimiento relevante por similitud."},
+    {"code": "business_summary", "label": "Resumen de negocio", "description": "Mantiene una vision ejecutiva del tenant."},
+    {"code": "customer_profile", "label": "Perfil de cliente", "description": "Usa datos CRM e historial del contacto."},
+    {"code": "knowledge_grounded", "label": "Basado en knowledge", "description": "Prioriza respuestas soportadas por fuentes."},
+    {"code": "campaign_history", "label": "Historial de campanas", "description": "Considera campanas y resultados previos."},
+    {"code": "incident_history", "label": "Historial de incidentes", "description": "Considera errores y reparaciones anteriores."},
+    {"code": "workflow_history", "label": "Historial de workflows", "description": "Aprende de automatizaciones existentes."},
+]
+
+APPROVAL_FLAG_CATALOG: list[dict[str, str]] = [
+    {"code": "requires_human_approval", "label": "Requiere aprobacion humana", "description": "Las acciones sensibles quedan como borrador."},
+    {"code": "can_execute_safe_actions", "label": "Puede ejecutar acciones seguras", "description": "Permite acciones no destructivas aprobadas por politica."},
+    {"code": "can_send_messages", "label": "Puede enviar mensajes", "description": "Habilita respuestas conversacionales cuando el runtime lo soporte."},
+    {"code": "can_update_crm", "label": "Puede actualizar CRM", "description": "Permite modificar fichas de cliente con auditoria."},
+]
+
 AGENT_TEMPLATES: dict[str, dict[str, Any]] = {
     "advisor": {
         "agent_type": "advisor",
@@ -431,6 +503,17 @@ def agent_counts(conn: Connection, tenant_id: str) -> dict[str, int]:
 
 def list_templates() -> list[dict[str, Any]]:
     return [dict(template) for template in AGENT_TEMPLATES.values()]
+
+
+def builder_catalog() -> dict[str, Any]:
+    return {
+        "channels": CHANNEL_CATALOG,
+        "tools": TOOL_CATALOG,
+        "provider_routes": PROVIDER_ROUTE_CATALOG,
+        "providers": AI_PROVIDER_CATALOG,
+        "memory_flags": MEMORY_FLAG_CATALOG,
+        "approval_flags": APPROVAL_FLAG_CATALOG,
+    }
 
 
 def _template_payload(agent_type: str) -> dict[str, Any]:
