@@ -4,6 +4,7 @@ import LabelsPanel from "./LabelsPanel.jsx";
 import CampaignsPanel from "./CampaignsPanel.jsx";
 import BroadcastPanel from "./BroadcastPanel.jsx";
 import AdsPanel from "./AdsPanel.jsx";
+import AiAgentsPanel from "./AiAgentsPanel.jsx";
 
 const API_BASE = (import.meta.env.VITE_API_BASE || "").replace(/\/$/, "");
 const TOKEN_KEY = "scentra_ai_access_token";
@@ -48,6 +49,7 @@ const NAV_ITEMS = [
   { key: "campaigns", label: "CRM", icon: "↯" },
   { key: "broadcast", label: "Masiva", icon: "◁" },
   { key: "ads", label: "Ads", icon: "▤" },
+  { key: "agents", label: "AI Agents", icon: "✦" },
   { key: "settings", label: "Ajustes", icon: "⚙" },
 ];
 
@@ -85,6 +87,8 @@ function formatApiError(data, fallback) {
   }
   if (detail && typeof detail === "object") {
     if (detail.code === "plan_limit_reached") return `Limite de plan alcanzado: ${detail.metric} (${detail.used}/${detail.limit}).`;
+    if (detail.code === "ai_agent_limit_reached") return `Limite de agentes AI alcanzado: ${detail.used}/${detail.limit}.`;
+    if (detail.code === "active_ai_agent_limit_reached") return `Limite de agentes AI activos alcanzado: ${detail.used}/${detail.limit}. Pausa otro agente antes de activar este.`;
     if (detail.code === "feature_not_enabled") return `Modulo no incluido o desactivado: ${FEATURE_LABELS[detail.feature] || detail.feature}.`;
     if (detail.code === "tenant_not_operational") return `Empresa no habilitada para operar. Estado: ${detail.status || "desconocido"}.`;
     return detail.message || detail.code || fallback;
@@ -501,6 +505,7 @@ function App() {
     campaigns: hasFeature("triggers") || hasFeature("remarketing"),
     broadcast: hasFeature("broadcast"),
     ads: hasFeature("ads"),
+    agents: hasFeature("ai"),
     settings: true,
   };
   const activeViewAllowed = moduleAccess[activeView] !== false;
@@ -562,6 +567,7 @@ function App() {
     campaigns: ["Campanas CRM", "Plantillas, triggers, remarketing y recorridos comerciales."],
     broadcast: ["Mensajeria masiva", "Difusiones por audiencia con control de limites y canales."],
     ads: ["Ads Manager", "Leads, comentarios y eventos de Meta conectados al inbox."],
+    agents: ["AI Agents", "Agentes empresariales para estrategia, ventas, soporte y operaciones."],
     settings: ["Ajustes", "IA, canales, webhooks, APIs, usuarios y seguridad."],
   };
   const advisorPendingActionCount = advisorActions.filter((item) => ["draft", "pending_approval", "approved"].includes(item.status)).length;
@@ -2228,6 +2234,13 @@ function App() {
           <BroadcastPanel apiCall={apiCall} showStatus={showStatus} onGoCampaigns={() => setActiveView("campaigns")} />
         ) : activeView === "ads" ? (
           <AdsPanel apiCall={apiCall} showStatus={showStatus} onConnectMeta={() => { setActiveView("settings"); setSettingsTab("channels"); }} onOpenInbox={(conversation) => { setActiveView("inbox"); loadMessages(conversation); }} />
+        ) : activeView === "agents" ? (
+          <AiAgentsPanel
+            apiCall={apiCall}
+            showStatus={showStatus}
+            onOpenAdvisor={() => setAdvisorOpen(true)}
+            onOpenSettings={() => { setActiveView("settings"); setSettingsTab("apis"); }}
+          />
         ) : (
           <section className="settings-page">
             <div className="settings-tabs glass-card">{[["ia","IA"],["channels","Canales"],["apis","APIs"],["debug","Debug"],["users","Usuarios"],["profile","Perfil"],["security","Seguridad"],["plan","Plan"]].map(([key,label]) => <button key={key} type="button" className={settingsTab === key ? "active" : ""} onClick={() => setSettingsTab(key)}>{label}</button>)}</div>
