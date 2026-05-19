@@ -13,6 +13,7 @@ from sqlalchemy import text
 
 from app_saas.billing.limits import ensure_integration_quota
 from app_saas.db import db_session, set_tenant_context
+from app_saas.integrations.instagram_graph import ensure_instagram_log_tables, ensure_instagram_page_subscription
 from app_saas.integrations.schemas import IntegrationOut, IntegrationUpsertIn, WhatsappPhoneRegisterIn
 from app_saas.integrations.whatsapp_subscription import ensure_webhook_subscription
 from app_saas.shared.security import AuthContext, get_current_user, require_role, verify_password
@@ -20,7 +21,17 @@ from app_saas.shared.secrets import decrypt_secret, encrypt_secret, is_masked_se
 
 router = APIRouter(prefix="/integrations", tags=["saas-integrations"])
 
-SENSITIVE_CONFIG_KEYS = {"access_token", "token", "permanent_token", "app_secret", "meta_app_secret", "client_secret"}
+SENSITIVE_CONFIG_KEYS = {
+    "access_token",
+    "token",
+    "permanent_token",
+    "page_access_token",
+    "user_access_token",
+    "instagram_page_access_token",
+    "app_secret",
+    "meta_app_secret",
+    "client_secret",
+}
 DEFAULT_ACCESS_TOKEN_ENV = "SCENTRA_META_ACCESS_TOKEN"
 ENV_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,}$")
 
@@ -236,6 +247,47 @@ def _maybe_ensure_whatsapp_subscription(conn, *, tenant_id: str, integration_id:
     return result
 
 
+def _instagram_page_token(config: dict[str, Any]) -> str:
+    token = decrypt_secret(
+        str(
+            config.get("page_access_token")
+            or config.get("instagram_page_access_token")
+            or config.get("access_token")
+            or ""
+        ).strip()
+    )
+    if token:
+        return token
+    raw = str(config.get("page_access_token") or config.get("instagram_page_access_token") or "").strip()
+    if _looks_like_secret_value(raw):
+        return raw
+    return ""
+
+
+def _maybe_ensure_instagram_subscription(conn, *, tenant_id: str, integration_id: str, config: dict[str, Any]) -> dict[str, Any] | None:
+    page_id = str(config.get("page_id") or config.get("facebook_page_id") or "").strip()
+    instagram_id = str(config.get("instagram_business_account_id") or config.get("ig_business_id") or "").strip()
+    page_token = _instagram_page_token(config)
+    mode = str(config.get("dispatch_mode") or "").strip().lower()
+    if mode in {"stub", "local", "disabled"}:
+        return None
+    if not page_id or not instagram_id or not page_token:
+        return None
+    ensure_instagram_log_tables(conn)
+    return ensure_instagram_page_subscription(
+        page_id,
+        page_token,
+        graph_version=str(config.get("graph_api_version") or "v24.0").strip(),
+        app_id=str(config.get("app_id") or "").strip(),
+        instagram_business_account_id=instagram_id,
+        auto_subscribe=True,
+        retries=2,
+        conn=conn,
+        tenant_id=tenant_id,
+        integration_id=integration_id,
+    )
+
+
 @router.get("", response_model=list[IntegrationOut])
 def list_integrations(ctx: AuthContext = Depends(get_current_user)):
     with db_session() as conn:
@@ -346,6 +398,29 @@ def upsert_integration(
             subscription_result = _maybe_ensure_whatsapp_subscription(conn, tenant_id=ctx.tenant_id, integration_id=row_data["id"], config=saved_config)
             if subscription_result is not None:
                 saved_config["last_webhook_subscription_check"] = {
+                    "status": subscription_result.get("status"),
+                    "ok": bool(subscription_result.get("ok")),
+                    "final_subscribed": bool(subscription_result.get("final_subscribed")),
+                    "auto_subscribe_attempted": bool(subscription_result.get("auto_subscribe_attempted")),
+                    "checked_at": subscription_result.get("checked_at"),
+                    "error": str(subscription_result.get("error") or "")[:500],
+                }
+                conn.execute(
+                    text(
+                        """
+                        UPDATE saas_integrations
+                        SET config_json = CAST(:config_json AS jsonb), last_sync_at = NOW(), updated_at = NOW()
+                        WHERE id = CAST(:integration_id AS uuid)
+                        """
+                    ),
+                    {"integration_id": row_data["id"], "config_json": json.dumps(saved_config)},
+                )
+                row_data["config_json"] = saved_config
+                row_data["last_sync_at"] = row_data.get("last_sync_at") or ""
+        if provider == "meta" and channel == "instagram" and status == "connected":
+            subscription_result = _maybe_ensure_instagram_subscription(conn, tenant_id=ctx.tenant_id, integration_id=row_data["id"], config=saved_config)
+            if subscription_result is not None:
+                saved_config["last_instagram_subscription_check"] = {
                     "status": subscription_result.get("status"),
                     "ok": bool(subscription_result.get("ok")),
                     "final_subscribed": bool(subscription_result.get("final_subscribed")),

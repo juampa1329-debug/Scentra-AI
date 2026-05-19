@@ -26,7 +26,7 @@ const TTS_API_PROVIDERS = [
 
 const CHANNEL_API_PROVIDERS = [
   { code: "whatsapp_cloud", category: "channel", name: "WhatsApp Cloud API", env: "WHATSAPP_PERMANENT_TOKEN", fields: ["WHATSAPP_TOKEN", "META_ACCESS_TOKEN", "WHATSAPP_PHONE_NUMBER_ID", "WHATSAPP_WABA_ID", "META_APP_ID", "WHATSAPP_GRAPH_VERSION"] },
-  { code: "instagram_business", category: "channel", name: "Instagram Business", env: "SCENTRA_META_APP_ID", fields: ["SCENTRA_META_APP_SECRET", "SCENTRA_INSTAGRAM_WEBHOOK_VERIFY_TOKEN", "SCENTRA_API_PUBLIC_URL"] },
+  { code: "instagram_business", category: "channel", name: "Instagram Business", env: "INSTAGRAM_PAGE_ACCESS_TOKEN", fields: ["INSTAGRAM_PAGE_ID", "INSTAGRAM_BUSINESS_ACCOUNT_ID", "META_APP_ID", "META_APP_SECRET"] },
   { code: "woocommerce", category: "commerce", name: "WooCommerce", env: "WC_BASE_URL", fields: ["WC_CONSUMER_KEY", "WC_CONSUMER_SECRET"] },
 ];
 
@@ -75,6 +75,20 @@ const defaultAiConfig = () => ({
   voiceId: "TsKSGPuG26FpNj0JzQBq",
   voiceModel: "eleven_v3",
   voicePrompt: "Voz de mujer colombiana joven, acento colombiano natural, tono alegre, espontaneo y cercano.",
+});
+const defaultInstagramForm = () => ({
+  provider: "meta",
+  channel: "instagram",
+  status: "connected",
+  dispatch_mode: "instagram_graph",
+  page_id: "",
+  page_name: "",
+  business_id: "",
+  business_name: "",
+  instagram_business_account_id: "",
+  instagram_username: "",
+  app_id: "",
+  graph_api_version: "v24.0",
 });
 
 function formatApiError(data, fallback) {
@@ -410,6 +424,8 @@ function AudioWaveform({ src, seed = "", levels = null }) {
 function App() {
   const metaAccessTokenRef = useRef(null);
   const metaAppSecretRef = useRef(null);
+  const instagramPageTokenRef = useRef(null);
+  const instagramAppSecretRef = useRef(null);
   const composerFileRef = useRef(null);
   const knowledgeFileRef = useRef(null);
   const messagesPanelRef = useRef(null);
@@ -448,6 +464,7 @@ function App() {
   const [phoneRegisterForm, setPhoneRegisterForm] = useState({ phone_number_id: "", pin: "" });
   const [phoneSyncing, setPhoneSyncing] = useState(false);
   const [integrationForm, setIntegrationForm] = useState({ provider: "meta", channel: "whatsapp", status: "connected", dispatch_mode: "stub", phone_number_id: "", business_account_id: "", app_id: "", graph_api_version: "v24.0", access_token_env: "SCENTRA_META_ACCESS_TOKEN" });
+  const [instagramForm, setInstagramForm] = useState(defaultInstagramForm);
   const [integrationSecretModal, setIntegrationSecretModal] = useState(null);
   const [aiConfig, setAiConfig] = useState(defaultAiConfig);
   const [aiTesterOpen, setAiTesterOpen] = useState(false);
@@ -620,6 +637,11 @@ function App() {
     && String(item.channel || "").toLowerCase() === String(integrationForm.channel || "").toLowerCase()
   ));
   const selectedIntegrationConfig = selectedIntegrationForForm?.config_json || {};
+  const selectedInstagramIntegration = integrations.find((item) => (
+    String(item.provider || "").toLowerCase() === "meta"
+    && String(item.channel || "").toLowerCase() === "instagram"
+  ));
+  const selectedInstagramConfig = selectedInstagramIntegration?.config_json || {};
   const integrationToForm = (integration) => {
     const config = integration?.config_json || {};
     return {
@@ -632,6 +654,24 @@ function App() {
       app_id: config.app_id || "",
       graph_api_version: config.graph_api_version || "v24.0",
       access_token_env: config.access_token_env || "SCENTRA_META_ACCESS_TOKEN",
+    };
+  };
+  const instagramIntegrationToForm = (integration) => {
+    const config = integration?.config_json || {};
+    return {
+      ...defaultInstagramForm(),
+      provider: integration?.provider || "meta",
+      channel: integration?.channel || "instagram",
+      status: integration?.status || "connected",
+      dispatch_mode: config.dispatch_mode || "instagram_graph",
+      page_id: config.page_id || config.facebook_page_id || "",
+      page_name: config.page_name || "",
+      business_id: config.business_id || "",
+      business_name: config.business_name || "",
+      instagram_business_account_id: config.instagram_business_account_id || config.ig_business_id || "",
+      instagram_username: config.instagram_username || "",
+      app_id: config.app_id || "",
+      graph_api_version: config.graph_api_version || "v24.0",
     };
   };
 
@@ -757,6 +797,7 @@ function App() {
     setApiCredentials([]); setCredentialModal(null); setCredentialModels({}); setKnowledgeSources([]); setDiagnostics(null); setAiGatewayProviders([]); setAiGatewayRuns([]);
     setAdvisorOpen(false); setAdvisorThreadId(""); setAdvisorMessages([]); setAdvisorInput(""); setAdvisorInsights([]); setAdvisorRecommendations([]); setAdvisorActions([]); setAdvisorMetrics(null); setAdvisorActivity([]); setAdvisorMemory(null); setAdvisorStreamStatus(""); setAdvisorLastSync(""); setAdvisorLoading(false);
     setInstagramDiagnostics(null); setInstagramOAuth({ state: "", assets: [], status: "", callbackUrl: "" });
+    setInstagramForm(defaultInstagramForm());
     setDebugInboundResult(null); setSubscriptionCheck(null);
     setIntegrationSecretModal(null);
     setWhatsappPhones([]); setPhoneRegisterForm({ phone_number_id: "", pin: "" });
@@ -1012,6 +1053,14 @@ function App() {
   }, [integrations.length]);
 
   useEffect(() => {
+    const metaInstagram = integrations.find((item) => item.provider === "meta" && item.channel === "instagram");
+    const formIsEmptyInstagram = !instagramForm.page_id
+      && !instagramForm.instagram_business_account_id
+      && !instagramForm.app_id;
+    if (metaInstagram && formIsEmptyInstagram) setInstagramForm(instagramIntegrationToForm(metaInstagram));
+  }, [integrations.length]);
+
+  useEffect(() => {
     if (activeView !== "inbox") return undefined;
     const frame = window.requestAnimationFrame(() => {
       if (messagesPanelRef.current) messagesPanelRef.current.scrollTop = messagesPanelRef.current.scrollHeight;
@@ -1108,9 +1157,73 @@ function App() {
     showStatus("Integracion cargada para editar. Guarda para actualizar datos generales.", "ok");
   };
 
+  const editInstagramIntegration = (integration = selectedInstagramIntegration) => {
+    if (!integration) return;
+    setInstagramForm(instagramIntegrationToForm(integration));
+    if (instagramPageTokenRef.current) instagramPageTokenRef.current.value = "";
+    if (instagramAppSecretRef.current) instagramAppSecretRef.current.value = "";
+    showStatus("Instagram cargado para editar. Los secretos siguen ocultos y cifrados.", "ok");
+  };
+
+  const saveInstagramManual = async (event) => {
+    event.preventDefault();
+    const isUpdatingExisting = Boolean(selectedInstagramIntegration);
+    const pageAccessToken = isUpdatingExisting ? "" : (instagramPageTokenRef.current?.value || "").trim();
+    const appSecret = isUpdatingExisting ? "" : (instagramAppSecretRef.current?.value || "").trim();
+    const pageId = String(instagramForm.page_id || "").trim();
+    const instagramId = String(instagramForm.instagram_business_account_id || "").trim();
+    const dispatchMode = String(instagramForm.dispatch_mode || "instagram_graph").trim();
+    if (dispatchMode !== "stub" && (!pageId || !instagramId)) return showStatus("Page ID e Instagram Business Account ID son requeridos para Instagram Graph real.", "error");
+    if (dispatchMode !== "stub" && !isUpdatingExisting && !pageAccessToken) return showStatus("Page Access Token requerido para conectar Instagram por modo manual.", "error");
+    try {
+      const configJson = {
+        dispatch_mode: dispatchMode,
+        page_id: pageId,
+        page_name: String(instagramForm.page_name || "").trim(),
+        business_id: String(instagramForm.business_id || "").trim(),
+        business_name: String(instagramForm.business_name || "").trim(),
+        instagram_business_account_id: instagramId,
+        instagram_username: String(instagramForm.instagram_username || "").trim(),
+        app_id: String(instagramForm.app_id || "").trim(),
+        graph_api_version: String(instagramForm.graph_api_version || "v24.0").trim(),
+        webhook_callback_url: `${API_BASE}/saas/v1/webhooks/instagram/{endpoint_key}`,
+        subscribed_fields: ["messages", "messaging_postbacks", "comments", "mentions"],
+      };
+      if (pageAccessToken) configJson.page_access_token = pageAccessToken;
+      if (appSecret) configJson.app_secret = appSecret;
+      await apiCall("/saas/v1/integrations", {
+        method: "POST",
+        body: JSON.stringify({
+          provider: "meta",
+          channel: "instagram",
+          status: instagramForm.status || "connected",
+          secret_ref: pageAccessToken ? "tenant:meta:instagram" : (selectedInstagramIntegration?.secret_ref || "tenant:meta:instagram"),
+          config_json: configJson,
+        }),
+      });
+      if (instagramPageTokenRef.current) instagramPageTokenRef.current.value = "";
+      if (instagramAppSecretRef.current) instagramAppSecretRef.current.value = "";
+      showStatus("Instagram guardado. Si usas app propia, crea o copia el endpoint Instagram para Meta Developers.", "ok");
+      await loadIntegrations();
+      await loadBilling();
+      await loadInstagramDiagnostics();
+    } catch (err) { showStatus(String(err.message || err), "error"); }
+  };
+
+  const createInstagramWebhookEndpoint = async () => {
+    setWebhookProvider("instagram");
+    try {
+      const data = await apiCall("/saas/v1/webhooks/endpoints", { method: "POST", body: JSON.stringify({ provider: "instagram", signature_required: false }) });
+      setLastWebhookSecret(data);
+      showStatus("Endpoint Instagram creado. Copia Callback URL y Verify token en Meta Developers.", "ok");
+      await loadWebhooks();
+    } catch (err) { showStatus(String(err.message || err), "error"); }
+  };
+
   const openIntegrationSecretModal = (integration = selectedIntegrationForForm) => {
     if (!integration) return showStatus("Primero guarda la integracion general.", "error");
     const config = integration.config_json || {};
+    const isInstagram = String(integration.channel || "").toLowerCase() === "instagram";
     setIntegrationSecretModal({
       provider: integration.provider,
       channel: integration.channel,
@@ -1119,12 +1232,18 @@ function App() {
       dispatch_mode: config.dispatch_mode || "stub",
       phone_number_id: config.phone_number_id || "",
       business_account_id: config.business_account_id || config.waba_id || "",
+      page_id: config.page_id || "",
+      page_name: config.page_name || "",
+      business_id: config.business_id || "",
+      business_name: config.business_name || "",
+      instagram_business_account_id: config.instagram_business_account_id || "",
+      instagram_username: config.instagram_username || "",
       app_id: config.app_id || "",
       graph_api_version: config.graph_api_version || "v24.0",
       access_token_env: config.access_token_env || "SCENTRA_META_ACCESS_TOKEN",
-      token_hint: config.access_token_hint || "",
+      token_hint: isInstagram ? (config.page_access_token_hint || config.access_token_hint || "") : (config.access_token_hint || ""),
       app_secret_hint: config.app_secret_hint || "",
-      has_access_token: Boolean(config.has_access_token),
+      has_access_token: isInstagram ? Boolean(config.has_page_access_token || config.has_access_token) : Boolean(config.has_access_token),
       has_app_secret: Boolean(config.has_app_secret),
       access_token: "",
       app_secret: "",
@@ -1140,7 +1259,20 @@ function App() {
     const currentPassword = String(integrationSecretModal.current_password || "").trim();
     if (!accessToken && !appSecret) return showStatus("Pega al menos un token o app secret para actualizar.", "error");
     if (!currentPassword) return showStatus("Confirma tu contrasena para actualizar secretos.", "error");
-    const configJson = {
+    const isInstagram = String(integrationSecretModal.channel || "").toLowerCase() === "instagram";
+    const configJson = isInstagram ? {
+      dispatch_mode: integrationSecretModal.dispatch_mode || "instagram_graph",
+      page_id: integrationSecretModal.page_id || "",
+      page_name: integrationSecretModal.page_name || "",
+      business_id: integrationSecretModal.business_id || "",
+      business_name: integrationSecretModal.business_name || "",
+      instagram_business_account_id: integrationSecretModal.instagram_business_account_id || "",
+      instagram_username: integrationSecretModal.instagram_username || "",
+      app_id: integrationSecretModal.app_id || "",
+      graph_api_version: integrationSecretModal.graph_api_version || "v24.0",
+      webhook_callback_url: `${API_BASE}/saas/v1/webhooks/instagram/{endpoint_key}`,
+      subscribed_fields: ["messages", "messaging_postbacks", "comments", "mentions"],
+    } : {
       dispatch_mode: integrationSecretModal.dispatch_mode || "stub",
       phone_number_id: integrationSecretModal.phone_number_id || "",
       business_account_id: integrationSecretModal.business_account_id || "",
@@ -1148,7 +1280,10 @@ function App() {
       graph_api_version: integrationSecretModal.graph_api_version || "v24.0",
       access_token_env: integrationSecretModal.access_token_env || "SCENTRA_META_ACCESS_TOKEN",
     };
-    if (accessToken) configJson.access_token = accessToken;
+    if (accessToken) {
+      if (isInstagram) configJson.page_access_token = accessToken;
+      else configJson.access_token = accessToken;
+    }
     if (appSecret) configJson.app_secret = appSecret;
     try {
       await apiCall("/saas/v1/integrations", {
@@ -1157,7 +1292,7 @@ function App() {
           provider: integrationSecretModal.provider,
           channel: integrationSecretModal.channel,
           status: integrationSecretModal.status || "connected",
-          secret_ref: accessToken ? "tenant:meta:whatsapp" : integrationSecretModal.secret_ref,
+          secret_ref: accessToken ? (isInstagram ? "tenant:meta:instagram" : "tenant:meta:whatsapp") : integrationSecretModal.secret_ref,
           config_json: configJson,
           current_password: currentPassword,
         }),
@@ -1247,6 +1382,16 @@ function App() {
         }),
       });
       showStatus(data?.subscription?.final_subscribed ? "Instagram conectado y suscrito a webhooks." : "Instagram conectado, revisa diagnostics para confirmar webhooks.", data?.subscription?.final_subscribed ? "ok" : "neutral");
+      setInstagramForm((prev) => ({
+        ...prev,
+        page_id: asset.page_id || prev.page_id,
+        page_name: asset.page_name || prev.page_name,
+        business_id: asset.business_id || prev.business_id,
+        business_name: asset.business_name || prev.business_name,
+        instagram_business_account_id: asset.instagram_business_account_id || prev.instagram_business_account_id,
+        instagram_username: asset.instagram_username || prev.instagram_username,
+        dispatch_mode: "instagram_graph",
+      }));
       await loadIntegrations();
       await loadInstagramDiagnostics();
     } catch (err) {
@@ -2413,20 +2558,13 @@ function App() {
                   ) : null}
                   <form className="meta-grid" onSubmit={saveIntegration}>
                     <label>Proveedor
-                      <select value={integrationForm.provider} onChange={(event) => setIntegrationForm((prev) => ({ ...prev, provider: event.target.value }))}>
+                      <select value={integrationForm.provider} disabled onChange={(event) => setIntegrationForm((prev) => ({ ...prev, provider: event.target.value }))}>
                         <option value="meta">Meta</option>
-                        <option value="whatsapp">WhatsApp</option>
-                        <option value="instagram">Instagram</option>
-                        <option value="facebook">Facebook</option>
-                        <option value="stripe">Stripe</option>
                       </select>
                     </label>
                     <label>Canal
-                      <select value={integrationForm.channel} onChange={(event) => setIntegrationForm((prev) => ({ ...prev, channel: event.target.value }))}>
+                      <select value={integrationForm.channel} disabled onChange={(event) => setIntegrationForm((prev) => ({ ...prev, channel: event.target.value }))}>
                         <option value="whatsapp">WhatsApp</option>
-                        <option value="instagram">Instagram</option>
-                        <option value="facebook">Facebook</option>
-                        <option value="billing">Billing</option>
                       </select>
                     </label>
                     <label>Estado
@@ -2475,7 +2613,7 @@ function App() {
                     <button type="submit" className="primary">Guardar integracion</button>
                   </form>
                   <div className="integration-cards">
-                    {integrations.map((integration) => {
+                    {integrations.filter((integration) => String(integration.channel || "").toLowerCase() === "whatsapp").map((integration) => {
                       const config = integration.config_json || {};
                       const tokenLabel = config.has_access_token ? `Token guardado ${config.access_token_hint || ""}` : (config.access_token_env ? `Env ${config.access_token_env}` : "Sin token");
                       const appSecretLabel = config.has_app_secret ? `App secret ${config.app_secret_hint || "guardado"}` : "Sin app secret";
@@ -2496,7 +2634,7 @@ function App() {
                         </div>
                       );
                     })}
-                    {integrations.length === 0 ? <div className="empty">Sin integraciones configuradas.</div> : null}
+                    {integrations.filter((integration) => String(integration.channel || "").toLowerCase() === "whatsapp").length === 0 ? <div className="empty">Sin integracion WhatsApp configurada.</div> : null}
                   </div>
                 </article>
 
@@ -2539,10 +2677,116 @@ function App() {
                     </div>
                     <button type="button" disabled={instagramBusy} onClick={loadInstagramDiagnostics}>Diagnostics IG</button>
                   </div>
-                  <p className="soft-copy">Conecta Instagram sin buscar IDs manualmente. Scentra descubre Business Portfolios, paginas, Instagram Business Accounts, suscribe la Page a la app y deja el inbox listo para DMs.</p>
-                  <div className="panel-actions">
-                    <button type="button" className="primary" disabled={instagramBusy} onClick={startInstagramOAuth}>{instagramBusy ? "Procesando..." : "Conectar con Facebook Login"}</button>
-                    <button type="button" disabled={instagramBusy || !instagramOAuth.state} onClick={loadInstagramAssets}>Cargar cuentas detectadas</button>
+                  <p className="soft-copy">Instagram no usa Phone Number ID ni WABA. Para DMs necesitas una pagina de Facebook conectada a una cuenta Instagram profesional, el Instagram Business Account ID y un Page Access Token con permisos de mensajes. Si tu app Meta no tiene App Review/verificacion, usa el modo manual por cliente.</p>
+                  {selectedInstagramIntegration ? (
+                    <div className="current-integration-strip">
+                      <div>
+                        <strong>Instagram actual: {selectedInstagramConfig.instagram_username || selectedInstagramConfig.page_name || "cuenta conectada"}</strong>
+                        <span>{selectedInstagramIntegration.status} / {selectedInstagramConfig.dispatch_mode || "instagram_graph"} - Page {selectedInstagramConfig.page_id || "-"} - IG Business {selectedInstagramConfig.instagram_business_account_id || "-"}</span>
+                      </div>
+                      <div className="row-actions">
+                        <button type="button" className="primary" onClick={() => editInstagramIntegration(selectedInstagramIntegration)}>Cargar datos para editar</button>
+                        <button type="button" onClick={() => openIntegrationSecretModal(selectedInstagramIntegration)}>Actualizar token</button>
+                      </div>
+                    </div>
+                  ) : null}
+                  <form className="meta-grid instagram-manual-grid" onSubmit={saveInstagramManual}>
+                    <label>Estado
+                      <select value={instagramForm.status} onChange={(event) => setInstagramForm((prev) => ({ ...prev, status: event.target.value }))}>
+                        <option value="connected">Connected</option>
+                        <option value="paused">Paused</option>
+                        <option value="disconnected">Disconnected</option>
+                      </select>
+                    </label>
+                    <label>Modo envio
+                      <select value={instagramForm.dispatch_mode} onChange={(event) => setInstagramForm((prev) => ({ ...prev, dispatch_mode: event.target.value }))}>
+                        <option value="instagram_graph">Instagram Graph real</option>
+                        <option value="stub">Stub local</option>
+                      </select>
+                    </label>
+                    <label>Page ID
+                      <input placeholder="Facebook Page ID conectada a Instagram" value={instagramForm.page_id} onChange={(event) => setInstagramForm((prev) => ({ ...prev, page_id: event.target.value }))} />
+                    </label>
+                    <label>Instagram Business ID
+                      <input placeholder="Instagram Business Account ID" value={instagramForm.instagram_business_account_id} onChange={(event) => setInstagramForm((prev) => ({ ...prev, instagram_business_account_id: event.target.value }))} />
+                    </label>
+                    <label>Nombre pagina
+                      <input placeholder="Ej: Scentra Store" value={instagramForm.page_name} onChange={(event) => setInstagramForm((prev) => ({ ...prev, page_name: event.target.value }))} />
+                    </label>
+                    <label>Usuario Instagram
+                      <input placeholder="@usuario o nombre visible" value={instagramForm.instagram_username} onChange={(event) => setInstagramForm((prev) => ({ ...prev, instagram_username: event.target.value }))} />
+                    </label>
+                    <label>Business Portfolio ID
+                      <input placeholder="Opcional" value={instagramForm.business_id} onChange={(event) => setInstagramForm((prev) => ({ ...prev, business_id: event.target.value }))} />
+                    </label>
+                    <label>Meta App ID
+                      <input placeholder="ID de la app del cliente" value={instagramForm.app_id} onChange={(event) => setInstagramForm((prev) => ({ ...prev, app_id: event.target.value }))} />
+                    </label>
+                    <label>Graph API
+                      <input placeholder="v24.0" value={instagramForm.graph_api_version} onChange={(event) => setInstagramForm((prev) => ({ ...prev, graph_api_version: event.target.value }))} />
+                    </label>
+                    {!selectedInstagramIntegration ? (
+                      <>
+                        <label className="token-field">Page Access Token
+                          <input ref={instagramPageTokenRef} type="password" placeholder="Token largo/permanente de la pagina" autoComplete="off" spellCheck={false} />
+                        </label>
+                        <label className="token-field">Meta App Secret
+                          <input ref={instagramAppSecretRef} type="password" placeholder="Opcional: valida x-hub-signature-256" autoComplete="off" spellCheck={false} />
+                        </label>
+                      </>
+                    ) : (
+                      <div className="secret-summary token-field">
+                        <div>
+                          <strong>Secretos Instagram protegidos</strong>
+                          <span>Page token: {selectedInstagramConfig.has_page_access_token ? `******** ${selectedInstagramConfig.page_access_token_hint || ""}` : "sin token"} / App secret: {selectedInstagramConfig.has_app_secret ? `******** ${selectedInstagramConfig.app_secret_hint || ""}` : "sin app secret"}</span>
+                        </div>
+                        <button type="button" onClick={() => openIntegrationSecretModal(selectedInstagramIntegration)}>Actualizar secretos</button>
+                      </div>
+                    )}
+                    <button type="submit" className="primary">Guardar Instagram</button>
+                  </form>
+                  <div className="integration-cards">
+                    {selectedInstagramIntegration ? (
+                      <div className="integration-card-row instagram-row">
+                        <div>
+                          <strong>meta / instagram</strong>
+                          <span>{selectedInstagramIntegration.status} / {selectedInstagramConfig.dispatch_mode || "instagram_graph"}</span>
+                        </div>
+                        <div><span>Page ID</span><strong>{selectedInstagramConfig.page_id || "-"}</strong></div>
+                        <div><span>IG Business ID</span><strong>{selectedInstagramConfig.instagram_business_account_id || "-"}</strong></div>
+                        <div><span>Meta App ID</span><strong>{selectedInstagramConfig.app_id || "-"}</strong></div>
+                        <div className="integration-marks"><mark>{selectedInstagramConfig.has_page_access_token ? `Page token ${selectedInstagramConfig.page_access_token_hint || "guardado"}` : "Sin Page token"}</mark><mark>{selectedInstagramConfig.has_app_secret ? `App secret ${selectedInstagramConfig.app_secret_hint || "guardado"}` : "Sin app secret"}</mark></div>
+                        <div className="row-actions">
+                          <button type="button" onClick={() => editInstagramIntegration(selectedInstagramIntegration)}>Editar</button>
+                          <button type="button" onClick={() => openIntegrationSecretModal(selectedInstagramIntegration)}>Actualizar token</button>
+                        </div>
+                      </div>
+                    ) : <div className="empty">Sin integracion Instagram configurada.</div>}
+                  </div>
+                  <div className="manual-mode-box">
+                    <div>
+                      <strong>Webhook Instagram para app propia</strong>
+                      <span>Crea un endpoint por tenant y copia Callback URL + Verify token en Meta Developers. Suscribe eventos: messages, messaging_postbacks, comments y mentions.</span>
+                    </div>
+                    <button type="button" onClick={createInstagramWebhookEndpoint}>Crear endpoint Instagram</button>
+                  </div>
+                  {lastWebhookSecret?.provider === "instagram" ? (
+                    <div className="secret-box">
+                      <strong>Valores Instagram visibles una sola vez</strong>
+                      <span>Callback URL</span>
+                      <div className="secret-value-row"><code>{fullWebhookUrl(lastWebhookSecret.url_path)}</code><button type="button" onClick={() => copyText(fullWebhookUrl(lastWebhookSecret.url_path), "Callback Instagram")}>Copiar URL</button></div>
+                      {lastWebhookSecret.verify_token_once ? <><span>Verify token</span><div className="secret-value-row"><code>{lastWebhookSecret.verify_token_once}</code><button type="button" onClick={() => copyText(lastWebhookSecret.verify_token_once, "Verify token Instagram")}>Copiar token</button></div></> : null}
+                    </div>
+                  ) : null}
+                  <div className="oauth-mode-box">
+                    <div>
+                      <strong>OAuth central con Facebook Login</strong>
+                      <span>Usalo cuando la app de Scentra tenga permisos aprobados. Descubre portfolios, paginas y cuentas Instagram automaticamente.</span>
+                    </div>
+                    <div className="panel-actions">
+                      <button type="button" className="primary" disabled={instagramBusy} onClick={startInstagramOAuth}>{instagramBusy ? "Procesando..." : "Conectar con Facebook Login"}</button>
+                      <button type="button" disabled={instagramBusy || !instagramOAuth.state} onClick={loadInstagramAssets}>Cargar cuentas detectadas</button>
+                    </div>
                   </div>
                   {instagramOAuth.callbackUrl ? <div className="callback-box"><code>{instagramOAuth.callbackUrl}</code><button type="button" onClick={() => copyText(instagramOAuth.callbackUrl, "OAuth callback")}>Copiar OAuth callback</button></div> : null}
                   <div className="phone-grid instagram-asset-grid">
@@ -2715,7 +2959,13 @@ function App() {
               </article>
               <article className="panel glass-card">
                 <div className="panel-head"><h2>Integraciones</h2><span>configuracion segura</span></div>
-                <div className="debug-table">{(diagnostics?.integrations || []).map((item, idx) => <div className="debug-row" key={`${item.provider}-${item.channel}-${idx}`}><strong>{item.provider} / {item.channel}</strong><span>{item.status} / {item.dispatch_mode || "-"}</span><small>Phone: {item.phone_number_id || "-"} / WABA: {item.business_account_id || "-"} / App: {item.app_id || "-"} / Token: {item.has_token ? "guardado" : "faltante"}</small></div>)}{!diagnostics?.integrations?.length ? <div className="empty">Sin integraciones registradas.</div> : null}</div>
+                <div className="debug-table">{(diagnostics?.integrations || []).map((item, idx) => {
+                  const isIg = String(item.channel || "").toLowerCase() === "instagram";
+                  const assetLine = isIg
+                    ? `Page: ${item.page_id || "-"} / IG Business: ${item.instagram_business_account_id || "-"} / App: ${item.app_id || "-"}`
+                    : `Phone: ${item.phone_number_id || "-"} / WABA: ${item.business_account_id || "-"} / App: ${item.app_id || "-"}`;
+                  return <div className="debug-row" key={`${item.provider}-${item.channel}-${idx}`}><strong>{item.provider} / {item.channel}</strong><span>{item.status} / {item.dispatch_mode || "-"}</span><small>{assetLine} / Token: {item.has_token ? "guardado" : "faltante"}</small></div>;
+                })}{!diagnostics?.integrations?.length ? <div className="empty">Sin integraciones registradas.</div> : null}</div>
               </article>
               <article className="panel glass-card">
                 <div className="panel-head"><h2>Colas y errores</h2><span>webhooks / IA / outbound</span></div>
@@ -2903,10 +3153,10 @@ function App() {
               <p className="soft-copy">El valor guardado no se puede revelar. Para corregirlo, pega uno nuevo y confirma tu contrasena. El backend reemplaza el secreto cifrado y el navegador solo recibe una pista.</p>
               <div className="secret-box muted-secret">
                 <strong>Estado actual</strong>
-                <span>Token Meta: {integrationSecretModal.has_access_token ? `******** ${integrationSecretModal.token_hint || ""}` : "sin token guardado"}</span>
+                <span>{String(integrationSecretModal.channel || "").toLowerCase() === "instagram" ? "Page Access Token" : "Token Meta"}: {integrationSecretModal.has_access_token ? `******** ${integrationSecretModal.token_hint || ""}` : "sin token guardado"}</span>
                 <span>App Secret: {integrationSecretModal.has_app_secret ? `******** ${integrationSecretModal.app_secret_hint || ""}` : "sin app secret guardado"}</span>
               </div>
-              <label>Nuevo token permanente de Meta<input type="password" autoFocus placeholder="Pegar token completo solo si vas a reemplazarlo" autoComplete="off" spellCheck={false} value={integrationSecretModal.access_token || ""} onChange={(event) => setIntegrationSecretModal((prev) => ({ ...(prev || {}), access_token: event.target.value }))} /></label>
+              <label>{String(integrationSecretModal.channel || "").toLowerCase() === "instagram" ? "Nuevo Page Access Token" : "Nuevo token permanente de Meta"}<input type="password" autoFocus placeholder="Pegar token completo solo si vas a reemplazarlo" autoComplete="off" spellCheck={false} value={integrationSecretModal.access_token || ""} onChange={(event) => setIntegrationSecretModal((prev) => ({ ...(prev || {}), access_token: event.target.value }))} /></label>
               <label>Nuevo Meta App Secret<input type="password" placeholder="Opcional: pegar app secret nuevo" autoComplete="off" spellCheck={false} value={integrationSecretModal.app_secret || ""} onChange={(event) => setIntegrationSecretModal((prev) => ({ ...(prev || {}), app_secret: event.target.value }))} /></label>
               <label>Tu contrasena<input type="password" placeholder="Confirma tu contrasena para guardar" autoComplete="current-password" value={integrationSecretModal.current_password || ""} onChange={(event) => setIntegrationSecretModal((prev) => ({ ...(prev || {}), current_password: event.target.value }))} /></label>
               <div className="panel-actions"><button type="submit" className="primary">Guardar cifrado</button><button type="button" onClick={() => setIntegrationSecretModal(null)}>Cancelar</button></div>

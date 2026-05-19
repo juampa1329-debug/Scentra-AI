@@ -374,7 +374,7 @@ def instagram_diagnostics(ctx: AuthContext = Depends(require_role("owner", "admi
         if not integration:
             return {"ok": False, "status": "instagram_not_connected"}
         config = integration.get("config_json") if isinstance(integration.get("config_json"), dict) else {}
-        page_token = decrypt_secret(str(config.get("page_access_token") or ""))
+        page_token = decrypt_secret(str(config.get("page_access_token") or config.get("instagram_page_access_token") or ""))
         page_id = str(config.get("page_id") or "")
         instagram_id = str(config.get("instagram_business_account_id") or "")
         subscription = ensure_instagram_page_subscription(
@@ -445,6 +445,9 @@ def instagram_diagnostics(ctx: AuthContext = Depends(require_role("owner", "admi
         if safe_config.get(key):
             safe_config[key] = mask_secret(str(safe_config[key]))
             safe_config[f"has_{key}"] = True
+    webhook_callback_url = f"{_api_public_url()}/saas/v1/webhooks/instagram"
+    if webhook and webhook.get("endpoint_key"):
+        webhook_callback_url = f"{_api_public_url()}/saas/v1/webhooks/instagram/{webhook['endpoint_key']}"
     return {
         "ok": True,
         "status": integration["status"],
@@ -454,7 +457,7 @@ def instagram_diagnostics(ctx: AuthContext = Depends(require_role("owner", "admi
         "instagram_username": config.get("instagram_username") or "",
         "app_id": config.get("app_id") or _app_id(),
         "graph_version": config.get("graph_api_version") or _graph_version(),
-        "webhook_callback_url": f"{_api_public_url()}/saas/v1/webhooks/instagram",
+        "webhook_callback_url": webhook_callback_url,
         "webhook_status": dict(webhook or {}),
         "subscription": subscription,
         "permissions": {"ok": permissions_status < 400 and not meta_error(permissions_payload), "response": permissions_payload, "error_status": classify_meta_error(permissions_status, permissions_payload) if permissions_status >= 400 or meta_error(permissions_payload) else ""},

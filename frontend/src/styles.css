@@ -867,6 +867,35 @@ nav { display: grid; gap: 8px; width: 100%; }
   color: var(--muted);
   font-size: 12px;
 }
+.manual-mode-box,
+.oauth-mode-box {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  border: 1px solid rgba(94,234,212,0.24);
+  border-radius: 18px;
+  background: rgba(20,184,166,0.07);
+  padding: 13px;
+  margin: 12px 0;
+}
+.manual-mode-box strong,
+.manual-mode-box span,
+.oauth-mode-box strong,
+.oauth-mode-box span {
+  display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.manual-mode-box span,
+.oauth-mode-box span {
+  color: var(--muted);
+  font-size: 12px;
+}
+.oauth-mode-box {
+  background: rgba(59,130,246,0.07);
+  border-color: rgba(147,197,253,0.20);
+}
 .current-integration-strip {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -1579,6 +1608,7 @@ nav { display: grid; gap: 8px; width: 100%; }
   .messages { min-height: 420px; }
   .inline-form, .integrations-form, .composer, .usage-line, .row, .row.four, .row.six, .integration-row,
   .meta-grid, .meta-grid .token-field, .current-integration-strip, .integration-card-row, .phone-register-form, .webhook-create-form, .debug-sim-form,
+  .manual-mode-box, .oauth-mode-box,
   .secret-value-row, .callback-box { grid-template-columns: 1fr; grid-column: auto; }
   .rich-composer { grid-template-columns: auto auto minmax(0, 1fr) auto auto; }
   .attachment-preview, .recording-panel, .audio-message, .crm-mini-form { grid-template-columns: 1fr; }

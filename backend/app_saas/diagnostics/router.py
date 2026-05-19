@@ -15,7 +15,7 @@ from app_saas.ai_agent.service import ensure_ai_tables, get_settings, process_du
 from app_saas.api_credentials.router import _ensure_api_credentials_table
 from app_saas.config import settings
 from app_saas.db import db_session, set_tenant_context
-from app_saas.integrations.router import _integration_token, _safe_config_for_output
+from app_saas.integrations.router import _instagram_page_token, _integration_token, _safe_config_for_output
 from app_saas.integrations.whatsapp_subscription import ensure_whatsapp_subscription_log_table
 from app_saas.knowledge.router import ensure_knowledge_tables
 from app_saas.shared.security import AuthContext, get_current_user, require_role
@@ -231,6 +231,8 @@ def diagnostics_overview(ctx: AuthContext = Depends(get_current_user)):
             data = dict(row)
             config = data.get("config_json") if isinstance(data.get("config_json"), dict) else {}
             safe_config = _safe_config_for_output(config)
+            channel = str(data.get("channel") or "").lower()
+            has_token = bool(_instagram_page_token(config)) if channel == "instagram" else bool(_integration_token(config))
             integration_rows.append(
                 {
                     "provider": data.get("provider"),
@@ -239,8 +241,11 @@ def diagnostics_overview(ctx: AuthContext = Depends(get_current_user)):
                     "dispatch_mode": safe_config.get("dispatch_mode", ""),
                     "phone_number_id": safe_config.get("phone_number_id", ""),
                     "business_account_id": safe_config.get("business_account_id", ""),
+                    "page_id": safe_config.get("page_id", ""),
+                    "instagram_business_account_id": safe_config.get("instagram_business_account_id", ""),
+                    "instagram_username": safe_config.get("instagram_username", ""),
                     "app_id": safe_config.get("app_id", ""),
-                    "has_token": bool(_integration_token(config)),
+                    "has_token": has_token,
                     "last_sync_at": data.get("last_sync_at") or "",
                 }
             )
