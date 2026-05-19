@@ -1190,7 +1190,7 @@ nav { display: grid; gap: 8px; width: 100%; }
 .advisor-panel {
   pointer-events: auto;
   display: grid;
-  grid-template-rows: auto auto minmax(0, auto) auto minmax(180px, 1fr) auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
   gap: 12px;
   width: min(440px, calc(100vw - 28px));
   max-height: min(720px, calc(100vh - 44px));
@@ -1200,6 +1200,14 @@ nav { display: grid; gap: 8px; width: 100%; }
   background:
     radial-gradient(circle at 10% 0%, rgba(52,211,153,0.20), transparent 34%),
     linear-gradient(145deg, rgba(13, 33, 37, 0.94), rgba(15, 35, 50, 0.90));
+}
+.advisor-body {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 2px;
 }
 .advisor-head {
   display: flex;
@@ -1299,8 +1307,8 @@ nav { display: grid; gap: 8px; width: 100%; }
 .advisor-signals {
   display: grid;
   gap: 8px;
-  max-height: 212px;
-  overflow: auto;
+  max-height: none;
+  overflow: visible;
   padding-right: 2px;
 }
 .advisor-signal {
@@ -1367,8 +1375,8 @@ nav { display: grid; gap: 8px; width: 100%; }
 .advisor-actions {
   display: grid;
   gap: 8px;
-  max-height: 194px;
-  overflow: auto;
+  max-height: none;
+  overflow: visible;
   border: 1px solid rgba(52,211,153,0.20);
   border-radius: 20px;
   padding: 10px;
@@ -1478,7 +1486,8 @@ nav { display: grid; gap: 8px; width: 100%; }
   display: grid;
   align-content: start;
   gap: 10px;
-  min-height: 180px;
+  min-height: 220px;
+  max-height: 360px;
   overflow: auto;
   padding: 8px;
   border: 1px solid rgba(183,231,224,0.12);

@@ -96,6 +96,43 @@ function formatApiError(data, fallback) {
   return typeof detail === "string" ? detail : fallback;
 }
 
+function advisorDisplayContent(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const unfenced = raw.startsWith("```")
+    ? raw.replace(/^```(?:json)?\s*/i, "").replace(/```$/i, "").trim()
+    : raw;
+  if (!["{", "["].includes(unfenced.charAt(0))) return raw;
+  try {
+    const parsed = JSON.parse(unfenced);
+    const toHuman = (item) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return String(item || "");
+      const title = item.titulo || item.title || item.name || "";
+      const description = item.descripcion || item.description || item.resumen || item.summary || "";
+      const impact = item.impacto || item.impact || "";
+      const steps = item.siguientes_pasos || item.next_steps || item.acciones || item.actions || [];
+      const lines = [];
+      if (title) lines.push(String(title));
+      if (description) lines.push(String(description));
+      if (impact) lines.push(`Impacto: ${impact}`);
+      if (Array.isArray(steps) && steps.length) {
+        lines.push("Siguientes pasos:");
+        steps.slice(0, 3).forEach((step) => {
+          if (typeof step === "object") lines.push(`- ${step.title || step.titulo || step.description || step.descripcion || JSON.stringify(step)}`);
+          else lines.push(`- ${step}`);
+        });
+      }
+      return lines.join("\n");
+    };
+    if (Array.isArray(parsed)) {
+      return ["Esto es lo mas importante que encontre:", ...parsed.slice(0, 5).map((item) => `- ${toHuman(item).replace(/\n/g, " - ")}`)].join("\n");
+    }
+    return toHuman(parsed) || raw;
+  } catch {
+    return raw;
+  }
+}
+
 function todayLabel() {
   return new Intl.DateTimeFormat("es-CO", { weekday: "short", day: "2-digit", month: "short", year: "numeric" }).format(new Date());
 }
@@ -439,6 +476,7 @@ function App() {
   const [advisorStreamStatus, setAdvisorStreamStatus] = useState("");
   const [advisorLastSync, setAdvisorLastSync] = useState("");
   const [advisorLoading, setAdvisorLoading] = useState(false);
+  const [advisorBusyActionId, setAdvisorBusyActionId] = useState("");
   const [instagramOAuth, setInstagramOAuth] = useState({ state: "", assets: [], status: "", callbackUrl: "" });
   const [instagramDiagnostics, setInstagramDiagnostics] = useState(null);
   const [instagramBusy, setInstagramBusy] = useState(false);
@@ -1950,6 +1988,7 @@ function App() {
   const prepareAdvisorAction = async (item) => {
     if (!item?.id) return;
     const kind = item._kind || (item.recommendation_type ? "recommendation" : "insight");
+    setAdvisorBusyActionId(`prepare:${item.id}`);
     try {
       const path = kind === "recommendation"
         ? `/saas/v1/advisor/recommendations/${encodeURIComponent(item.id)}/action`
@@ -1958,36 +1997,42 @@ function App() {
       if (data?.action?.id) {
         setAdvisorActions((prev) => [data.action, ...prev.filter((action) => action.id !== data.action.id)]);
         showStatus("Accion del Advisor preparada para aprobacion", "ok");
-        loadAdvisorSignals(true);
+        await loadAdvisorSignals(true);
       } else {
         showStatus("No pude preparar esa accion. Revisa si la recomendacion sigue activa.", "error");
       }
     } catch (err) { showStatus(String(err.message || err), "error"); }
+    finally { setAdvisorBusyActionId(""); }
   };
 
   const approveAdvisorAction = async (actionId) => {
     if (!actionId) return;
+    setAdvisorBusyActionId(`approve:${actionId}`);
     try {
       const data = await apiCall(`/saas/v1/advisor/actions/${encodeURIComponent(actionId)}/approve`, { method: "POST" });
       if (data?.action?.id) {
         setAdvisorActions((prev) => prev.map((item) => item.id === actionId ? data.action : item));
         showStatus("Accion aprobada. Queda lista para ejecucion asistida.", "ok");
-        loadAdvisorSignals(true);
+        await loadAdvisorSignals(true);
       }
     } catch (err) { showStatus(String(err.message || err), "error"); }
+    finally { setAdvisorBusyActionId(""); }
   };
 
   const dismissAdvisorAction = async (actionId) => {
     if (!actionId) return;
+    setAdvisorBusyActionId(`dismiss:${actionId}`);
     try {
       await apiCall(`/saas/v1/advisor/actions/${encodeURIComponent(actionId)}/dismiss`, { method: "POST" });
       setAdvisorActions((prev) => prev.filter((item) => item.id !== actionId));
-      loadAdvisorSignals(true);
+      await loadAdvisorSignals(true);
     } catch (err) { showStatus(String(err.message || err), "error"); }
+    finally { setAdvisorBusyActionId(""); }
   };
 
   const executeAdvisorAction = async (actionId) => {
     if (!actionId) return;
+    setAdvisorBusyActionId(`execute:${actionId}`);
     try {
       const data = await apiCall(`/saas/v1/advisor/actions/${encodeURIComponent(actionId)}/execute`, { method: "POST" });
       if (data?.action?.id) {
@@ -1997,9 +2042,10 @@ function App() {
         if (navigation.tab) setSettingsTab(navigation.tab);
         if (data.ok) showStatus("Accion ejecutada de forma segura", "ok");
         else showStatus(data.error || "La accion requiere executor adicional", "error");
-        loadAdvisorSignals(true);
+        await loadAdvisorSignals(true);
       }
     } catch (err) { showStatus(String(err.message || err), "error"); }
+    finally { setAdvisorBusyActionId(""); }
   };
 
   const sendAdvisorFeedback = async (messageId, rating) => {
@@ -2756,6 +2802,7 @@ function App() {
               <span className={advisorLoading ? "live" : ""}>{advisorLoading ? (advisorStreamStatus || "Analizando...") : "Listo para ayudarte"}</span>
               <small>{advisorLastSync ? `Sinc. ${chatTimeLabel(advisorLastSync)}` : "Sinc. pendiente"}</small>
             </div>
+            <div className="advisor-body">
             {advisorMetrics ? (
               <div className="advisor-pulse">
                 <div><strong>{number(advisorMetrics.pending_actions || 0)}</strong><span>Pendientes</span></div>
@@ -2781,7 +2828,9 @@ function App() {
                     <small>{item.description}</small>
                   </button>
                   <div className="advisor-signal-actions">
-                    <button type="button" onClick={() => prepareAdvisorAction(item)}>Preparar</button>
+                    <button type="button" disabled={advisorBusyActionId === `prepare:${item.id}`} onClick={() => prepareAdvisorAction(item)}>
+                      {advisorBusyActionId === `prepare:${item.id}` ? "Preparando..." : "Preparar"}
+                    </button>
                     <button type="button" className="advisor-dismiss" onClick={() => dismissAdvisorSignal(item._kind, item.id)}>×</button>
                   </div>
                 </article>
@@ -2799,9 +2848,9 @@ function App() {
                       <small>{action.status === "executed" ? "Ejecutada de forma segura." : action.status === "approved" ? "Aprobada, lista para ejecucion asistida." : action.description}</small>
                     </div>
                     <div className="advisor-action-buttons">
-                      {["draft", "pending_approval"].includes(action.status) ? <button type="button" className="primary" onClick={() => approveAdvisorAction(action.id)}>Aprobar</button> : null}
-                      {action.status === "approved" ? <button type="button" className="primary" onClick={() => executeAdvisorAction(action.id)}>Ejecutar</button> : null}
-                      <button type="button" onClick={() => dismissAdvisorAction(action.id)}>Descartar</button>
+                      {["draft", "pending_approval"].includes(action.status) ? <button type="button" className="primary" disabled={advisorBusyActionId === `approve:${action.id}`} onClick={() => approveAdvisorAction(action.id)}>{advisorBusyActionId === `approve:${action.id}` ? "..." : "Aprobar"}</button> : null}
+                      {action.status === "approved" ? <button type="button" className="primary" disabled={advisorBusyActionId === `execute:${action.id}`} onClick={() => executeAdvisorAction(action.id)}>{advisorBusyActionId === `execute:${action.id}` ? "..." : "Ejecutar"}</button> : null}
+                      <button type="button" disabled={advisorBusyActionId === `dismiss:${action.id}`} onClick={() => dismissAdvisorAction(action.id)}>Descartar</button>
                     </div>
                   </article>
                 ))}
@@ -2817,7 +2866,7 @@ function App() {
               {advisorMessages.map((message) => (
                 <div className={`advisor-message ${message.role}`} key={message.id}>
                   <span>{message.role === "user" ? "Tu" : "Advisor"}{message.metadata_json?.streaming ? " / en vivo" : ""}</span>
-                  <p>{message.content}</p>
+                  <p>{advisorDisplayContent(message.content)}</p>
                   {message.role === "assistant" && !message.metadata_json?.streaming ? (
                     <div className="advisor-feedback">
                       <button type="button" className={message.metadata_json?.feedback_rating === "helpful" ? "active" : ""} onClick={() => sendAdvisorFeedback(message.id, "helpful")}>Util</button>
@@ -2833,6 +2882,7 @@ function App() {
                   {advisorQuickPrompts.map((prompt) => <button key={prompt} type="button" onClick={() => sendAdvisorMessage(prompt)}>{prompt}</button>)}
                 </div>
               ) : null}
+            </div>
             </div>
             <form className="advisor-input" onSubmit={submitAdvisorChat}>
               <input value={advisorInput} onChange={(event) => setAdvisorInput(event.target.value)} placeholder="Pregunta al Advisor..." />

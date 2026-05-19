@@ -1,7 +1,8 @@
 ﻿from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import text
@@ -15,15 +16,28 @@ ADVISOR_SYSTEM_PROMPT = """Eres Scentra Advisor, el AI Business Advisor persiste
 Tu trabajo es ayudar al usuario a tomar mejores decisiones comerciales y operativas usando CRM, inbox, canales Meta, triggers, remarketing, knowledge base y diagnosticos.
 Responde en espanol claro, accionable y con criterio ejecutivo. No inventes datos: si una cifra no esta en contexto, dilo.
 Cuando puedas, prioriza acciones por impacto y urgencia. Si una accion puede afectar clientes, campanas, tokens, webhooks o envios masivos, proponla como borrador y pide aprobacion humana.
-Devuelve respuestas concretas, con bullets cortos y siguientes pasos."""
+No devuelvas JSON, objetos, schemas ni bloques de codigo salvo que el usuario lo pida explicitamente.
+Devuelve respuestas naturales, concretas, con bullets cortos y siguientes pasos."""
 
 
 def _clean(value: Any, limit: int = 5000) -> str:
     return str(value or "").strip()[:limit]
 
 
+def _jsonable(value: Any) -> Any:
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_jsonable(item) for item in value]
+    return value
+
+
 def _json(value: Any) -> str:
-    return json.dumps(value if value is not None else {}, ensure_ascii=False)
+    return json.dumps(_jsonable(value if value is not None else {}), ensure_ascii=False, default=str)
 
 
 def ensure_advisor_tables(conn: Connection) -> None:
@@ -255,7 +269,7 @@ def _ensure_insight_tables(conn: Connection) -> None:
 
 
 def _row_dict(row: Any) -> dict[str, Any]:
-    return dict(row or {})
+    return _jsonable(dict(row or {}))
 
 
 def _safe_json(value: Any) -> dict[str, Any]:
@@ -738,7 +752,7 @@ def _advisor_prompt(context: dict[str, Any], history: list[dict[str, Any]], mess
     transcript = "\n".join(f"{item.get('role')}: {_clean(item.get('content'), 1200)}" for item in history[-10:])
     user_prompt = f"""
 Contexto operativo de Scentra:
-{json.dumps(context, ensure_ascii=False)}
+{json.dumps(_jsonable(context), ensure_ascii=False, default=str)}
 
 Conversacion reciente con el Advisor:
 {transcript or "Sin historial previo."}
@@ -750,9 +764,75 @@ Instrucciones:
 1. Responde como Advisor comercial-operativo.
 2. Si detectas oportunidad, riesgo o problema, mencionalo con prioridad.
 3. Si recomiendas una automatizacion, trigger, remarketing o accion Meta, dilo como propuesta, no como accion ejecutada.
-4. Termina con 1 a 3 siguientes pasos claros.
+4. No respondas en JSON aunque el contexto sea JSON. Escribe como humano: resumen breve, bullets y siguientes pasos.
+5. Termina con 1 a 3 siguientes pasos claros.
 """
     return ADVISOR_SYSTEM_PROMPT, user_prompt
+
+
+def _strip_json_fence(value: str) -> str:
+    text_value = _clean(value, 20000)
+    if text_value.startswith("```"):
+        lines = text_value.splitlines()
+        if lines and lines[0].strip().lower() in {"```json", "```"}:
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        return "\n".join(lines).strip()
+    return text_value
+
+
+def _humanize_json_answer(raw: Any) -> str:
+    text_value = _strip_json_fence(_clean(raw, 20000))
+    if not text_value or text_value[0] not in "[{":
+        return _clean(raw, 20000)
+    try:
+        parsed = json.loads(text_value)
+    except (TypeError, json.JSONDecodeError):
+        return _clean(raw, 20000)
+
+    def text_from_dict(item: dict[str, Any]) -> str:
+        title = _clean(item.get("titulo") or item.get("title") or item.get("name"), 220)
+        summary = _clean(item.get("resumen") or item.get("summary") or item.get("descripcion") or item.get("description"), 1200)
+        impact = _clean(item.get("impacto") or item.get("impact"), 500)
+        risk = _clean(item.get("riesgo") or item.get("risk") or item.get("risk_level"), 200)
+        steps = item.get("siguientes_pasos") or item.get("next_steps") or item.get("acciones") or item.get("actions") or []
+        if isinstance(steps, dict):
+            steps = list(steps.values())
+        lines: list[str] = []
+        if title:
+            lines.append(title)
+        if summary:
+            lines.append(summary)
+        if impact:
+            lines.append(f"Impacto: {impact}")
+        if risk:
+            lines.append(f"Riesgo: {risk}")
+        if isinstance(steps, list) and steps:
+            lines.append("Siguientes pasos:")
+            for step in steps[:3]:
+                if isinstance(step, dict):
+                    step_text = _clean(step.get("title") or step.get("titulo") or step.get("description") or step.get("descripcion") or step, 300)
+                else:
+                    step_text = _clean(step, 300)
+                if step_text:
+                    lines.append(f"- {step_text}")
+        return "\n".join(lines).strip()
+
+    if isinstance(parsed, dict):
+        human = text_from_dict(parsed)
+        return human or "Preparé un análisis estructurado. Revísalo como propuesta antes de ejecutar cualquier acción."
+    if isinstance(parsed, list):
+        lines = ["Esto es lo más importante que encontré:"]
+        for item in parsed[:5]:
+            if isinstance(item, dict):
+                summary = text_from_dict(item).replace("\n", " - ")
+            else:
+                summary = _clean(item, 300)
+            if summary:
+                lines.append(f"- {summary}")
+        return "\n".join(lines).strip()
+    return _clean(raw, 20000)
 
 
 def generate_seed_insights(conn: Connection, tenant_id: str) -> list[dict[str, Any]]:
@@ -1842,12 +1922,13 @@ def advisor_chat(
             "memory": memory,
             "actions": actions,
         }
+    assistant_answer = _humanize_json_answer(gateway.get("raw"))
     assistant_msg = create_message(
         conn,
         tenant_id=tenant_id,
         thread_id=str(thread["id"]),
         role="assistant",
-        content=_clean(gateway.get("raw"), 20000),
+        content=assistant_answer,
         metadata={
             "provider_code": gateway.get("provider_code"),
             "model": gateway.get("model"),
@@ -1883,7 +1964,7 @@ def advisor_chat(
         thread_id=str(thread["id"]),
         context=context,
         user_message=message,
-        assistant_message=_clean(gateway.get("raw"), 20000),
+        assistant_message=assistant_answer,
     )
     insights = generate_seed_insights(conn, tenant_id)
     recommendations = list_recommendations(conn, tenant_id, limit=10)

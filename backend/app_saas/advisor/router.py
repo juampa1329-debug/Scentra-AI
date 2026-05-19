@@ -36,7 +36,7 @@ router = APIRouter(prefix="/advisor", tags=["saas-advisor"])
 
 
 def _ndjson_event(event_type: str, data) -> str:
-    return json.dumps({"type": event_type, "data": data}, ensure_ascii=False) + "\n"
+    return json.dumps({"type": event_type, "data": data}, ensure_ascii=False, default=str) + "\n"
 
 
 @router.get("/threads")
