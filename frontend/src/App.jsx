@@ -14,6 +14,7 @@ const AI_API_PROVIDERS = [
   { code: "groq", category: "ai", name: "Groq", env: "GROQ_API_KEY", alt: "", models: "llama-3.1-8b-instant, llama-3.1-70b-versatile", supportsModels: true },
   { code: "mistral", category: "ai", name: "Mistral", env: "MISTRAL_API_KEY", alt: "", models: "mistral-small-latest, mistral-medium-latest", supportsModels: true },
   { code: "openrouter", category: "ai", name: "OpenRouter", env: "OPENROUTER_API_KEY", alt: "OPENROUTER_SITE / OPENROUTER_APP_NAME", models: "catalogo live de OpenRouter", supportsModels: true },
+  { code: "kimi", category: "ai", name: "Kimi / Moonshot AI", env: "KIMI_API_KEY", alt: "MOONSHOT_API_KEY", models: "kimi-k2.6, kimi-k2, moonshot-v1-*", supportsModels: true },
 ];
 
 const TTS_API_PROVIDERS = [
@@ -418,6 +419,8 @@ function App() {
   const [knowledgeUploading, setKnowledgeUploading] = useState(false);
   const [diagnostics, setDiagnostics] = useState(null);
   const [diagnosticsRunning, setDiagnosticsRunning] = useState(false);
+  const [aiGatewayProviders, setAiGatewayProviders] = useState([]);
+  const [aiGatewayRuns, setAiGatewayRuns] = useState([]);
   const [instagramOAuth, setInstagramOAuth] = useState({ state: "", assets: [], status: "", callbackUrl: "" });
   const [instagramDiagnostics, setInstagramDiagnostics] = useState(null);
   const [instagramBusy, setInstagramBusy] = useState(false);
@@ -661,7 +664,7 @@ function App() {
     clearComposerAttachment(); setCatalogDraft(null); setEmojiOpen(false); setAttachMenuOpen(false); setInboxChannelFilter("all"); setInboxSearch(""); setIsRecording(false); setRecordingSeconds(0); setRecordingLevels(EMPTY_WAVEFORM);
     recordingLevelsRef.current = EMPTY_WAVEFORM;
     setIntegrations([]); setWebhooks([]); setWebhookEvents([]); setBillingOverview(null); setBillingPlans([]); setLastWebhookSecret(null);
-    setApiCredentials([]); setCredentialModal(null); setCredentialModels({}); setKnowledgeSources([]); setDiagnostics(null); setInstagramDiagnostics(null); setInstagramOAuth({ state: "", assets: [], status: "", callbackUrl: "" });
+    setApiCredentials([]); setCredentialModal(null); setCredentialModels({}); setKnowledgeSources([]); setDiagnostics(null); setAiGatewayProviders([]); setAiGatewayRuns([]); setInstagramDiagnostics(null); setInstagramOAuth({ state: "", assets: [], status: "", callbackUrl: "" });
     setDebugInboundResult(null); setSubscriptionCheck(null);
     setIntegrationSecretModal(null);
     setWhatsappPhones([]); setPhoneRegisterForm({ phone_number_id: "", pin: "" });
@@ -714,6 +717,19 @@ function App() {
       setDiagnostics(data);
       if (!silent) showStatus("Diagnostico actualizado", "ok");
     } catch (err) { showStatus(String(err.message || err), "error"); }
+  };
+
+  const loadAiGateway = async (silent = false) => {
+    if (!accessToken) return;
+    try {
+      const [providersData, runsData] = await Promise.all([
+        apiCall("/saas/v1/ai-gateway/providers"),
+        apiCall("/saas/v1/ai-gateway/runs?limit=12"),
+      ]);
+      setAiGatewayProviders(providersData?.providers || []);
+      setAiGatewayRuns(runsData?.runs || []);
+      if (!silent) showStatus("AI Gateway actualizado", "ok");
+    } catch (err) { if (!silent) showStatus(String(err.message || err), "error"); }
   };
 
   const loadAiSettings = async () => {
@@ -824,7 +840,7 @@ function App() {
   useEffect(() => { loadSession(); }, [accessToken]);
   useEffect(() => {
     if (accessToken && ["dashboard", "customers", "labels", "campaigns", "broadcast", "ads"].includes(activeView)) loadDashboard(true);
-    if (accessToken && activeView === "settings") Promise.all([loadIntegrations(), loadWebhooks(), loadBilling(), loadApiCredentials(), loadAiSettings(), loadKnowledgeSources(), loadDiagnostics(true)]);
+    if (accessToken && activeView === "settings") Promise.all([loadIntegrations(), loadWebhooks(), loadBilling(), loadApiCredentials(), loadAiSettings(), loadKnowledgeSources(), loadDiagnostics(true), loadAiGateway(true)]);
     if (accessToken && activeView === "inbox") loadInbox();
   }, [accessToken, activeView]);
 
@@ -2371,6 +2387,15 @@ function App() {
                   <div><strong>Outbound</strong>{(diagnostics?.queues?.outbound || []).map((item) => <span key={item.status}>{item.status}: {item.total}</span>)}</div>
                 </div>
                 <div className="debug-table">{(diagnostics?.queues?.outbound_errors || []).map((item, idx) => <div className="debug-row error" key={`${item.updated_at}-${idx}`}><strong>{item.status} / {item.channel}</strong><span>{item.recipient_external_id || "-"}</span><small>{item.error}</small></div>)}{!diagnostics?.queues?.outbound_errors?.length ? <div className="empty">Sin errores outbound recientes.</div> : null}</div>
+              </article>
+              <article className="panel glass-card">
+                <div className="panel-head"><h2>AI Gateway</h2><button type="button" onClick={() => loadAiGateway()}>Refrescar</button></div>
+                <div className="queue-grid">
+                  <div><strong>Proveedores</strong>{aiGatewayProviders.map((item) => <span key={item.provider_code}>{item.provider_code}: {item.default_model}</span>)}</div>
+                  <div><strong>Kimi</strong><span>{aiGatewayProviders.find((item) => item.provider_code === "kimi") ? "registrado como proveedor oficial" : "pendiente de migracion"}</span></div>
+                  <div><strong>Ultimas llamadas</strong><span>{number(aiGatewayRuns.length)} registradas</span></div>
+                </div>
+                <div className="debug-table">{aiGatewayRuns.map((item) => <div className={`debug-row ${item.status === "failed" ? "error" : ""}`} key={item.id}><strong>{item.agent_type || "agent"} / {item.provider_code}</strong><span>{item.status} · {item.model || "-"}</span><small>{compactDateTimeLabel(item.created_at)} / {number(item.total_tokens)} tokens / {number(item.latency_ms)} ms {item.fallback_used ? "/ fallback" : ""}{item.error_code ? ` / ${item.error_code}: ${item.error_message}` : ""}</small></div>)}{!aiGatewayRuns.length ? <div className="empty">Sin llamadas AI todavia. Usa Probar IA o espera una respuesta automatica para llenar esta traza.</div> : null}</div>
               </article>
               <article className="panel glass-card">
                 <div className="panel-head"><h2>Ultimos webhooks</h2><span>entrada Meta</span></div>

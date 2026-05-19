@@ -13,6 +13,7 @@ from fastapi import HTTPException
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
+from app_saas.ai_gateway.service import generate_with_gateway
 from app_saas.api_credentials.router import _ensure_api_credentials_table
 from app_saas.billing.limits import ensure_ai_token_quota, ensure_monthly_message_quota
 from app_saas.db import db_session, set_tenant_context
@@ -39,6 +40,7 @@ PROVIDER_CREDENTIAL_KEYS = {
     "groq": "GROQ_API_KEY",
     "mistral": "MISTRAL_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
+    "kimi": "KIMI_API_KEY",
 }
 
 PROVIDER_DEFAULT_MODELS = {
@@ -46,6 +48,7 @@ PROVIDER_DEFAULT_MODELS = {
     "groq": "llama-3.1-8b-instant",
     "mistral": "mistral-small-latest",
     "openrouter": "google/gemini-2.5-flash",
+    "kimi": "kimi-k2.6",
 }
 
 CRM_FIELDS = {
@@ -556,29 +559,28 @@ def generate_agent_result(conn: Connection, tenant_id: str, conversation: dict[s
     requested_tokens = estimate_tokens(system_prompt, user_prompt)
     ensure_ai_token_quota(conn, tenant_id, requested=requested_tokens)
 
-    last_error = ""
-    for provider in [item for item in providers if item]:
-        token, model, credential_key = _provider_model_from_credentials(conn, tenant_id, provider)
-        if not token:
-            last_error = f"missing_ai_credential:{provider}:{credential_key}"
-            continue
-        try:
-            if provider == "google":
-                raw = _call_google(token, model, system_prompt, user_prompt, settings)
-            elif provider in {"groq", "mistral", "openrouter"}:
-                raw = _call_chat_completions(provider, token, model, system_prompt, user_prompt, settings)
-            else:
-                last_error = f"unsupported_ai_provider:{provider}"
-                continue
-            parsed = _extract_json(raw)
-            parsed["provider_code"] = provider
-            parsed["model"] = model
-            parsed["estimated_tokens"] = estimate_tokens(system_prompt, user_prompt, raw)
-            return {"ok": True, "result": parsed, "raw": raw}
-        except Exception as exc:
-            last_error = str(exc)[:900]
-            continue
-    return {"ok": False, "skipped": last_error or "ai_unavailable"}
+    gateway = generate_with_gateway(
+        conn,
+        tenant_id=tenant_id,
+        task_type="conversation_reply",
+        agent_type="sales_agent",
+        route_code="conversation.sales",
+        conversation_id=str(conversation["id"]),
+        provider_chain=providers,
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        settings=settings,
+    )
+    if not gateway.get("ok"):
+        return {"ok": False, "skipped": gateway.get("skipped") or "ai_unavailable"}
+    raw = _clean(gateway.get("raw"), 50000)
+    parsed = _extract_json(raw)
+    parsed["provider_code"] = gateway.get("provider_code") or ""
+    parsed["model"] = gateway.get("model") or ""
+    parsed["estimated_tokens"] = int(gateway.get("estimated_tokens") or estimate_tokens(system_prompt, user_prompt, raw))
+    parsed["ai_gateway_run_id"] = gateway.get("run_id") or ""
+    parsed["fallback_used"] = bool(gateway.get("fallback_used"))
+    return {"ok": True, "result": parsed, "raw": raw}
 
 
 def _split_tags(value: Any) -> list[str]:
@@ -1141,26 +1143,27 @@ def test_agent(conn: Connection, tenant_id: str, phone: str, message: str) -> di
     knowledge_context = _knowledge_context(conn, tenant_id, pseudo_messages)
     system_prompt, user_prompt = _prompt(settings, pseudo_conversation, memory, pseudo_messages, knowledge_context)
     ensure_ai_token_quota(conn, tenant_id, requested=estimate_tokens(system_prompt, user_prompt))
-    last_error = ""
     providers = [_clean(settings.get("provider_code"), 80).lower(), _clean(settings.get("fallback_provider_code"), 80).lower()]
-    for provider in [item for idx, item in enumerate(providers) if item and item not in providers[:idx]]:
-        token, model, credential_key = _provider_model_from_credentials(conn, tenant_id, provider)
-        if not token:
-            last_error = f"missing_ai_credential:{provider}:{credential_key}"
-            continue
-        try:
-            if provider == "google":
-                raw = _call_google(token, model, system_prompt, user_prompt, settings)
-            elif provider in {"groq", "mistral", "openrouter"}:
-                raw = _call_chat_completions(provider, token, model, system_prompt, user_prompt, settings)
-            else:
-                last_error = f"unsupported_ai_provider:{provider}"
-                continue
-            parsed = _extract_json(raw)
-            parsed["provider_code"] = provider
-            parsed["model"] = model
-            _record_ai_usage(conn, tenant_id, estimate_tokens(system_prompt, user_prompt, raw))
-            return {"ok": True, "result": parsed}
-        except Exception as exc:
-            last_error = str(exc)[:900]
-    raise HTTPException(status_code=409, detail=last_error or "ai_unavailable")
+    provider_chain = [item for idx, item in enumerate(providers) if item and item not in providers[:idx]]
+    gateway = generate_with_gateway(
+        conn,
+        tenant_id=tenant_id,
+        task_type="conversation_test",
+        agent_type="sales_agent",
+        route_code="conversation.sales",
+        conversation_id="",
+        provider_chain=provider_chain,
+        system_prompt=system_prompt,
+        user_prompt=user_prompt,
+        settings=settings,
+    )
+    if not gateway.get("ok"):
+        raise HTTPException(status_code=409, detail=gateway.get("skipped") or "ai_unavailable")
+    raw = _clean(gateway.get("raw"), 50000)
+    parsed = _extract_json(raw)
+    parsed["provider_code"] = gateway.get("provider_code") or ""
+    parsed["model"] = gateway.get("model") or ""
+    parsed["ai_gateway_run_id"] = gateway.get("run_id") or ""
+    parsed["fallback_used"] = bool(gateway.get("fallback_used"))
+    _record_ai_usage(conn, tenant_id, estimate_tokens(system_prompt, user_prompt, raw))
+    return {"ok": True, "result": parsed}

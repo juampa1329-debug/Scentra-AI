@@ -142,6 +142,7 @@ def _static_models(provider_code: str) -> list[dict[str, str]]:
         "groq": ["llama-3.1-8b-instant", "llama-3.1-70b-versatile", "llama-3.3-70b-versatile"],
         "mistral": ["mistral-small-latest", "mistral-medium-latest", "mistral-large-latest"],
         "openrouter": ["google/gemini-2.5-flash", "openai/gpt-4o-mini", "meta-llama/llama-3.1-8b-instruct"],
+        "kimi": ["kimi-k2.6", "kimi-k2", "moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"],
         "elevenlabs": ["eleven_v3", "eleven_multilingual_v2", "eleven_turbo_v2_5"],
         "google_tts": ["es-CO-Standard-A", "es-CO-Standard-B", "es-US-Standard-A"],
     }
@@ -173,6 +174,10 @@ def _models_from_provider(provider_code: str, token: str) -> list[dict[str, str]
         data = _request_json("https://openrouter.ai/api/v1/models", token=token)
         models = data.get("data") if isinstance(data.get("data"), list) else []
         return [{"id": str(item.get("id") or ""), "label": str(item.get("name") or item.get("id") or "")} for item in models if isinstance(item, dict) and item.get("id")]
+    if provider_code == "kimi":
+        data = _request_json("https://api.moonshot.ai/v1/models", token=token)
+        models = data.get("data") if isinstance(data.get("data"), list) else []
+        return [{"id": str(item.get("id") or ""), "label": str(item.get("id") or "")} for item in models if isinstance(item, dict) and item.get("id")]
     if provider_code == "elevenlabs":
         voices = _request_json("https://api.elevenlabs.io/v1/voices", headers={"xi-api-key": token})
         rows = voices.get("voices") if isinstance(voices.get("voices"), list) else []
