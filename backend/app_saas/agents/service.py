@@ -72,7 +72,7 @@ PROVIDER_ROUTE_CATALOG: list[dict[str, str]] = [
 ]
 
 AI_PROVIDER_CATALOG: list[dict[str, str]] = [
-    {"code": "gemini", "label": "Google Gemini", "description": "Buen balance para resumenes, RAG y respuestas comerciales."},
+    {"code": "google", "label": "Google Gemini", "description": "Buen balance para resumenes, RAG y respuestas comerciales."},
     {"code": "mistral", "label": "Mistral", "description": "Clasificacion, scoring y tareas de bajo costo."},
     {"code": "openrouter", "label": "OpenRouter", "description": "Fallback flexible y acceso a catalogo amplio."},
     {"code": "kimi", "label": "Kimi", "description": "Reasoning, contexto largo y analisis complejo."},
@@ -126,7 +126,7 @@ AGENT_TEMPLATES: dict[str, dict[str, Any]] = {
         "tools": ["crm.update", "conversation.reply", "catalog.search", "campaigns.suggest"],
         "goals": ["Calificar leads", "Recuperar conversaciones abiertas", "Aumentar conversion"],
         "personality": {"tone": "humano, vendedor consultivo y breve", "risk_posture": "moderado"},
-        "provider_policy": {"route": "sales", "preferred": "gemini", "fallback": "openrouter"},
+        "provider_policy": {"route": "sales", "preferred": "google", "fallback": "openrouter"},
         "memory_policy": {"short_term": True, "semantic": True, "customer_profile": True},
         "approval_policy": {"requires_human_approval": True, "can_execute_safe_actions": False},
         "risk_level": "high",
@@ -141,7 +141,7 @@ AGENT_TEMPLATES: dict[str, dict[str, Any]] = {
         "tools": ["knowledge.search", "conversation.reply", "crm.update", "tickets.create"],
         "goals": ["Resolver dudas repetidas", "Reducir tiempos de respuesta", "Escalar casos criticos"],
         "personality": {"tone": "calido, preciso y resolutivo", "risk_posture": "conservador"},
-        "provider_policy": {"route": "support", "preferred": "gemini", "fallback": "mistral"},
+        "provider_policy": {"route": "support", "preferred": "google", "fallback": "mistral"},
         "memory_policy": {"short_term": True, "semantic": True, "knowledge_grounded": True},
         "approval_policy": {"requires_human_approval": True, "can_execute_safe_actions": False},
         "risk_level": "medium",
@@ -216,7 +216,7 @@ AGENT_TEMPLATES: dict[str, dict[str, Any]] = {
         "tools": ["analytics.read", "crm.read", "advisor.summarize", "reports.create"],
         "goals": ["Crear balances ejecutivos", "Explicar KPIs", "Resumir prioridades"],
         "personality": {"tone": "ejecutivo, sobrio y accionable"},
-        "provider_policy": {"route": "summaries", "preferred": "gemini", "fallback": "openrouter"},
+        "provider_policy": {"route": "summaries", "preferred": "google", "fallback": "openrouter"},
         "memory_policy": {"short_term": False, "semantic": True, "report_history": True},
         "approval_policy": {"requires_human_approval": False, "can_execute_safe_actions": True},
         "risk_level": "low",
@@ -231,7 +231,7 @@ AGENT_TEMPLATES: dict[str, dict[str, Any]] = {
         "tools": ["knowledge.search", "knowledge.audit", "rag.evaluate"],
         "goals": ["Mejorar base de conocimiento", "Reducir alucinaciones", "Detectar huecos de informacion"],
         "personality": {"tone": "preciso, verificable y didactico"},
-        "provider_policy": {"route": "rag", "preferred": "gemini", "fallback": "mistral"},
+        "provider_policy": {"route": "rag", "preferred": "google", "fallback": "mistral"},
         "memory_policy": {"short_term": False, "semantic": True, "rag": True},
         "approval_policy": {"requires_human_approval": False, "can_execute_safe_actions": True},
         "risk_level": "low",
@@ -514,6 +514,55 @@ def builder_catalog() -> dict[str, Any]:
         "memory_flags": MEMORY_FLAG_CATALOG,
         "approval_flags": APPROVAL_FLAG_CATALOG,
     }
+
+
+def runtime_agent_for_conversation(conn: Connection, tenant_id: str, channel: str) -> dict[str, Any] | None:
+    _ensure_tables(conn)
+    clean_channel = _clean(channel, 40).lower() or "whatsapp"
+    rows = conn.execute(
+        text(
+            """
+            SELECT id::text, tenant_id::text, agent_type, name, description, status,
+                   provider_policy_json, personality_json, goals_json, rules_json, channels_json,
+                   tools_json, memory_policy_json, approval_policy_json, metrics_json,
+                   created_by_user_id::text, created_at::text, updated_at::text
+            FROM saas_ai_agents
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND status = 'active'
+              AND agent_type IN ('sales', 'support')
+            ORDER BY
+              CASE agent_type WHEN 'sales' THEN 1 WHEN 'support' THEN 2 ELSE 9 END,
+              updated_at DESC
+            """
+        ),
+        {"tenant_id": tenant_id},
+    ).mappings().all()
+    for row in rows:
+        item = _agent_row_to_dict(dict(row))
+        channels = {str(value or "").strip().lower() for value in _json_value(item.get("channels_json"), [])}
+        if clean_channel in channels or "global" in channels:
+            return item
+    return None
+
+
+def record_agent_runtime_event(
+    conn: Connection,
+    *,
+    tenant_id: str,
+    agent_id: str,
+    event_type: str,
+    summary: str,
+    details: dict[str, Any] | None = None,
+) -> None:
+    _audit(
+        conn,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        actor_user_id=None,
+        event_type=event_type,
+        summary=summary,
+        details=details or {},
+    )
 
 
 def _template_payload(agent_type: str) -> dict[str, Any]:

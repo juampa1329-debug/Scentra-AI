@@ -502,6 +502,45 @@ nav { display: grid; gap: 8px; width: 100%; }
   backdrop-filter: var(--blur);
   padding: 10px;
 }
+.agent-builder-section.runtime {
+  border-color: rgba(52,211,153,0.22);
+  background:
+    radial-gradient(circle at top right, rgba(20,184,166,0.14), transparent 38%),
+    rgba(255,255,255,0.035);
+}
+.agent-runtime-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.agent-runtime-status span:not(.agent-status) {
+  border: 1px solid rgba(183,231,224,0.14);
+  border-radius: 999px;
+  padding: 7px 10px;
+  color: var(--soft);
+  background: rgba(0,0,0,0.12);
+  font-size: 12px;
+  font-weight: 800;
+}
+.agent-runtime-test {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+}
+.agent-runtime-test pre {
+  grid-column: 1 / -1;
+  max-height: 260px;
+  overflow: auto;
+  margin: 0;
+  border: 1px solid rgba(183,231,224,0.12);
+  border-radius: 16px;
+  padding: 12px;
+  background: rgba(1,7,10,0.34);
+  color: var(--soft);
+  white-space: pre-wrap;
+  font-size: 11px;
+}
 .inbox-grid { display: grid; grid-template-columns: minmax(270px, 320px) minmax(0, 1fr); gap: 10px; min-height: calc(100vh - 132px); }
 .content-inbox .inbox-grid { flex: 1 1 auto; height: 100%; min-height: 0; }
 .inbox-grid.crm-open { grid-template-columns: minmax(270px, 320px) minmax(0, 1fr) minmax(300px, 380px); }
@@ -1420,7 +1459,7 @@ nav { display: grid; gap: 8px; width: 100%; }
   .advisor-input { grid-template-columns: 1fr; }
   .agents-hero-actions { display: grid; }
   .agent-card-grid, .template-agent-grid { grid-template-columns: 1fr; }
-  .agent-editor-grid, .agent-editor-grid.three, .agent-builder-section.two, .agent-note-form { grid-template-columns: 1fr; }
+  .agent-editor-grid, .agent-editor-grid.three, .agent-builder-section.two, .agent-note-form, .agent-runtime-test { grid-template-columns: 1fr; }
   .agent-section-label { align-items: flex-start; flex-direction: column; }
   .agent-section-label span { text-align: left; }
 }

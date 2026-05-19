@@ -7,7 +7,7 @@ const FALLBACK_CHANNELS = [
 ];
 
 const FALLBACK_PROVIDERS = [
-  { code: "gemini", label: "Google Gemini" },
+  { code: "google", label: "Google Gemini" },
   { code: "mistral", label: "Mistral" },
   { code: "openrouter", label: "OpenRouter" },
   { code: "kimi", label: "Kimi" },
@@ -69,6 +69,13 @@ function splitLines(value) {
     .slice(0, 40);
 }
 
+function normalizeProvider(value) {
+  const clean = String(value || "").trim().toLowerCase();
+  if (clean === "gemini" || clean === "google_gemini" || clean === "google-gemini") return "google";
+  if (clean === "moonshot" || clean === "moonshotai") return "kimi";
+  return clean;
+}
+
 function makeEditor(agent) {
   const personality = asObject(agent?.personality_json);
   const providerPolicy = asObject(agent?.provider_policy_json);
@@ -84,8 +91,8 @@ function makeEditor(agent) {
     operatingStyle: String(personality.operating_style || ""),
     handoffPolicy: String(personality.handoff_policy || ""),
     providerRoute: String(providerPolicy.route || "advisor"),
-    preferredProvider: String(providerPolicy.preferred || "gemini"),
-    fallbackProvider: String(providerPolicy.fallback || "openrouter"),
+    preferredProvider: normalizeProvider(providerPolicy.preferred || "google"),
+    fallbackProvider: normalizeProvider(providerPolicy.fallback || "openrouter"),
     memory: { ...asObject(agent?.memory_policy_json) },
     approval: { ...asObject(agent?.approval_policy_json) },
   };
@@ -109,6 +116,7 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
   const [selectedAgentId, setSelectedAgentId] = useState("");
   const [editor, setEditor] = useState(null);
   const [eventNote, setEventNote] = useState("");
+  const [runtimeTest, setRuntimeTest] = useState({ message: "Hola, quiero saber que opciones tienen disponibles.", result: null });
   const [dirty, setDirty] = useState(false);
   const [loading, setLoading] = useState(false);
   const [busyKey, setBusyKey] = useState("");
@@ -128,6 +136,7 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
   const memoryFlags = asList(catalog.memory_flags);
   const approvalFlags = asList(catalog.approval_flags);
   const groupedTools = groupBy(toolCatalog, "group");
+  const runtimeEnabledForSelected = selectedAgent && ["sales", "support"].includes(selectedAgent.agent_type);
 
   const loadAgents = async (silent = false) => {
     setLoading(true);
@@ -289,6 +298,26 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
     }
   };
 
+  const runRuntimeTest = async () => {
+    const message = String(runtimeTest.message || "").trim();
+    if (!message) return;
+    setBusyKey(`runtime-test:${selectedAgent?.id || "none"}`);
+    try {
+      const data = await apiCall("/saas/v1/ai/test", {
+        method: "POST",
+        body: JSON.stringify({ phone: "runtime-test", message }),
+      });
+      setRuntimeTest((prev) => ({ ...prev, result: data?.result || data }));
+      if (selectedAgent?.id) await loadEvents(selectedAgent.id);
+      showStatus("Runtime probado con AI Gateway", "ok");
+    } catch (err) {
+      setRuntimeTest((prev) => ({ ...prev, result: { error: String(err.message || err) } }));
+      showStatus(String(err.message || err), "error");
+    } finally {
+      setBusyKey("");
+    }
+  };
+
   return (
     <section className="agents-page">
       <article className="agents-hero glass-card">
@@ -417,6 +446,31 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
                     </select>
                   </label>
                 </div>
+              </section>
+
+              <section className="agent-builder-section runtime">
+                <div className="agent-section-label">
+                  <strong>Runtime fase 3</strong>
+                  <span>Los agentes activos de ventas/soporte ya gobiernan respuestas, proveedor, fallback, herramientas y memoria conversacional.</span>
+                </div>
+                <div className="agent-runtime-status">
+                  <span className={`agent-status ${selectedAgent.status === "active" ? "ok" : "paused"}`}>{selectedAgent.status === "active" ? "runtime activo" : "requiere activar"}</span>
+                  <span>{runtimeEnabledForSelected ? "conversacional" : "interno/analitico"}</span>
+                  <span>{editor.tools.includes("conversation.reply") ? "puede responder" : "sin tool conversation.reply"}</span>
+                </div>
+                {runtimeEnabledForSelected ? (
+                  <div className="agent-runtime-test">
+                    <textarea rows={3} value={runtimeTest.message} onChange={(event) => setRuntimeTest((prev) => ({ ...prev, message: event.target.value }))} />
+                    <button type="button" className="primary" disabled={busyKey.startsWith("runtime-test:") || selectedAgent.status !== "active"} onClick={runRuntimeTest}>
+                      {busyKey.startsWith("runtime-test:") ? "Probando..." : "Probar runtime"}
+                    </button>
+                    {runtimeTest.result ? (
+                      <pre>{JSON.stringify(runtimeTest.result, null, 2)}</pre>
+                    ) : null}
+                  </div>
+                ) : (
+                  <div className="empty">Este tipo de agente aun opera como analitico. El primer runtime conversacional usa Sales y Support Agent.</div>
+                )}
               </section>
 
               <section className="agent-builder-section">

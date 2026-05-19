@@ -14,6 +14,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
 from app_saas.ai_gateway.service import generate_with_gateway
+from app_saas.agents.service import record_agent_runtime_event, runtime_agent_for_conversation
 from app_saas.api_credentials.router import _ensure_api_credentials_table
 from app_saas.billing.limits import ensure_ai_token_quota, ensure_monthly_message_quota
 from app_saas.db import db_session, set_tenant_context
@@ -51,6 +52,14 @@ PROVIDER_DEFAULT_MODELS = {
     "kimi": "kimi-k2.6",
 }
 
+PROVIDER_ALIASES = {
+    "gemini": "google",
+    "google_gemini": "google",
+    "google-gemini": "google",
+    "moonshot": "kimi",
+    "moonshotai": "kimi",
+}
+
 CRM_FIELDS = {
     "display_name",
     "first_name",
@@ -72,6 +81,35 @@ def _clean(value: Any, limit: int = 4000) -> str:
 
 def _json(value: Any) -> str:
     return json.dumps(value if value is not None else {}, ensure_ascii=False)
+
+
+def _safe_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+def _safe_list(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, list) else []
+        except json.JSONDecodeError:
+            return []
+    return []
+
+
+def _normalize_provider_code(value: Any) -> str:
+    clean = _clean(value, 80).lower()
+    return PROVIDER_ALIASES.get(clean, clean)
 
 
 def _period_yyyymm() -> str:
@@ -173,7 +211,7 @@ def default_settings(tenant_id: str) -> dict[str, Any]:
 
 
 def _provider_model_from_credentials(conn: Connection, tenant_id: str, provider_code: str) -> tuple[str, str, str]:
-    provider = _clean(provider_code, 80).lower()
+    provider = _normalize_provider_code(provider_code)
     if not provider:
         return "", "", ""
     _ensure_api_credentials_table(conn)
@@ -239,8 +277,8 @@ def get_settings(conn: Connection, tenant_id: str) -> dict[str, Any]:
 
 def upsert_settings(conn: Connection, tenant_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     ensure_ai_tables(conn)
-    provider = _clean(payload.get("provider_code") or "google", 80).lower()
-    fallback = _clean(payload.get("fallback_provider_code") or "", 80).lower()
+    provider = _normalize_provider_code(payload.get("provider_code") or "google")
+    fallback = _normalize_provider_code(payload.get("fallback_provider_code") or "")
     system_prompt = _clean(payload.get("system_prompt") or DEFAULT_AGENT_PROMPT, 20000)
     metadata = payload.get("metadata_json") if isinstance(payload.get("metadata_json"), dict) else {}
     conn.execute(
@@ -385,8 +423,128 @@ def _knowledge_context(conn: Connection, tenant_id: str, messages: list[dict[str
     return "\n\n---\n\n".join(snippets)
 
 
-def _prompt(settings: dict[str, Any], conversation: dict[str, Any], memory: dict[str, Any], messages: list[dict[str, Any]], knowledge_context: str = "") -> tuple[str, str]:
+def _runtime_settings(settings: dict[str, Any], runtime_agent: dict[str, Any] | None) -> dict[str, Any]:
+    if not runtime_agent:
+        return settings
+    provider_policy = _safe_dict(runtime_agent.get("provider_policy_json"))
+    metadata = _safe_dict(settings.get("metadata_json"))
+    legacy_provider = _normalize_provider_code(settings.get("provider_code"))
+    legacy_fallback = _normalize_provider_code(settings.get("fallback_provider_code"))
+    preferred = _normalize_provider_code(provider_policy.get("preferred") or provider_policy.get("primary_provider"))
+    fallback = _normalize_provider_code(provider_policy.get("fallback") or provider_policy.get("fallback_provider"))
+    merged = {
+        **settings,
+        "metadata_json": {
+            **metadata,
+            "runtime_agent_id": runtime_agent.get("id") or "",
+            "runtime_agent_type": runtime_agent.get("agent_type") or "",
+            "runtime_route": provider_policy.get("route") or "",
+            "legacy_provider_code": legacy_provider,
+            "legacy_fallback_provider_code": legacy_fallback,
+        },
+    }
+    if preferred:
+        merged["provider_code"] = preferred
+    if fallback:
+        merged["fallback_provider_code"] = fallback
+    return merged
+
+
+def _runtime_provider_chain(settings: dict[str, Any]) -> list[str]:
+    metadata = _safe_dict(settings.get("metadata_json"))
+    candidates = [
+        _normalize_provider_code(settings.get("provider_code")),
+        _normalize_provider_code(settings.get("fallback_provider_code")),
+        _normalize_provider_code(metadata.get("legacy_provider_code")),
+        _normalize_provider_code(metadata.get("legacy_fallback_provider_code")),
+    ]
+    providers: list[str] = []
+    for provider in candidates:
+        if provider and provider not in providers:
+            providers.append(provider)
+    return providers
+
+
+def _runtime_route(runtime_agent: dict[str, Any] | None, fallback: str = "conversation.sales") -> str:
+    if not runtime_agent:
+        return fallback
+    provider_policy = _safe_dict(runtime_agent.get("provider_policy_json"))
+    route = _clean(provider_policy.get("route") or runtime_agent.get("agent_type") or "", 80).lower()
+    if not route:
+        return fallback
+    return route if "." in route else f"conversation.{route}"
+
+
+def _runtime_agent_label(runtime_agent: dict[str, Any] | None) -> str:
+    if not runtime_agent:
+        return "legacy_ai_settings"
+    return _clean(runtime_agent.get("name") or runtime_agent.get("agent_type") or "AI Agent", 160)
+
+
+def _runtime_tool_allowed(runtime_agent: dict[str, Any] | None, tool_code: str, *, default: bool = True) -> bool:
+    if not runtime_agent:
+        return default
+    tools = {str(item or "").strip().lower() for item in _safe_list(runtime_agent.get("tools_json"))}
+    if not tools:
+        return default
+    return tool_code.lower() in tools
+
+
+def _runtime_can_send(runtime_agent: dict[str, Any] | None) -> bool:
+    if not runtime_agent:
+        return True
+    approval = _safe_dict(runtime_agent.get("approval_policy_json"))
+    if "can_send_messages" in approval and approval.get("can_send_messages") is False:
+        return False
+    return _runtime_tool_allowed(runtime_agent, "conversation.reply", default=True)
+
+
+def _runtime_context(runtime_agent: dict[str, Any] | None) -> str:
+    if not runtime_agent:
+        return ""
+    personality = _safe_dict(runtime_agent.get("personality_json"))
+    provider_policy = _safe_dict(runtime_agent.get("provider_policy_json"))
+    memory_policy = _safe_dict(runtime_agent.get("memory_policy_json"))
+    approval_policy = _safe_dict(runtime_agent.get("approval_policy_json"))
+    goals = [_clean(item, 240) for item in _safe_list(runtime_agent.get("goals_json")) if _clean(item, 240)]
+    rules = [_clean(item, 300) for item in _safe_list(runtime_agent.get("rules_json")) if _clean(item, 300)]
+    tools = [_clean(item, 80) for item in _safe_list(runtime_agent.get("tools_json")) if _clean(item, 80)]
+    channels = [_clean(item, 40) for item in _safe_list(runtime_agent.get("channels_json")) if _clean(item, 40)]
+    return f"""
+Agente runtime activo:
+- ID: {_clean(runtime_agent.get("id"), 80)}
+- Tipo: {_clean(runtime_agent.get("agent_type"), 80)}
+- Nombre: {_clean(runtime_agent.get("name"), 160)}
+- Descripcion: {_clean(runtime_agent.get("description"), 800)}
+- Canales habilitados: {", ".join(channels) or "sin canales declarados"}
+- Objetivos: {" | ".join(goals) or "usar objetivo comercial general"}
+- Reglas operativas: {" | ".join(rules) or "sin reglas adicionales"}
+- Herramientas permitidas: {", ".join(tools) or "runtime legacy"}
+- Personalidad: {json.dumps(personality, ensure_ascii=False)}
+- Politica de modelo: {json.dumps(provider_policy, ensure_ascii=False)}
+- Politica de memoria: {json.dumps(memory_policy, ensure_ascii=False)}
+- Politica de aprobacion: {json.dumps(approval_policy, ensure_ascii=False)}
+
+Instrucciones de seguridad del agente:
+1. Usa solamente herramientas permitidas por el agente.
+2. No prometas acciones fuera de sus canales, permisos o fuentes.
+3. Si una accion requiere aprobacion humana, proponla como siguiente paso, no la ejecutes.
+4. Si no tienes datos suficientes, pregunta brevemente antes de inventar.
+""".strip()
+
+
+def _prompt(
+    settings: dict[str, Any],
+    conversation: dict[str, Any],
+    memory: dict[str, Any],
+    messages: list[dict[str, Any]],
+    knowledge_context: str = "",
+    runtime_agent: dict[str, Any] | None = None,
+) -> tuple[str, str]:
     system_prompt = _clean(settings.get("system_prompt") or DEFAULT_AGENT_PROMPT, 20000)
+    agent_context = _runtime_context(runtime_agent)
+    if agent_context:
+        system_prompt = f"{system_prompt}\n\n{agent_context}"
     facts = memory.get("facts_json") if isinstance(memory.get("facts_json"), dict) else {}
     transcript_lines = []
     for message in messages:
@@ -549,13 +707,35 @@ def generate_agent_result(conn: Connection, tenant_id: str, conversation: dict[s
     if not bool(settings.get("enabled")):
         return {"ok": False, "skipped": "ai_disabled"}
 
-    providers = [_clean(settings.get("provider_code"), 80).lower()]
-    fallback = _clean(settings.get("fallback_provider_code"), 80).lower()
-    if fallback and fallback not in providers:
-        providers.append(fallback)
+    runtime_agent = runtime_agent_for_conversation(conn, tenant_id, _clean(conversation.get("channel"), 40) or "whatsapp")
+    if runtime_agent and not _runtime_can_send(runtime_agent):
+        record_agent_runtime_event(
+            conn,
+            tenant_id=tenant_id,
+            agent_id=runtime_agent["id"],
+            event_type="agent.runtime_skipped",
+            summary=f"{_runtime_agent_label(runtime_agent)} no tiene permiso para responder.",
+            details={
+                "conversation_id": str(conversation.get("id") or ""),
+                "channel": conversation.get("channel") or "",
+                "reason": "conversation_reply_tool_or_send_permission_missing",
+            },
+        )
+        return {
+            "ok": False,
+            "skipped": "active_agent_cannot_send_messages",
+            "agent": {
+                "id": runtime_agent["id"],
+                "name": runtime_agent.get("name"),
+                "agent_type": runtime_agent.get("agent_type"),
+            },
+        }
+
+    settings = _runtime_settings(settings, runtime_agent)
+    providers = _runtime_provider_chain(settings)
     memory = get_memory(conn, tenant_id, str(conversation["id"]))
     knowledge_context = _knowledge_context(conn, tenant_id, messages)
-    system_prompt, user_prompt = _prompt(settings, conversation, memory, messages, knowledge_context)
+    system_prompt, user_prompt = _prompt(settings, conversation, memory, messages, knowledge_context, runtime_agent)
     requested_tokens = estimate_tokens(system_prompt, user_prompt)
     ensure_ai_token_quota(conn, tenant_id, requested=requested_tokens)
 
@@ -563,8 +743,8 @@ def generate_agent_result(conn: Connection, tenant_id: str, conversation: dict[s
         conn,
         tenant_id=tenant_id,
         task_type="conversation_reply",
-        agent_type="sales_agent",
-        route_code="conversation.sales",
+        agent_type=f"{runtime_agent.get('agent_type')}_agent" if runtime_agent else "sales_agent",
+        route_code=_runtime_route(runtime_agent),
         conversation_id=str(conversation["id"]),
         provider_chain=providers,
         system_prompt=system_prompt,
@@ -572,6 +752,20 @@ def generate_agent_result(conn: Connection, tenant_id: str, conversation: dict[s
         settings=settings,
     )
     if not gateway.get("ok"):
+        if runtime_agent:
+            record_agent_runtime_event(
+                conn,
+                tenant_id=tenant_id,
+                agent_id=runtime_agent["id"],
+                event_type="agent.runtime_failed",
+                summary=f"{_runtime_agent_label(runtime_agent)} no pudo generar respuesta.",
+                details={
+                    "conversation_id": str(conversation.get("id") or ""),
+                    "channel": conversation.get("channel") or "",
+                    "provider_chain": providers,
+                    "error": gateway.get("skipped") or "ai_unavailable",
+                },
+            )
         return {"ok": False, "skipped": gateway.get("skipped") or "ai_unavailable"}
     raw = _clean(gateway.get("raw"), 50000)
     parsed = _extract_json(raw)
@@ -580,7 +774,26 @@ def generate_agent_result(conn: Connection, tenant_id: str, conversation: dict[s
     parsed["estimated_tokens"] = int(gateway.get("estimated_tokens") or estimate_tokens(system_prompt, user_prompt, raw))
     parsed["ai_gateway_run_id"] = gateway.get("run_id") or ""
     parsed["fallback_used"] = bool(gateway.get("fallback_used"))
-    return {"ok": True, "result": parsed, "raw": raw}
+    if runtime_agent:
+        parsed["agent_id"] = runtime_agent["id"]
+        parsed["agent_type"] = runtime_agent.get("agent_type") or ""
+        parsed["agent_name"] = runtime_agent.get("name") or ""
+        record_agent_runtime_event(
+            conn,
+            tenant_id=tenant_id,
+            agent_id=runtime_agent["id"],
+            event_type="agent.runtime_generated",
+            summary=f"{_runtime_agent_label(runtime_agent)} genero una respuesta.",
+            details={
+                "conversation_id": str(conversation.get("id") or ""),
+                "channel": conversation.get("channel") or "",
+                "ai_gateway_run_id": parsed.get("ai_gateway_run_id") or "",
+                "provider": parsed.get("provider_code") or "",
+                "model": parsed.get("model") or "",
+                "fallback_used": bool(parsed.get("fallback_used")),
+            },
+        )
+    return {"ok": True, "result": parsed, "raw": raw, "agent": runtime_agent}
 
 
 def _split_tags(value: Any) -> list[str]:
@@ -932,10 +1145,14 @@ def process_conversation_ai(conn: Connection, tenant_id: str, conversation_id: s
     if not generated.get("ok"):
         return generated
     result = generated.get("result") or {}
+    runtime_agent = generated.get("agent") if isinstance(generated.get("agent"), dict) else None
     crm = result.get("crm") if isinstance(result.get("crm"), dict) else {}
     facts = result.get("facts") if isinstance(result.get("facts"), dict) else {}
     try:
-        crm_patch = _update_crm(conn, tenant_id, conversation, crm, facts)
+        if _runtime_tool_allowed(runtime_agent, "crm.update", default=True):
+            crm_patch = _update_crm(conn, tenant_id, conversation, crm, facts)
+        else:
+            crm_patch = {"skipped": "agent_tool_crm_update_not_allowed"}
         memory = _upsert_memory(
             conn,
             tenant_id,
@@ -951,7 +1168,33 @@ def process_conversation_ai(conn: Connection, tenant_id: str, conversation_id: s
         return {"ok": False, "skipped": "ai_postprocess_blocked", "detail": exc.detail}
     except Exception as exc:
         return {"ok": False, "skipped": "ai_postprocess_error", "detail": str(exc)[:500]}
-    return {"ok": True, "crm_patch": crm_patch, "memory": memory, "outbound": outbound, "typing": typing, "ai": {"provider": result.get("provider_code"), "model": result.get("model"), "tokens": tokens}}
+    if runtime_agent:
+        record_agent_runtime_event(
+            conn,
+            tenant_id=tenant_id,
+            agent_id=str(runtime_agent["id"]),
+            event_type="agent.runtime_completed",
+            summary=f"{_runtime_agent_label(runtime_agent)} completo el ciclo de conversacion.",
+            details={
+                "conversation_id": conversation_id,
+                "queued_messages": int((outbound or {}).get("queued_messages") or 0),
+                "crm_patch": crm_patch,
+                "tokens": tokens,
+            },
+        )
+    return {
+        "ok": True,
+        "crm_patch": crm_patch,
+        "memory": memory,
+        "outbound": outbound,
+        "typing": typing,
+        "agent": {
+            "id": runtime_agent.get("id") if runtime_agent else "",
+            "name": runtime_agent.get("name") if runtime_agent else "",
+            "agent_type": runtime_agent.get("agent_type") if runtime_agent else "",
+        },
+        "ai": {"provider": result.get("provider_code"), "model": result.get("model"), "tokens": tokens},
+    }
 
 
 def schedule_conversation_ai(
@@ -1131,6 +1374,10 @@ def test_agent(conn: Connection, tenant_id: str, phone: str, message: str) -> di
     settings = get_settings(conn, tenant_id)
     if not bool(settings.get("enabled")):
         raise HTTPException(status_code=409, detail="ai_disabled")
+    runtime_agent = runtime_agent_for_conversation(conn, tenant_id, "whatsapp")
+    if runtime_agent and not _runtime_can_send(runtime_agent):
+        raise HTTPException(status_code=409, detail="active_agent_cannot_send_messages")
+    settings = _runtime_settings(settings, runtime_agent)
     # The test path uses the regular provider call but does not write CRM, memory or outbound.
     memory = {
         "tenant_id": tenant_id,
@@ -1141,16 +1388,15 @@ def test_agent(conn: Connection, tenant_id: str, phone: str, message: str) -> di
         "updated_at": "",
     }
     knowledge_context = _knowledge_context(conn, tenant_id, pseudo_messages)
-    system_prompt, user_prompt = _prompt(settings, pseudo_conversation, memory, pseudo_messages, knowledge_context)
+    system_prompt, user_prompt = _prompt(settings, pseudo_conversation, memory, pseudo_messages, knowledge_context, runtime_agent)
     ensure_ai_token_quota(conn, tenant_id, requested=estimate_tokens(system_prompt, user_prompt))
-    providers = [_clean(settings.get("provider_code"), 80).lower(), _clean(settings.get("fallback_provider_code"), 80).lower()]
-    provider_chain = [item for idx, item in enumerate(providers) if item and item not in providers[:idx]]
+    provider_chain = _runtime_provider_chain(settings)
     gateway = generate_with_gateway(
         conn,
         tenant_id=tenant_id,
         task_type="conversation_test",
-        agent_type="sales_agent",
-        route_code="conversation.sales",
+        agent_type=f"{runtime_agent.get('agent_type')}_agent" if runtime_agent else "sales_agent",
+        route_code=_runtime_route(runtime_agent),
         conversation_id="",
         provider_chain=provider_chain,
         system_prompt=system_prompt,
@@ -1165,5 +1411,22 @@ def test_agent(conn: Connection, tenant_id: str, phone: str, message: str) -> di
     parsed["model"] = gateway.get("model") or ""
     parsed["ai_gateway_run_id"] = gateway.get("run_id") or ""
     parsed["fallback_used"] = bool(gateway.get("fallback_used"))
+    if runtime_agent:
+        parsed["agent_id"] = runtime_agent["id"]
+        parsed["agent_type"] = runtime_agent.get("agent_type") or ""
+        parsed["agent_name"] = runtime_agent.get("name") or ""
+        record_agent_runtime_event(
+            conn,
+            tenant_id=tenant_id,
+            agent_id=runtime_agent["id"],
+            event_type="agent.runtime_tested",
+            summary=f"{_runtime_agent_label(runtime_agent)} fue probado desde el panel.",
+            details={
+                "phone": _clean(phone, 120),
+                "provider": parsed.get("provider_code") or "",
+                "model": parsed.get("model") or "",
+                "ai_gateway_run_id": parsed.get("ai_gateway_run_id") or "",
+            },
+        )
     _record_ai_usage(conn, tenant_id, estimate_tokens(system_prompt, user_prompt, raw))
     return {"ok": True, "result": parsed}
