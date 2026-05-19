@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import text
@@ -73,6 +74,23 @@ def ensure_advisor_tables(conn: Connection) -> None:
             """
             CREATE INDEX IF NOT EXISTS idx_saas_advisor_messages_thread_created
             ON saas_advisor_messages (thread_id, created_at ASC)
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS saas_advisor_memory (
+                tenant_id UUID NOT NULL REFERENCES saas_tenants(id) ON DELETE CASCADE,
+                user_id UUID NOT NULL REFERENCES saas_users(id) ON DELETE CASCADE,
+                memory_key TEXT NOT NULL DEFAULT 'default',
+                summary TEXT NOT NULL DEFAULT '',
+                facts_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                last_thread_id UUID NULL REFERENCES saas_advisor_threads(id) ON DELETE SET NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (tenant_id, user_id, memory_key)
+            )
             """
         )
     )
@@ -314,6 +332,93 @@ def thread_messages(conn: Connection, tenant_id: str, thread_id: str) -> list[di
     return [_message_out(_row_dict(row)) for row in rows]
 
 
+def advisor_memory(conn: Connection, tenant_id: str, user_id: str) -> dict[str, Any]:
+    ensure_advisor_tables(conn)
+    row = conn.execute(
+        text(
+            """
+            SELECT summary, facts_json, COALESCE(last_thread_id::text, '') AS last_thread_id, updated_at::text
+            FROM saas_advisor_memory
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND user_id = CAST(:user_id AS uuid)
+              AND memory_key = 'default'
+            LIMIT 1
+            """
+        ),
+        {"tenant_id": tenant_id, "user_id": user_id},
+    ).mappings().first()
+    data = _row_dict(row)
+    data["facts_json"] = _safe_json(data.get("facts_json"))
+    return data
+
+
+def update_advisor_memory(
+    conn: Connection,
+    *,
+    tenant_id: str,
+    user_id: str,
+    thread_id: str,
+    context: dict[str, Any],
+    user_message: str,
+    assistant_message: str,
+) -> dict[str, Any]:
+    current = advisor_memory(conn, tenant_id, user_id)
+    previous_facts = current.get("facts_json") if isinstance(current.get("facts_json"), dict) else {}
+    totals = context.get("totals") if isinstance(context.get("totals"), dict) else {}
+    health = context.get("operational_health") if isinstance(context.get("operational_health"), dict) else {}
+    now = datetime.now(timezone.utc).isoformat()
+    facts = {
+        **previous_facts,
+        "last_module": _clean(context.get("module"), 80),
+        "last_context_type": _clean(context.get("context_type"), 80),
+        "last_context_id": _clean(context.get("context_id"), 120),
+        "last_question": _clean(user_message, 800),
+        "last_answer_preview": _clean(assistant_message, 1000),
+        "last_totals": {
+            "conversations": int(totals.get("conversations") or 0),
+            "unread": int(totals.get("unread") or 0),
+            "warm_leads": int(totals.get("warm_leads") or 0),
+            "messages_7d": int(totals.get("messages_7d") or 0),
+        },
+        "last_health": health,
+        "last_turn_at": now,
+    }
+    summary = (
+        f"Ultima consulta: {_clean(user_message, 180)}\n"
+        f"Ultima orientacion: {_clean(assistant_message, 360)}"
+    )
+    row = conn.execute(
+        text(
+            """
+            INSERT INTO saas_advisor_memory (
+                tenant_id, user_id, memory_key, summary, facts_json, last_thread_id, updated_at
+            )
+            VALUES (
+                CAST(:tenant_id AS uuid), CAST(:user_id AS uuid), 'default',
+                :summary, CAST(:facts_json AS jsonb), CAST(:thread_id AS uuid), NOW()
+            )
+            ON CONFLICT (tenant_id, user_id, memory_key)
+            DO UPDATE SET
+                summary = EXCLUDED.summary,
+                facts_json = saas_advisor_memory.facts_json || EXCLUDED.facts_json,
+                last_thread_id = EXCLUDED.last_thread_id,
+                updated_at = NOW()
+            RETURNING summary, facts_json, COALESCE(last_thread_id::text, '') AS last_thread_id, updated_at::text
+            """
+        ),
+        {
+            "tenant_id": tenant_id,
+            "user_id": user_id,
+            "thread_id": thread_id,
+            "summary": _clean(summary, 1200),
+            "facts_json": _json(facts),
+        },
+    ).mappings().first()
+    data = _row_dict(row)
+    data["facts_json"] = _safe_json(data.get("facts_json"))
+    return data
+
+
 def advisor_context(conn: Connection, tenant_id: str, *, module: str, context_type: str, context_id: str) -> dict[str, Any]:
     tenant = conn.execute(
         text(
@@ -417,6 +522,32 @@ def advisor_context(conn: Connection, tenant_id: str, *, module: str, context_ty
         ),
         {"tenant_id": tenant_id},
     ).mappings().first()
+    webhook_signal = conn.execute(
+        text(
+            """
+            SELECT
+                COUNT(*) FILTER (
+                    WHERE payload_json::text ILIKE '%"statuses"%'
+                      AND received_at >= NOW() - INTERVAL '24 hours'
+                )::int AS status_events_24h,
+                COUNT(*) FILTER (
+                    WHERE payload_json::text ILIKE '%"messages"%'
+                      AND received_at >= NOW() - INTERVAL '24 hours'
+                )::int AS inbound_events_24h,
+                COUNT(*) FILTER (
+                    WHERE payload_json::text ILIKE '%"statuses"%'
+                      AND received_at >= NOW() - INTERVAL '7 days'
+                )::int AS status_events_7d,
+                COUNT(*) FILTER (
+                    WHERE payload_json::text ILIKE '%"messages"%'
+                      AND received_at >= NOW() - INTERVAL '7 days'
+                )::int AS inbound_events_7d
+            FROM saas_webhook_events
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+            """
+        ),
+        {"tenant_id": tenant_id},
+    ).mappings().first()
     outbound_health = conn.execute(
         text(
             """
@@ -440,6 +571,7 @@ def advisor_context(conn: Connection, tenant_id: str, *, module: str, context_ty
         "selected_messages": selected_messages,
         "operational_health": {
             "webhooks": _row_dict(webhook_health),
+            "whatsapp_signal": _row_dict(webhook_signal),
             "outbound": _row_dict(outbound_health),
         },
     }
@@ -491,6 +623,9 @@ def generate_seed_insights(conn: Connection, tenant_id: str) -> list[dict[str, A
     warm = int(totals.get("warm_leads") or 0)
     webhook_failed = int(((health.get("webhooks") or {}).get("failed")) or 0)
     outbound_failed = int(((health.get("outbound") or {}).get("failed_or_blocked")) or 0)
+    whatsapp_signal = health.get("whatsapp_signal") or {}
+    statuses_7d = int(whatsapp_signal.get("status_events_7d") or 0)
+    inbound_7d = int(whatsapp_signal.get("inbound_events_7d") or 0)
     if unread > 0:
         suggestions.append({
             "insight_type": "unread_followup",
@@ -513,6 +648,14 @@ def generate_seed_insights(conn: Connection, tenant_id: str) -> list[dict[str, A
             "severity": "high",
             "title": "Hay senales operacionales para revisar",
             "description": f"Webhooks fallidos: {webhook_failed}. Outbound fallidos/bloqueados: {outbound_failed}.",
+            "recommended_action_json": {"type": "open_debug", "module": "settings", "tab": "debug"},
+        })
+    if statuses_7d > 0 and inbound_7d == 0:
+        suggestions.append({
+            "insight_type": "whatsapp_status_without_inbound",
+            "severity": "critical",
+            "title": "WhatsApp reporta estados pero no mensajes entrantes",
+            "description": "Esto suele indicar que el WABA no esta suscrito a la app o que el webhook no recibe el campo messages.",
             "recommended_action_json": {"type": "open_debug", "module": "settings", "tab": "debug"},
         })
     for item in suggestions:
@@ -694,6 +837,7 @@ def advisor_chat(
     )
     history = recent_thread_messages(conn, tenant_id, str(thread["id"]), limit=14)
     context = advisor_context(conn, tenant_id, module=module, context_type=context_type, context_id=context_id)
+    context["advisor_memory"] = advisor_memory(conn, tenant_id, user_id)
     settings = get_settings(conn, tenant_id)
     system_prompt, user_prompt = _advisor_prompt(context, history, message)
     gateway = generate_with_gateway(
@@ -725,6 +869,15 @@ def advisor_chat(
             content=fallback_answer,
             metadata={"fallback_reason": reason, "context_type": context_type, "context_id": context_id},
         )
+        memory = update_advisor_memory(
+            conn,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            thread_id=str(thread["id"]),
+            context=context,
+            user_message=message,
+            assistant_message=fallback_answer,
+        )
         insights = generate_seed_insights(conn, tenant_id)
         recommendations = list_recommendations(conn, tenant_id, limit=10)
         return {
@@ -734,6 +887,7 @@ def advisor_chat(
             "assistant_message": _message_out(assistant_msg),
             "insights": insights,
             "recommendations": recommendations,
+            "memory": memory,
         }
     assistant_msg = create_message(
         conn,
@@ -751,6 +905,15 @@ def advisor_chat(
         },
         ai_run_id=str(gateway.get("run_id") or ""),
     )
+    memory = update_advisor_memory(
+        conn,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        thread_id=str(thread["id"]),
+        context=context,
+        user_message=message,
+        assistant_message=_clean(gateway.get("raw"), 20000),
+    )
     insights = generate_seed_insights(conn, tenant_id)
     recommendations = list_recommendations(conn, tenant_id, limit=10)
     return {
@@ -760,5 +923,24 @@ def advisor_chat(
         "assistant_message": _message_out(assistant_msg),
         "insights": insights,
         "recommendations": recommendations,
+        "memory": memory,
     }
+
+
+def chunk_advisor_text(value: str, size: int = 92) -> list[str]:
+    text_value = str(value or "")
+    if not text_value:
+        return []
+    chunks: list[str] = []
+    current = ""
+    for token in text_value.replace("\r\n", "\n").split(" "):
+        candidate = f"{current} {token}".strip()
+        if len(candidate) >= size and current:
+            chunks.append(current)
+            current = token
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    return chunks
 

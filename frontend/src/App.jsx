@@ -373,6 +373,7 @@ function App() {
   const knowledgeFileRef = useRef(null);
   const messagesPanelRef = useRef(null);
   const messagesEndRef = useRef(null);
+  const advisorChatRef = useRef(null);
   const mediaRecorderRef = useRef(null);
   const mediaStreamRef = useRef(null);
   const recordingChunksRef = useRef([]);
@@ -427,6 +428,9 @@ function App() {
   const [advisorInput, setAdvisorInput] = useState("");
   const [advisorInsights, setAdvisorInsights] = useState([]);
   const [advisorRecommendations, setAdvisorRecommendations] = useState([]);
+  const [advisorMemory, setAdvisorMemory] = useState(null);
+  const [advisorStreamStatus, setAdvisorStreamStatus] = useState("");
+  const [advisorLastSync, setAdvisorLastSync] = useState("");
   const [advisorLoading, setAdvisorLoading] = useState(false);
   const [instagramOAuth, setInstagramOAuth] = useState({ state: "", assets: [], status: "", callbackUrl: "" });
   const [instagramDiagnostics, setInstagramDiagnostics] = useState(null);
@@ -633,6 +637,31 @@ function App() {
     if (!res.ok) throw new Error(formatApiError(data, `HTTP ${res.status}`));
     return data;
   };
+  const streamApiCall = async (path, options = {}) => {
+    if (!API_BASE) throw new Error("VITE_API_BASE requerido");
+    const runFetch = async (tokenOverride = null) => {
+      const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
+      const bearer = tokenOverride ?? accessToken;
+      if (bearer) headers.Authorization = `Bearer ${bearer}`;
+      return fetch(`${API_BASE}${path}`, { ...options, headers });
+    };
+    let response = await runFetch();
+    if (response.status === 401 && !options.skipAuthRefresh) {
+      try {
+        const nextAccessToken = await refreshAccessToken();
+        if (nextAccessToken) response = await runFetch(nextAccessToken);
+      } catch {
+        clearTokens();
+        throw new Error("Sesion vencida. Ingresa nuevamente para continuar.");
+      }
+    }
+    if (response.status === 401) clearTokens();
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error(formatApiError(data, `HTTP ${response.status}`));
+    }
+    return response;
+  };
   const setTokens = (data) => {
     const nextAccess = data?.access_token || "";
     const nextRefresh = data?.refresh_token || refreshToken || "";
@@ -678,7 +707,7 @@ function App() {
     recordingLevelsRef.current = EMPTY_WAVEFORM;
     setIntegrations([]); setWebhooks([]); setWebhookEvents([]); setBillingOverview(null); setBillingPlans([]); setLastWebhookSecret(null);
     setApiCredentials([]); setCredentialModal(null); setCredentialModels({}); setKnowledgeSources([]); setDiagnostics(null); setAiGatewayProviders([]); setAiGatewayRuns([]);
-    setAdvisorOpen(false); setAdvisorThreadId(""); setAdvisorMessages([]); setAdvisorInput(""); setAdvisorInsights([]); setAdvisorRecommendations([]); setAdvisorLoading(false);
+    setAdvisorOpen(false); setAdvisorThreadId(""); setAdvisorMessages([]); setAdvisorInput(""); setAdvisorInsights([]); setAdvisorRecommendations([]); setAdvisorMemory(null); setAdvisorStreamStatus(""); setAdvisorLastSync(""); setAdvisorLoading(false);
     setInstagramDiagnostics(null); setInstagramOAuth({ state: "", assets: [], status: "", callbackUrl: "" });
     setDebugInboundResult(null); setSubscriptionCheck(null);
     setIntegrationSecretModal(null);
@@ -750,14 +779,31 @@ function App() {
   const loadAdvisorSignals = async (silent = false) => {
     if (!accessToken) return;
     try {
-      const [insightsData, recommendationsData] = await Promise.all([
+      const [insightsData, recommendationsData, memoryData] = await Promise.all([
         apiCall("/saas/v1/advisor/insights?limit=8"),
         apiCall("/saas/v1/advisor/recommendations?limit=8"),
+        apiCall("/saas/v1/advisor/memory").catch(() => null),
       ]);
       setAdvisorInsights(insightsData?.insights || []);
       setAdvisorRecommendations(recommendationsData?.recommendations || []);
+      if (memoryData?.memory) setAdvisorMemory(memoryData.memory);
+      setAdvisorLastSync(new Date().toISOString());
       if (!silent) showStatus("Advisor actualizado", "ok");
     } catch (err) { if (!silent) showStatus(String(err.message || err), "error"); }
+  };
+
+  const loadAdvisorHistory = async () => {
+    if (!accessToken || advisorMessages.length) return;
+    try {
+      const data = await apiCall("/saas/v1/advisor/threads?limit=1");
+      const thread = (data?.threads || [])[0];
+      if (!thread?.id) return;
+      setAdvisorThreadId(thread.id);
+      const messagesData = await apiCall(`/saas/v1/advisor/threads/${encodeURIComponent(thread.id)}`);
+      setAdvisorMessages(messagesData?.messages || []);
+    } catch {
+      // El historial no bloquea el uso del Advisor.
+    }
   };
 
   const loadAiSettings = async () => {
@@ -872,6 +918,28 @@ function App() {
     if (accessToken && activeView === "settings") Promise.all([loadIntegrations(), loadWebhooks(), loadBilling(), loadApiCredentials(), loadAiSettings(), loadKnowledgeSources(), loadDiagnostics(true), loadAiGateway(true)]);
     if (accessToken && activeView === "inbox") loadInbox();
   }, [accessToken, activeView]);
+
+  useEffect(() => {
+    if (!accessToken) return undefined;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") loadAdvisorSignals(true);
+    }, advisorOpen ? 30000 : 60000);
+    return () => window.clearInterval(timer);
+  }, [accessToken, advisorOpen]);
+
+  useEffect(() => {
+    if (advisorOpen) {
+      loadAdvisorHistory();
+      loadAdvisorSignals(true);
+    }
+  }, [advisorOpen]);
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      if (advisorChatRef.current) advisorChatRef.current.scrollTop = advisorChatRef.current.scrollHeight;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [advisorMessages, advisorLoading]);
 
   useEffect(() => {
     if (!accessToken || activeView !== "inbox") return undefined;
@@ -1772,31 +1840,71 @@ function App() {
     const text = String(messageOverride || advisorInput || "").trim();
     if (!text || advisorLoading) return;
     const tempId = `local-${Date.now()}`;
+    const assistantTempId = `assistant-${Date.now()}`;
     setAdvisorInput("");
     setAdvisorOpen(true);
-    setAdvisorMessages((prev) => [...prev, { id: tempId, role: "user", content: text, created_at: new Date().toISOString(), metadata_json: { local: true } }]);
+    setAdvisorStreamStatus("Preparando contexto...");
+    setAdvisorMessages((prev) => [
+      ...prev,
+      { id: tempId, role: "user", content: text, created_at: new Date().toISOString(), metadata_json: { local: true } },
+      { id: assistantTempId, role: "assistant", content: "", created_at: new Date().toISOString(), metadata_json: { streaming: true } },
+    ]);
     setAdvisorLoading(true);
     try {
-      const data = await apiCall("/saas/v1/advisor/chat", {
+      const response = await streamApiCall("/saas/v1/advisor/chat/stream", {
         method: "POST",
         body: JSON.stringify({ message: text, thread_id: advisorThreadId, ...advisorContextPayload() }),
       });
-      if (data?.thread?.id) setAdvisorThreadId(data.thread.id);
-      setAdvisorMessages((prev) => [
-        ...prev.filter((item) => item.id !== tempId),
-        data?.user_message,
-        data?.assistant_message,
-      ].filter(Boolean));
-      setAdvisorInsights(data?.insights || []);
-      setAdvisorRecommendations(data?.recommendations || []);
-      if (data?.ok === false) showStatus("Advisor sin modelo AI activo. Revisa Ajustes > APIs.", "neutral");
+      if (!response.body) throw new Error("stream_unavailable");
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let finalOk = true;
+      while (true) {
+        const { done, value } = await reader.read();
+        buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        for (const rawLine of lines) {
+          const line = rawLine.trim();
+          if (!line) continue;
+          const event = JSON.parse(line);
+          const data = event.data || {};
+          if (event.type === "status") setAdvisorStreamStatus(data.message || "Analizando...");
+          if (event.type === "thread" && data.id) setAdvisorThreadId(data.id);
+          if (event.type === "user_message" && data.id) {
+            setAdvisorMessages((prev) => prev.map((item) => item.id === tempId ? data : item));
+          }
+          if (event.type === "assistant_start") {
+            setAdvisorMessages((prev) => prev.map((item) => item.id === assistantTempId ? { ...data, id: assistantTempId, content: "", metadata_json: { ...(data.metadata_json || {}), streaming: true } } : item));
+          }
+          if (event.type === "delta") {
+            setAdvisorStreamStatus("Escribiendo respuesta...");
+            setAdvisorMessages((prev) => prev.map((item) => item.id === assistantTempId ? { ...item, content: `${item.content || ""}${data.text || ""}` } : item));
+          }
+          if (event.type === "assistant_done" && data.id) {
+            setAdvisorMessages((prev) => prev.map((item) => item.id === assistantTempId ? data : item));
+          }
+          if (event.type === "signals") {
+            setAdvisorInsights(data.insights || []);
+            setAdvisorRecommendations(data.recommendations || []);
+            if (data.memory) setAdvisorMemory(data.memory);
+            setAdvisorLastSync(new Date().toISOString());
+          }
+          if (event.type === "done") finalOk = data.ok !== false;
+          if (event.type === "error") throw new Error(data.message || "advisor_stream_error");
+        }
+        if (done) break;
+      }
+      if (!finalOk) showStatus("Advisor sin modelo AI activo. Revisa Ajustes > APIs.", "neutral");
     } catch (err) {
       setAdvisorMessages((prev) => [
-        ...prev.filter((item) => item.id !== tempId),
+        ...prev.filter((item) => ![tempId, assistantTempId].includes(item.id)),
         { id: `advisor-error-${Date.now()}`, role: "assistant", content: `No pude consultar el Advisor: ${String(err.message || err)}`, created_at: new Date().toISOString(), metadata_json: { error: true } },
       ]);
     } finally {
       setAdvisorLoading(false);
+      setAdvisorStreamStatus("");
     }
   };
 
@@ -2549,6 +2657,10 @@ function App() {
                 <button type="button" onClick={() => setAdvisorOpen(false)}>Cerrar</button>
               </div>
             </div>
+            <div className="advisor-livebar">
+              <span className={advisorLoading ? "live" : ""}>{advisorLoading ? (advisorStreamStatus || "Analizando...") : "Listo para ayudarte"}</span>
+              <small>{advisorLastSync ? `Sinc. ${chatTimeLabel(advisorLastSync)}` : "Sinc. pendiente"}</small>
+            </div>
             <div className="advisor-signals">
               {[...advisorInsights.slice(0, 3).map((item) => ({ ...item, _kind: "insight" })), ...advisorRecommendations.slice(0, 2).map((item) => ({ ...item, _kind: "recommendation" }))].map((item) => (
                 <article className={`advisor-signal ${item.severity || "info"}`} key={`${item._kind}-${item.id}`}>
@@ -2562,10 +2674,16 @@ function App() {
               ))}
               {!advisorSignalCount ? <div className="empty">Sin alertas proactivas por ahora. Puedes preguntarle al Advisor por el estado del negocio.</div> : null}
             </div>
-            <div className="advisor-chat">
+            {advisorMemory?.summary ? (
+              <div className="advisor-memory">
+                <strong>Memoria activa</strong>
+                <span>{advisorMemory.summary}</span>
+              </div>
+            ) : null}
+            <div className="advisor-chat" ref={advisorChatRef}>
               {advisorMessages.map((message) => (
                 <div className={`advisor-message ${message.role}`} key={message.id}>
-                  <span>{message.role === "user" ? "Tu" : "Advisor"}</span>
+                  <span>{message.role === "user" ? "Tu" : "Advisor"}{message.metadata_json?.streaming ? " / en vivo" : ""}</span>
                   <p>{message.content}</p>
                 </div>
               ))}

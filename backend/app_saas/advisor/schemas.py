@@ -38,4 +38,4 @@ class AdvisorChatOut(BaseModel):
     assistant_message: AdvisorMessageOut
     insights: list[dict[str, Any]] = Field(default_factory=list)
     recommendations: list[dict[str, Any]] = Field(default_factory=list)
-
+    memory: dict[str, Any] = Field(default_factory=dict)
