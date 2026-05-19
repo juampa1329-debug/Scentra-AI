@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 
 from app_saas.api_credentials.router import router as api_credentials_router
+from app_saas.advisor.router import router as advisor_router
 from app_saas.ai_gateway.router import router as ai_gateway_router
 from app_saas.ai_agent.service import process_due_ai_replies
 from app_saas.ai_agent.router import router as ai_agent_router
@@ -150,6 +151,7 @@ app.include_router(integrations_router, prefix="/saas/v1")
 app.include_router(instagram_router, prefix="/saas/v1")
 app.include_router(internal_router, prefix="/saas/v1")
 app.include_router(api_credentials_router, prefix="/saas/v1")
+app.include_router(advisor_router, prefix="/saas/v1")
 app.include_router(ai_gateway_router, prefix="/saas/v1")
 app.include_router(knowledge_router, prefix="/saas/v1")
 app.include_router(diagnostics_router, prefix="/saas/v1")

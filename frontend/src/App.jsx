@@ -421,6 +421,13 @@ function App() {
   const [diagnosticsRunning, setDiagnosticsRunning] = useState(false);
   const [aiGatewayProviders, setAiGatewayProviders] = useState([]);
   const [aiGatewayRuns, setAiGatewayRuns] = useState([]);
+  const [advisorOpen, setAdvisorOpen] = useState(false);
+  const [advisorThreadId, setAdvisorThreadId] = useState("");
+  const [advisorMessages, setAdvisorMessages] = useState([]);
+  const [advisorInput, setAdvisorInput] = useState("");
+  const [advisorInsights, setAdvisorInsights] = useState([]);
+  const [advisorRecommendations, setAdvisorRecommendations] = useState([]);
+  const [advisorLoading, setAdvisorLoading] = useState(false);
   const [instagramOAuth, setInstagramOAuth] = useState({ state: "", assets: [], status: "", callbackUrl: "" });
   const [instagramDiagnostics, setInstagramDiagnostics] = useState(null);
   const [instagramBusy, setInstagramBusy] = useState(false);
@@ -550,6 +557,12 @@ function App() {
     ads: ["Ads Manager", "Leads, comentarios y eventos de Meta conectados al inbox."],
     settings: ["Ajustes", "IA, canales, webhooks, APIs, usuarios y seguridad."],
   };
+  const advisorSignalCount = advisorInsights.length + advisorRecommendations.length;
+  const advisorQuickPrompts = [
+    "Dame un resumen ejecutivo de la empresa hoy.",
+    "Que oportunidades comerciales ves ahora?",
+    "Que automatizacion o trigger recomendarias primero?",
+  ];
   const selectedIntegrationForForm = integrations.find((item) => (
     String(item.provider || "").toLowerCase() === String(integrationForm.provider || "").toLowerCase()
     && String(item.channel || "").toLowerCase() === String(integrationForm.channel || "").toLowerCase()
@@ -664,7 +677,9 @@ function App() {
     clearComposerAttachment(); setCatalogDraft(null); setEmojiOpen(false); setAttachMenuOpen(false); setInboxChannelFilter("all"); setInboxSearch(""); setIsRecording(false); setRecordingSeconds(0); setRecordingLevels(EMPTY_WAVEFORM);
     recordingLevelsRef.current = EMPTY_WAVEFORM;
     setIntegrations([]); setWebhooks([]); setWebhookEvents([]); setBillingOverview(null); setBillingPlans([]); setLastWebhookSecret(null);
-    setApiCredentials([]); setCredentialModal(null); setCredentialModels({}); setKnowledgeSources([]); setDiagnostics(null); setAiGatewayProviders([]); setAiGatewayRuns([]); setInstagramDiagnostics(null); setInstagramOAuth({ state: "", assets: [], status: "", callbackUrl: "" });
+    setApiCredentials([]); setCredentialModal(null); setCredentialModels({}); setKnowledgeSources([]); setDiagnostics(null); setAiGatewayProviders([]); setAiGatewayRuns([]);
+    setAdvisorOpen(false); setAdvisorThreadId(""); setAdvisorMessages([]); setAdvisorInput(""); setAdvisorInsights([]); setAdvisorRecommendations([]); setAdvisorLoading(false);
+    setInstagramDiagnostics(null); setInstagramOAuth({ state: "", assets: [], status: "", callbackUrl: "" });
     setDebugInboundResult(null); setSubscriptionCheck(null);
     setIntegrationSecretModal(null);
     setWhatsappPhones([]); setPhoneRegisterForm({ phone_number_id: "", pin: "" });
@@ -729,6 +744,19 @@ function App() {
       setAiGatewayProviders(providersData?.providers || []);
       setAiGatewayRuns(runsData?.runs || []);
       if (!silent) showStatus("AI Gateway actualizado", "ok");
+    } catch (err) { if (!silent) showStatus(String(err.message || err), "error"); }
+  };
+
+  const loadAdvisorSignals = async (silent = false) => {
+    if (!accessToken) return;
+    try {
+      const [insightsData, recommendationsData] = await Promise.all([
+        apiCall("/saas/v1/advisor/insights?limit=8"),
+        apiCall("/saas/v1/advisor/recommendations?limit=8"),
+      ]);
+      setAdvisorInsights(insightsData?.insights || []);
+      setAdvisorRecommendations(recommendationsData?.recommendations || []);
+      if (!silent) showStatus("Advisor actualizado", "ok");
     } catch (err) { if (!silent) showStatus(String(err.message || err), "error"); }
   };
 
@@ -839,6 +867,7 @@ function App() {
 
   useEffect(() => { loadSession(); }, [accessToken]);
   useEffect(() => {
+    if (accessToken) loadAdvisorSignals(true);
     if (accessToken && ["dashboard", "customers", "labels", "campaigns", "broadcast", "ads"].includes(activeView)) loadDashboard(true);
     if (accessToken && activeView === "settings") Promise.all([loadIntegrations(), loadWebhooks(), loadBilling(), loadApiCredentials(), loadAiSettings(), loadKnowledgeSources(), loadDiagnostics(true), loadAiGateway(true)]);
     if (accessToken && activeView === "inbox") loadInbox();
@@ -1733,6 +1762,66 @@ function App() {
     );
   };
 
+  const advisorContextPayload = () => ({
+    context_type: activeView === "inbox" && selectedConversation?.id ? "conversation" : activeView,
+    context_id: activeView === "inbox" && selectedConversation?.id ? selectedConversation.id : "",
+    module: activeView,
+  });
+
+  const sendAdvisorMessage = async (messageOverride = "") => {
+    const text = String(messageOverride || advisorInput || "").trim();
+    if (!text || advisorLoading) return;
+    const tempId = `local-${Date.now()}`;
+    setAdvisorInput("");
+    setAdvisorOpen(true);
+    setAdvisorMessages((prev) => [...prev, { id: tempId, role: "user", content: text, created_at: new Date().toISOString(), metadata_json: { local: true } }]);
+    setAdvisorLoading(true);
+    try {
+      const data = await apiCall("/saas/v1/advisor/chat", {
+        method: "POST",
+        body: JSON.stringify({ message: text, thread_id: advisorThreadId, ...advisorContextPayload() }),
+      });
+      if (data?.thread?.id) setAdvisorThreadId(data.thread.id);
+      setAdvisorMessages((prev) => [
+        ...prev.filter((item) => item.id !== tempId),
+        data?.user_message,
+        data?.assistant_message,
+      ].filter(Boolean));
+      setAdvisorInsights(data?.insights || []);
+      setAdvisorRecommendations(data?.recommendations || []);
+      if (data?.ok === false) showStatus("Advisor sin modelo AI activo. Revisa Ajustes > APIs.", "neutral");
+    } catch (err) {
+      setAdvisorMessages((prev) => [
+        ...prev.filter((item) => item.id !== tempId),
+        { id: `advisor-error-${Date.now()}`, role: "assistant", content: `No pude consultar el Advisor: ${String(err.message || err)}`, created_at: new Date().toISOString(), metadata_json: { error: true } },
+      ]);
+    } finally {
+      setAdvisorLoading(false);
+    }
+  };
+
+  const submitAdvisorChat = (event) => {
+    event.preventDefault();
+    sendAdvisorMessage();
+  };
+
+  const dismissAdvisorSignal = async (kind, id) => {
+    if (!id) return;
+    try {
+      const path = kind === "recommendation" ? `/saas/v1/advisor/recommendations/${encodeURIComponent(id)}/dismiss` : `/saas/v1/advisor/insights/${encodeURIComponent(id)}/dismiss`;
+      await apiCall(path, { method: "POST" });
+      if (kind === "recommendation") setAdvisorRecommendations((prev) => prev.filter((item) => item.id !== id));
+      else setAdvisorInsights((prev) => prev.filter((item) => item.id !== id));
+    } catch (err) { showStatus(String(err.message || err), "error"); }
+  };
+
+  const applyAdvisorSignal = (item) => {
+    const action = item?.recommended_action_json || item?.action_json || {};
+    if (action.module) setActiveView(action.module);
+    if (action.tab) setSettingsTab(action.tab);
+    if (action.module || action.tab) setAdvisorOpen(false);
+  };
+
   const isLogged = Boolean(accessToken && me);
 
   if (!isLogged) {
@@ -2444,6 +2533,57 @@ function App() {
           </section>
         )}
       </main>
+      <section className={`advisor-widget ${advisorOpen ? "open" : "closed"}`} aria-label="Scentra Advisor">
+        {!advisorOpen ? (
+          <button type="button" className="advisor-launcher glass-card" onClick={() => setAdvisorOpen(true)}>
+            <span>AI</span>
+            <strong>Advisor</strong>
+            {advisorSignalCount ? <em>{number(advisorSignalCount)}</em> : null}
+          </button>
+        ) : (
+          <div className="advisor-panel glass-card">
+            <div className="advisor-head">
+              <div><span>AI Business Advisor</span><strong>Scentra Advisor</strong></div>
+              <div className="row-actions">
+                <button type="button" onClick={() => loadAdvisorSignals()}>Refrescar</button>
+                <button type="button" onClick={() => setAdvisorOpen(false)}>Cerrar</button>
+              </div>
+            </div>
+            <div className="advisor-signals">
+              {[...advisorInsights.slice(0, 3).map((item) => ({ ...item, _kind: "insight" })), ...advisorRecommendations.slice(0, 2).map((item) => ({ ...item, _kind: "recommendation" }))].map((item) => (
+                <article className={`advisor-signal ${item.severity || "info"}`} key={`${item._kind}-${item.id}`}>
+                  <button type="button" className="advisor-signal-main" onClick={() => applyAdvisorSignal(item)}>
+                    <span>{item._kind === "recommendation" ? "Recomendacion" : "Insight"} / {item.severity || "info"}</span>
+                    <strong>{item.title}</strong>
+                    <small>{item.description}</small>
+                  </button>
+                  <button type="button" className="advisor-dismiss" onClick={() => dismissAdvisorSignal(item._kind, item.id)}>×</button>
+                </article>
+              ))}
+              {!advisorSignalCount ? <div className="empty">Sin alertas proactivas por ahora. Puedes preguntarle al Advisor por el estado del negocio.</div> : null}
+            </div>
+            <div className="advisor-chat">
+              {advisorMessages.map((message) => (
+                <div className={`advisor-message ${message.role}`} key={message.id}>
+                  <span>{message.role === "user" ? "Tu" : "Advisor"}</span>
+                  <p>{message.content}</p>
+                </div>
+              ))}
+              {advisorLoading ? <div className="advisor-message assistant"><span>Advisor</span><p>Analizando contexto...</p></div> : null}
+              {!advisorMessages.length ? (
+                <div className="advisor-empty">
+                  <strong>Preguntame por ventas, inbox, triggers o salud Meta.</strong>
+                  {advisorQuickPrompts.map((prompt) => <button key={prompt} type="button" onClick={() => sendAdvisorMessage(prompt)}>{prompt}</button>)}
+                </div>
+              ) : null}
+            </div>
+            <form className="advisor-input" onSubmit={submitAdvisorChat}>
+              <input value={advisorInput} onChange={(event) => setAdvisorInput(event.target.value)} placeholder="Pregunta al Advisor..." />
+              <button type="submit" className="primary" disabled={advisorLoading || !advisorInput.trim()}>{advisorLoading ? "..." : "Enviar"}</button>
+            </form>
+          </div>
+        )}
+      </section>
       {aiTesterOpen ? <div className="modal-backdrop" role="presentation" onMouseDown={() => setAiTesterOpen(false)}><section className="modal-window glass-card" role="dialog" aria-modal="true" aria-label="Probar IA" onMouseDown={(event) => event.stopPropagation()}><div className="panel-head"><h2>Probar IA</h2><button type="button" onClick={() => setAiTesterOpen(false)}>Cerrar</button></div><form onSubmit={submitAiTest} className="modal-form"><label>Phone<input placeholder="57300..." value={aiTest.phone} onChange={(event) => setAiTest((prev) => ({ ...prev, phone: event.target.value }))} /></label><label>Mensaje<textarea rows={5} placeholder="Escribe un mensaje de prueba..." value={aiTest.message} onChange={(event) => setAiTest((prev) => ({ ...prev, message: event.target.value }))} /></label>{aiTestResult ? <div className="ai-test-result"><strong>Respuesta IA</strong><p>{aiTestResult}</p></div> : null}<div className="panel-actions"><button type="submit" className="primary">Procesar</button><button type="button" onClick={() => { setAiTest({ phone: "", message: "" }); setAiTestResult(""); }}>Limpiar</button></div></form></section></div> : null}
       {integrationSecretModal ? (
         <div className="modal-backdrop" role="presentation" onMouseDown={() => setIntegrationSecretModal(null)}>
