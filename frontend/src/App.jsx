@@ -428,6 +428,7 @@ function App() {
   const [advisorInput, setAdvisorInput] = useState("");
   const [advisorInsights, setAdvisorInsights] = useState([]);
   const [advisorRecommendations, setAdvisorRecommendations] = useState([]);
+  const [advisorActions, setAdvisorActions] = useState([]);
   const [advisorMemory, setAdvisorMemory] = useState(null);
   const [advisorStreamStatus, setAdvisorStreamStatus] = useState("");
   const [advisorLastSync, setAdvisorLastSync] = useState("");
@@ -561,7 +562,7 @@ function App() {
     ads: ["Ads Manager", "Leads, comentarios y eventos de Meta conectados al inbox."],
     settings: ["Ajustes", "IA, canales, webhooks, APIs, usuarios y seguridad."],
   };
-  const advisorSignalCount = advisorInsights.length + advisorRecommendations.length;
+  const advisorSignalCount = advisorInsights.length + advisorRecommendations.length + advisorActions.filter((item) => item.status !== "approved").length;
   const advisorQuickPrompts = [
     "Dame un resumen ejecutivo de la empresa hoy.",
     "Que oportunidades comerciales ves ahora?",
@@ -707,7 +708,7 @@ function App() {
     recordingLevelsRef.current = EMPTY_WAVEFORM;
     setIntegrations([]); setWebhooks([]); setWebhookEvents([]); setBillingOverview(null); setBillingPlans([]); setLastWebhookSecret(null);
     setApiCredentials([]); setCredentialModal(null); setCredentialModels({}); setKnowledgeSources([]); setDiagnostics(null); setAiGatewayProviders([]); setAiGatewayRuns([]);
-    setAdvisorOpen(false); setAdvisorThreadId(""); setAdvisorMessages([]); setAdvisorInput(""); setAdvisorInsights([]); setAdvisorRecommendations([]); setAdvisorMemory(null); setAdvisorStreamStatus(""); setAdvisorLastSync(""); setAdvisorLoading(false);
+    setAdvisorOpen(false); setAdvisorThreadId(""); setAdvisorMessages([]); setAdvisorInput(""); setAdvisorInsights([]); setAdvisorRecommendations([]); setAdvisorActions([]); setAdvisorMemory(null); setAdvisorStreamStatus(""); setAdvisorLastSync(""); setAdvisorLoading(false);
     setInstagramDiagnostics(null); setInstagramOAuth({ state: "", assets: [], status: "", callbackUrl: "" });
     setDebugInboundResult(null); setSubscriptionCheck(null);
     setIntegrationSecretModal(null);
@@ -779,13 +780,15 @@ function App() {
   const loadAdvisorSignals = async (silent = false) => {
     if (!accessToken) return;
     try {
-      const [insightsData, recommendationsData, memoryData] = await Promise.all([
+      const [insightsData, recommendationsData, actionsData, memoryData] = await Promise.all([
         apiCall("/saas/v1/advisor/insights?limit=8"),
         apiCall("/saas/v1/advisor/recommendations?limit=8"),
+        apiCall("/saas/v1/advisor/actions?status=open&limit=8").catch(() => null),
         apiCall("/saas/v1/advisor/memory").catch(() => null),
       ]);
       setAdvisorInsights(insightsData?.insights || []);
       setAdvisorRecommendations(recommendationsData?.recommendations || []);
+      if (actionsData?.actions) setAdvisorActions(actionsData.actions);
       if (memoryData?.memory) setAdvisorMemory(memoryData.memory);
       setAdvisorLastSync(new Date().toISOString());
       if (!silent) showStatus("Advisor actualizado", "ok");
@@ -1888,6 +1891,7 @@ function App() {
           if (event.type === "signals") {
             setAdvisorInsights(data.insights || []);
             setAdvisorRecommendations(data.recommendations || []);
+            if (data.actions) setAdvisorActions(data.actions);
             if (data.memory) setAdvisorMemory(data.memory);
             setAdvisorLastSync(new Date().toISOString());
           }
@@ -1928,6 +1932,42 @@ function App() {
     if (action.module) setActiveView(action.module);
     if (action.tab) setSettingsTab(action.tab);
     if (action.module || action.tab) setAdvisorOpen(false);
+  };
+
+  const prepareAdvisorAction = async (item) => {
+    if (!item?.id) return;
+    const kind = item._kind || (item.recommendation_type ? "recommendation" : "insight");
+    try {
+      const path = kind === "recommendation"
+        ? `/saas/v1/advisor/recommendations/${encodeURIComponent(item.id)}/action`
+        : `/saas/v1/advisor/insights/${encodeURIComponent(item.id)}/action`;
+      const data = await apiCall(path, { method: "POST" });
+      if (data?.action?.id) {
+        setAdvisorActions((prev) => [data.action, ...prev.filter((action) => action.id !== data.action.id)]);
+        showStatus("Accion del Advisor preparada para aprobacion", "ok");
+      } else {
+        showStatus("No pude preparar esa accion. Revisa si la recomendacion sigue activa.", "error");
+      }
+    } catch (err) { showStatus(String(err.message || err), "error"); }
+  };
+
+  const approveAdvisorAction = async (actionId) => {
+    if (!actionId) return;
+    try {
+      const data = await apiCall(`/saas/v1/advisor/actions/${encodeURIComponent(actionId)}/approve`, { method: "POST" });
+      if (data?.action?.id) {
+        setAdvisorActions((prev) => prev.map((item) => item.id === actionId ? data.action : item));
+        showStatus("Accion aprobada. Queda lista para ejecucion asistida.", "ok");
+      }
+    } catch (err) { showStatus(String(err.message || err), "error"); }
+  };
+
+  const dismissAdvisorAction = async (actionId) => {
+    if (!actionId) return;
+    try {
+      await apiCall(`/saas/v1/advisor/actions/${encodeURIComponent(actionId)}/dismiss`, { method: "POST" });
+      setAdvisorActions((prev) => prev.filter((item) => item.id !== actionId));
+    } catch (err) { showStatus(String(err.message || err), "error"); }
   };
 
   const isLogged = Boolean(accessToken && me);
@@ -2669,11 +2709,32 @@ function App() {
                     <strong>{item.title}</strong>
                     <small>{item.description}</small>
                   </button>
-                  <button type="button" className="advisor-dismiss" onClick={() => dismissAdvisorSignal(item._kind, item.id)}>×</button>
+                  <div className="advisor-signal-actions">
+                    <button type="button" onClick={() => prepareAdvisorAction(item)}>Preparar</button>
+                    <button type="button" className="advisor-dismiss" onClick={() => dismissAdvisorSignal(item._kind, item.id)}>×</button>
+                  </div>
                 </article>
               ))}
               {!advisorSignalCount ? <div className="empty">Sin alertas proactivas por ahora. Puedes preguntarle al Advisor por el estado del negocio.</div> : null}
             </div>
+            {advisorActions.length ? (
+              <div className="advisor-actions">
+                <div className="advisor-actions-head"><strong>Acciones Advisor</strong><span>{advisorActions.length}</span></div>
+                {advisorActions.slice(0, 3).map((action) => (
+                  <article className={`advisor-action ${action.status || "draft"}`} key={action.id}>
+                    <div>
+                      <span>{action.action_type} / riesgo {action.risk_level}</span>
+                      <strong>{action.title}</strong>
+                      <small>{action.status === "approved" ? "Aprobada, lista para ejecucion asistida." : action.description}</small>
+                    </div>
+                    <div className="advisor-action-buttons">
+                      {action.status !== "approved" ? <button type="button" className="primary" onClick={() => approveAdvisorAction(action.id)}>Aprobar</button> : null}
+                      <button type="button" onClick={() => dismissAdvisorAction(action.id)}>Descartar</button>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            ) : null}
             {advisorMemory?.summary ? (
               <div className="advisor-memory">
                 <strong>Memoria activa</strong>

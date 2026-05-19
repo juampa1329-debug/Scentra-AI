@@ -6,14 +6,20 @@ import time
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
 
-from app_saas.advisor.schemas import AdvisorChatIn, AdvisorChatOut
+from app_saas.advisor.schemas import AdvisorActionCreateIn, AdvisorChatIn, AdvisorChatOut
 from app_saas.advisor.service import (
+    approve_action,
     advisor_chat,
     advisor_memory,
     chunk_advisor_text,
+    create_action_from_insight,
+    create_action_from_recommendation,
+    create_custom_action,
+    dismiss_action,
     dismiss_insight,
     dismiss_recommendation,
     generate_seed_insights,
+    list_actions,
     list_insights,
     list_recommendations,
     list_threads,
@@ -102,6 +108,7 @@ def post_advisor_chat_stream(payload: AdvisorChatIn, ctx: AuthContext = Depends(
                     "insights": result.get("insights") or [],
                     "recommendations": result.get("recommendations") or [],
                     "memory": result.get("memory") or {},
+                    "actions": result.get("actions") or [],
                 },
             )
             yield _ndjson_event("done", {"ok": bool(result.get("ok", True))})
@@ -135,6 +142,78 @@ def get_advisor_recommendations(
     with db_session() as conn:
         set_tenant_context(conn, ctx.tenant_id)
         return {"ok": True, "recommendations": list_recommendations(conn, ctx.tenant_id, limit=limit)}
+
+
+@router.get("/actions")
+def get_advisor_actions(
+    status: str = Query(default="open", max_length=40),
+    limit: int = Query(default=12, ge=1, le=100),
+    ctx: AuthContext = Depends(get_current_user),
+):
+    with db_session() as conn:
+        set_tenant_context(conn, ctx.tenant_id)
+        return {"ok": True, "actions": list_actions(conn, ctx.tenant_id, status=status, limit=limit)}
+
+
+@router.post("/actions")
+def create_advisor_action(payload: AdvisorActionCreateIn, ctx: AuthContext = Depends(require_role("owner", "admin", "supervisor", "agent"))):
+    with db_session() as conn:
+        set_tenant_context(conn, ctx.tenant_id)
+        item = create_custom_action(
+            conn,
+            ctx.tenant_id,
+            ctx.user_id,
+            title=payload.title,
+            description=payload.description,
+            action_type=payload.action_type,
+            payload_json=payload.payload_json,
+            impact=payload.impact,
+            risk_level=payload.risk_level,
+        )
+        return {"ok": bool(item), "action": item}
+
+
+@router.post("/recommendations/{recommendation_id}/action")
+def create_action_for_recommendation(
+    recommendation_id: str,
+    ctx: AuthContext = Depends(require_role("owner", "admin", "supervisor", "agent")),
+):
+    with db_session() as conn:
+        set_tenant_context(conn, ctx.tenant_id)
+        item = create_action_from_recommendation(conn, ctx.tenant_id, ctx.user_id, recommendation_id)
+        return {"ok": bool(item), "action": item}
+
+
+@router.post("/insights/{insight_id}/action")
+def create_action_for_insight(
+    insight_id: str,
+    ctx: AuthContext = Depends(require_role("owner", "admin", "supervisor", "agent")),
+):
+    with db_session() as conn:
+        set_tenant_context(conn, ctx.tenant_id)
+        item = create_action_from_insight(conn, ctx.tenant_id, ctx.user_id, insight_id)
+        return {"ok": bool(item), "action": item}
+
+
+@router.post("/actions/{action_id}/approve")
+def approve_advisor_action(
+    action_id: str,
+    ctx: AuthContext = Depends(require_role("owner", "admin", "supervisor")),
+):
+    with db_session() as conn:
+        set_tenant_context(conn, ctx.tenant_id)
+        item = approve_action(conn, ctx.tenant_id, ctx.user_id, action_id)
+        return {"ok": bool(item), "action": item}
+
+
+@router.post("/actions/{action_id}/dismiss")
+def dismiss_advisor_action(
+    action_id: str,
+    ctx: AuthContext = Depends(require_role("owner", "admin", "supervisor", "agent")),
+):
+    with db_session() as conn:
+        set_tenant_context(conn, ctx.tenant_id)
+        return {"ok": True, "item": dismiss_action(conn, ctx.tenant_id, action_id)}
 
 
 @router.post("/insights/{insight_id}/dismiss")

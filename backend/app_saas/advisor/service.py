@@ -95,6 +95,59 @@ def ensure_advisor_tables(conn: Connection) -> None:
         )
     )
     _ensure_insight_tables(conn)
+    conn.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS saas_advisor_actions (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                tenant_id UUID NOT NULL REFERENCES saas_tenants(id) ON DELETE CASCADE,
+                created_by UUID NULL REFERENCES saas_users(id) ON DELETE SET NULL,
+                recommendation_id UUID NULL REFERENCES saas_ai_recommendations(id) ON DELETE SET NULL,
+                insight_id UUID NULL REFERENCES saas_ai_insights(id) ON DELETE SET NULL,
+                action_type TEXT NOT NULL DEFAULT 'advisor_action',
+                title TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                impact TEXT NOT NULL DEFAULT 'medium',
+                risk_level TEXT NOT NULL DEFAULT 'medium',
+                approval_required BOOLEAN NOT NULL DEFAULT TRUE,
+                status TEXT NOT NULL DEFAULT 'draft',
+                approved_by UUID NULL REFERENCES saas_users(id) ON DELETE SET NULL,
+                approved_at TIMESTAMP NULL,
+                executed_at TIMESTAMP NULL,
+                execution_result_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_saas_advisor_actions_tenant_status
+            ON saas_advisor_actions (tenant_id, status, updated_at DESC)
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_saas_advisor_actions_open_recommendation
+            ON saas_advisor_actions (tenant_id, recommendation_id)
+            WHERE recommendation_id IS NOT NULL AND status IN ('draft', 'pending_approval', 'approved')
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_saas_advisor_actions_open_insight
+            ON saas_advisor_actions (tenant_id, insight_id)
+            WHERE insight_id IS NOT NULL AND status IN ('draft', 'pending_approval', 'approved')
+            """
+        )
+    )
 
 
 def _ensure_insight_tables(conn: Connection) -> None:
@@ -184,6 +237,28 @@ def _message_out(row: dict[str, Any]) -> dict[str, Any]:
         "metadata_json": _safe_json(row.get("metadata_json")),
         "ai_run_id": str(row.get("ai_run_id") or ""),
         "created_at": str(row.get("created_at") or ""),
+    }
+
+
+def _action_out(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(row.get("id") or ""),
+        "action_type": str(row.get("action_type") or "advisor_action"),
+        "title": str(row.get("title") or ""),
+        "description": str(row.get("description") or ""),
+        "payload_json": _safe_json(row.get("payload_json")),
+        "impact": str(row.get("impact") or "medium"),
+        "risk_level": str(row.get("risk_level") or "medium"),
+        "approval_required": bool(row.get("approval_required", True)),
+        "status": str(row.get("status") or "draft"),
+        "recommendation_id": str(row.get("recommendation_id") or ""),
+        "insight_id": str(row.get("insight_id") or ""),
+        "approved_by": str(row.get("approved_by") or ""),
+        "approved_at": str(row.get("approved_at") or ""),
+        "executed_at": str(row.get("executed_at") or ""),
+        "execution_result_json": _safe_json(row.get("execution_result_json")),
+        "created_at": str(row.get("created_at") or ""),
+        "updated_at": str(row.get("updated_at") or ""),
     }
 
 
@@ -805,6 +880,285 @@ def dismiss_recommendation(conn: Connection, tenant_id: str, recommendation_id: 
     return _row_dict(row)
 
 
+def list_actions(conn: Connection, tenant_id: str, *, status: str = "open", limit: int = 20) -> list[dict[str, Any]]:
+    ensure_advisor_tables(conn)
+    status_value = _clean(status, 40).lower()
+    status_filter = "AND status IN ('draft', 'pending_approval', 'approved')" if status_value in {"", "open"} else "AND status = :status"
+    rows = conn.execute(
+        text(
+            f"""
+            SELECT id::text, action_type, title, description, payload_json, impact, risk_level,
+                   approval_required, status, recommendation_id::text, insight_id::text,
+                   approved_by::text, approved_at::text, executed_at::text,
+                   execution_result_json, created_at::text, updated_at::text
+            FROM saas_advisor_actions
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              {status_filter}
+            ORDER BY
+              CASE risk_level WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END,
+              updated_at DESC
+            LIMIT :limit
+            """
+        ),
+        {"tenant_id": tenant_id, "status": status_value, "limit": max(1, min(int(limit or 20), 100))},
+    ).mappings().all()
+    return [_action_out(_row_dict(row)) for row in rows]
+
+
+def _source_action_type(source_type: str, row: dict[str, Any], action: dict[str, Any]) -> str:
+    if action.get("type"):
+        return _clean(action.get("type"), 100)
+    if action.get("module") or action.get("tab"):
+        return f"open_{_clean(action.get('module') or action.get('tab'), 80)}"
+    return _clean(row.get("recommendation_type") or row.get("insight_type") or source_type, 100) or "advisor_action"
+
+
+def create_action_from_recommendation(
+    conn: Connection,
+    tenant_id: str,
+    user_id: str,
+    recommendation_id: str,
+) -> dict[str, Any]:
+    ensure_advisor_tables(conn)
+    source = conn.execute(
+        text(
+            """
+            SELECT id::text, recommendation_type, severity, title, description, action_json, evidence_json
+            FROM saas_ai_recommendations
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND id = CAST(:recommendation_id AS uuid)
+            LIMIT 1
+            """
+        ),
+        {"tenant_id": tenant_id, "recommendation_id": recommendation_id},
+    ).mappings().first()
+    row = _row_dict(source)
+    if not row:
+        return {}
+    action = _safe_json(row.get("action_json"))
+    severity = _clean(row.get("severity"), 40).lower()
+    result = conn.execute(
+        text(
+            """
+            INSERT INTO saas_advisor_actions (
+                tenant_id, created_by, recommendation_id, action_type, title, description,
+                payload_json, impact, risk_level, approval_required, status, execution_result_json, updated_at
+            )
+            VALUES (
+                CAST(:tenant_id AS uuid), CAST(:user_id AS uuid), CAST(:recommendation_id AS uuid),
+                :action_type, :title, :description, CAST(:payload_json AS jsonb),
+                :impact, :risk_level, TRUE, 'pending_approval',
+                CAST(:execution_result_json AS jsonb), NOW()
+            )
+            ON CONFLICT DO NOTHING
+            RETURNING id::text, action_type, title, description, payload_json, impact, risk_level,
+                      approval_required, status, recommendation_id::text, insight_id::text,
+                      approved_by::text, approved_at::text, executed_at::text,
+                      execution_result_json, created_at::text, updated_at::text
+            """
+        ),
+        {
+            "tenant_id": tenant_id,
+            "user_id": user_id,
+            "recommendation_id": recommendation_id,
+            "action_type": _source_action_type("recommendation", row, action),
+            "title": _clean(row.get("title"), 180) or "Accion recomendada por Advisor",
+            "description": _clean(row.get("description"), 1200),
+            "payload_json": _json({"source": "recommendation", "action": action, "evidence": _safe_json(row.get("evidence_json"))}),
+            "impact": "high" if severity in {"critical", "high"} else "medium",
+            "risk_level": "high" if severity == "critical" else ("medium" if severity == "high" else "low"),
+            "execution_result_json": _json({"state": "awaiting_human_approval"}),
+        },
+    ).mappings().first()
+    if result:
+        return _action_out(_row_dict(result))
+    existing = conn.execute(
+        text(
+            """
+            SELECT id::text, action_type, title, description, payload_json, impact, risk_level,
+                   approval_required, status, recommendation_id::text, insight_id::text,
+                   approved_by::text, approved_at::text, executed_at::text,
+                   execution_result_json, created_at::text, updated_at::text
+            FROM saas_advisor_actions
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND recommendation_id = CAST(:recommendation_id AS uuid)
+              AND status IN ('draft', 'pending_approval', 'approved')
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """
+        ),
+        {"tenant_id": tenant_id, "recommendation_id": recommendation_id},
+    ).mappings().first()
+    return _action_out(_row_dict(existing))
+
+
+def create_action_from_insight(conn: Connection, tenant_id: str, user_id: str, insight_id: str) -> dict[str, Any]:
+    ensure_advisor_tables(conn)
+    source = conn.execute(
+        text(
+            """
+            SELECT id::text, insight_type, severity, title, description, recommended_action_json, evidence_json
+            FROM saas_ai_insights
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND id = CAST(:insight_id AS uuid)
+            LIMIT 1
+            """
+        ),
+        {"tenant_id": tenant_id, "insight_id": insight_id},
+    ).mappings().first()
+    row = _row_dict(source)
+    if not row:
+        return {}
+    action = _safe_json(row.get("recommended_action_json"))
+    severity = _clean(row.get("severity"), 40).lower()
+    result = conn.execute(
+        text(
+            """
+            INSERT INTO saas_advisor_actions (
+                tenant_id, created_by, insight_id, action_type, title, description,
+                payload_json, impact, risk_level, approval_required, status, execution_result_json, updated_at
+            )
+            VALUES (
+                CAST(:tenant_id AS uuid), CAST(:user_id AS uuid), CAST(:insight_id AS uuid),
+                :action_type, :title, :description, CAST(:payload_json AS jsonb),
+                :impact, :risk_level, TRUE, 'pending_approval',
+                CAST(:execution_result_json AS jsonb), NOW()
+            )
+            ON CONFLICT DO NOTHING
+            RETURNING id::text, action_type, title, description, payload_json, impact, risk_level,
+                      approval_required, status, recommendation_id::text, insight_id::text,
+                      approved_by::text, approved_at::text, executed_at::text,
+                      execution_result_json, created_at::text, updated_at::text
+            """
+        ),
+        {
+            "tenant_id": tenant_id,
+            "user_id": user_id,
+            "insight_id": insight_id,
+            "action_type": _source_action_type("insight", row, action),
+            "title": _clean(row.get("title"), 180) or "Accion sugerida por Advisor",
+            "description": _clean(row.get("description"), 1200),
+            "payload_json": _json({"source": "insight", "action": action, "evidence": _safe_json(row.get("evidence_json"))}),
+            "impact": "high" if severity in {"critical", "high"} else "medium",
+            "risk_level": "high" if severity == "critical" else ("medium" if severity == "high" else "low"),
+            "execution_result_json": _json({"state": "awaiting_human_approval"}),
+        },
+    ).mappings().first()
+    if result:
+        return _action_out(_row_dict(result))
+    existing = conn.execute(
+        text(
+            """
+            SELECT id::text, action_type, title, description, payload_json, impact, risk_level,
+                   approval_required, status, recommendation_id::text, insight_id::text,
+                   approved_by::text, approved_at::text, executed_at::text,
+                   execution_result_json, created_at::text, updated_at::text
+            FROM saas_advisor_actions
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND insight_id = CAST(:insight_id AS uuid)
+              AND status IN ('draft', 'pending_approval', 'approved')
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """
+        ),
+        {"tenant_id": tenant_id, "insight_id": insight_id},
+    ).mappings().first()
+    return _action_out(_row_dict(existing))
+
+
+def create_custom_action(
+    conn: Connection,
+    tenant_id: str,
+    user_id: str,
+    *,
+    title: str,
+    description: str,
+    action_type: str,
+    payload_json: dict[str, Any],
+    impact: str,
+    risk_level: str,
+) -> dict[str, Any]:
+    ensure_advisor_tables(conn)
+    row = conn.execute(
+        text(
+            """
+            INSERT INTO saas_advisor_actions (
+                tenant_id, created_by, action_type, title, description,
+                payload_json, impact, risk_level, approval_required, status, execution_result_json, updated_at
+            )
+            VALUES (
+                CAST(:tenant_id AS uuid), CAST(:user_id AS uuid), :action_type, :title, :description,
+                CAST(:payload_json AS jsonb), :impact, :risk_level, TRUE, 'pending_approval',
+                CAST(:execution_result_json AS jsonb), NOW()
+            )
+            RETURNING id::text, action_type, title, description, payload_json, impact, risk_level,
+                      approval_required, status, recommendation_id::text, insight_id::text,
+                      approved_by::text, approved_at::text, executed_at::text,
+                      execution_result_json, created_at::text, updated_at::text
+            """
+        ),
+        {
+            "tenant_id": tenant_id,
+            "user_id": user_id,
+            "action_type": _clean(action_type, 100) or "advisor_action",
+            "title": _clean(title, 180) or "Accion sugerida por Advisor",
+            "description": _clean(description, 1200),
+            "payload_json": _json(payload_json or {}),
+            "impact": _clean(impact, 40) or "medium",
+            "risk_level": _clean(risk_level, 40) or "medium",
+            "execution_result_json": _json({"state": "awaiting_human_approval"}),
+        },
+    ).mappings().first()
+    return _action_out(_row_dict(row))
+
+
+def approve_action(conn: Connection, tenant_id: str, user_id: str, action_id: str) -> dict[str, Any]:
+    ensure_advisor_tables(conn)
+    row = conn.execute(
+        text(
+            """
+            UPDATE saas_advisor_actions
+            SET status = 'approved',
+                approved_by = CAST(:user_id AS uuid),
+                approved_at = NOW(),
+                execution_result_json = jsonb_set(
+                    COALESCE(execution_result_json, '{}'::jsonb),
+                    '{state}',
+                    '"approved_waiting_execution"'::jsonb,
+                    TRUE
+                ),
+                updated_at = NOW()
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND id = CAST(:action_id AS uuid)
+              AND status IN ('draft', 'pending_approval')
+            RETURNING id::text, action_type, title, description, payload_json, impact, risk_level,
+                      approval_required, status, recommendation_id::text, insight_id::text,
+                      approved_by::text, approved_at::text, executed_at::text,
+                      execution_result_json, created_at::text, updated_at::text
+            """
+        ),
+        {"tenant_id": tenant_id, "user_id": user_id, "action_id": action_id},
+    ).mappings().first()
+    return _action_out(_row_dict(row))
+
+
+def dismiss_action(conn: Connection, tenant_id: str, action_id: str) -> dict[str, Any]:
+    ensure_advisor_tables(conn)
+    row = conn.execute(
+        text(
+            """
+            UPDATE saas_advisor_actions
+            SET status = 'dismissed', updated_at = NOW()
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND id = CAST(:action_id AS uuid)
+            RETURNING id::text, status, updated_at::text
+            """
+        ),
+        {"tenant_id": tenant_id, "action_id": action_id},
+    ).mappings().first()
+    return _row_dict(row)
+
+
 def advisor_chat(
     conn: Connection,
     *,
@@ -880,6 +1234,7 @@ def advisor_chat(
         )
         insights = generate_seed_insights(conn, tenant_id)
         recommendations = list_recommendations(conn, tenant_id, limit=10)
+        actions = list_actions(conn, tenant_id, status="open", limit=8)
         return {
             "ok": False,
             "thread": _thread_out(thread),
@@ -888,6 +1243,7 @@ def advisor_chat(
             "insights": insights,
             "recommendations": recommendations,
             "memory": memory,
+            "actions": actions,
         }
     assistant_msg = create_message(
         conn,
@@ -916,6 +1272,7 @@ def advisor_chat(
     )
     insights = generate_seed_insights(conn, tenant_id)
     recommendations = list_recommendations(conn, tenant_id, limit=10)
+    actions = list_actions(conn, tenant_id, status="open", limit=8)
     return {
         "ok": True,
         "thread": _thread_out(thread),
@@ -924,6 +1281,7 @@ def advisor_chat(
         "insights": insights,
         "recommendations": recommendations,
         "memory": memory,
+        "actions": actions,
     }
 
 

@@ -39,3 +39,13 @@ class AdvisorChatOut(BaseModel):
     insights: list[dict[str, Any]] = Field(default_factory=list)
     recommendations: list[dict[str, Any]] = Field(default_factory=list)
     memory: dict[str, Any] = Field(default_factory=dict)
+    actions: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class AdvisorActionCreateIn(BaseModel):
+    title: str = Field(default="", max_length=180)
+    description: str = Field(default="", max_length=1200)
+    action_type: str = Field(default="advisor_action", max_length=100)
+    payload_json: dict[str, Any] = Field(default_factory=dict)
+    impact: str = Field(default="medium", max_length=40)
+    risk_level: str = Field(default="medium", max_length=40)
