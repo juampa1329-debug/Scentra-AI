@@ -12,6 +12,7 @@ from app_saas.social.service import (
     generate_social_comment_reply,
     get_comment_ai_settings,
     list_social_comments,
+    react_to_social_comment,
     reply_to_social_comment,
     upsert_comment_ai_settings,
 )
@@ -21,6 +22,10 @@ router = APIRouter(prefix="/social", tags=["saas-social"])
 
 class CommentReplyIn(BaseModel):
     message: str = Field(min_length=1, max_length=1000)
+
+
+class CommentReactionIn(BaseModel):
+    emoji: str = Field(default="👍", min_length=1, max_length=20)
 
 
 class CommentAiSettingsIn(BaseModel):
@@ -71,6 +76,14 @@ def post_comment_reply(comment_id: str, payload: CommentReplyIn, ctx: AuthContex
     return result
 
 
+@router.post("/comments/{comment_id}/react")
+def post_comment_reaction(comment_id: str, payload: CommentReactionIn, ctx: AuthContext = Depends(require_role("owner", "admin", "supervisor", "agent"))):
+    with db_session() as conn:
+        set_tenant_context(conn, ctx.tenant_id)
+        result = react_to_social_comment(conn, ctx.tenant_id, comment_id, payload.emoji)
+    return result
+
+
 @router.post("/comments/{comment_id}/generate-ai")
 def post_comment_ai(comment_id: str, ctx: AuthContext = Depends(require_role("owner", "admin", "supervisor", "agent"))):
     with db_session() as conn:
@@ -85,4 +98,3 @@ def ensure_comments_tables(ctx: AuthContext = Depends(require_role("owner", "adm
         set_tenant_context(conn, ctx.tenant_id)
         ensure_social_tables(conn)
     return {"ok": True}
-

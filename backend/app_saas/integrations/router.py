@@ -6,6 +6,7 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -20,9 +21,10 @@ from app_saas.integrations.instagram_graph import (
     ensure_instagram_page_subscription,
     meta_error,
     request_with_retry,
+    token_hint,
 )
 from app_saas.integrations.schemas import IntegrationOut, IntegrationUpsertIn, WhatsappPhoneRegisterIn
-from app_saas.integrations.whatsapp_subscription import ensure_webhook_subscription
+from app_saas.integrations.whatsapp_subscription import ensure_webhook_subscription, list_waba_phone_numbers
 from app_saas.shared.security import AuthContext, get_current_user, require_role, verify_password
 from app_saas.shared.secrets import decrypt_secret, encrypt_secret, is_masked_secret, mask_secret
 from app_saas.social.service import ensure_social_tables
@@ -181,6 +183,30 @@ def _graph_request(method: str, url: str, token: str, payload: dict[str, Any] | 
         raise HTTPException(status_code=502, detail={"code": "meta_graph_error", "meta": detail})
     except Exception as exc:
         raise HTTPException(status_code=502, detail={"code": "meta_graph_unavailable", "message": str(exc)[:300]})
+
+
+def _meta_error_http_status(error_status: str) -> int:
+    if error_status == "token_expired_or_invalid":
+        return 401
+    if error_status == "insufficient_permissions":
+        return 403
+    if error_status in {"asset_not_found_or_not_accessible", "waba_not_found_or_not_accessible"}:
+        return 404
+    if error_status == "rate_limited":
+        return 429
+    return 502
+
+
+def _whatsapp_phone_sync_hint(error_status: str) -> str:
+    if error_status == "token_expired_or_invalid":
+        return "El token permanente de Meta es invalido, expiro, fue revocado o se pego incompleto."
+    if error_status == "insufficient_permissions":
+        return "El token no tiene permisos sobre este WABA. Revisa whatsapp_business_management, whatsapp_business_messaging y acceso del System User al portafolio."
+    if error_status in {"asset_not_found_or_not_accessible", "waba_not_found_or_not_accessible"}:
+        return "El WABA ID no existe para este token o el token pertenece a otro Business Portfolio."
+    if error_status == "rate_limited":
+        return "Meta limito temporalmente la solicitud. Espera unos minutos y vuelve a sincronizar."
+    return "Meta Graph rechazo la sincronizacion. Revisa token, WABA ID, App ID y permisos del System User."
 
 
 def _load_whatsapp_integration(conn, tenant_id: str) -> dict[str, Any]:
@@ -355,6 +381,281 @@ def _permission_names_from_meta_message(message: str) -> set[str]:
     if "permission" in clean_message.lower() and "pages_messaging" in clean_message:
         names.add("pages_messaging")
     return names
+
+
+def _meta_social_graph_version(config: dict[str, Any]) -> str:
+    version = str(config.get("graph_api_version") or settings.scentra_meta_graph_version or "v24.0").strip()
+    return version if version.startswith("v") else f"v{version}"
+
+
+def _meta_social_app_id(config: dict[str, Any]) -> str:
+    return str(config.get("app_id") or settings.scentra_meta_app_id or "").strip()
+
+
+def _meta_social_app_secret(config: dict[str, Any]) -> str:
+    for key in ("app_secret", "meta_app_secret", "client_secret"):
+        value = decrypt_secret(str(config.get(key) or "").strip())
+        if value:
+            return value
+    return str(settings.scentra_meta_app_secret or "").strip()
+
+
+def _meta_social_user_token(config: dict[str, Any]) -> str:
+    for key in ("user_access_token", "long_lived_user_access_token"):
+        value = decrypt_secret(str(config.get(key) or "").strip())
+        if value:
+            return value
+    raw = str(config.get("user_access_token") or "").strip()
+    return raw if _looks_like_secret_value(raw) else ""
+
+
+def _epoch_to_iso(value: Any) -> str:
+    try:
+        numeric = int(value or 0)
+    except Exception:
+        numeric = 0
+    if numeric <= 0:
+        return ""
+    return datetime.fromtimestamp(numeric, tz=timezone.utc).isoformat()
+
+
+def _expires_in_to_iso(value: Any) -> str:
+    try:
+        seconds = int(value or 0)
+    except Exception:
+        seconds = 0
+    if seconds <= 0:
+        return ""
+    return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()
+
+
+def _debug_meta_access_token(token: str, *, app_id: str, app_secret: str, graph_version: str) -> dict[str, Any]:
+    clean_token = str(token or "").strip()
+    if not clean_token:
+        return {"ok": False, "status": "missing_token", "hint": ""}
+    if not app_id or not app_secret:
+        return {
+            "ok": False,
+            "status": "missing_app_credentials",
+            "hint": token_hint(clean_token),
+            "message": "Para validar expiracion con debug_token se requiere Meta App ID y App Secret.",
+        }
+    status, payload, attempts = request_with_retry(
+        "GET",
+        "/debug_token",
+        f"{app_id}|{app_secret}",
+        graph_version=graph_version,
+        params={"input_token": clean_token},
+        retries=1,
+    )
+    error = meta_error(payload)
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    scopes = data.get("scopes") if isinstance(data.get("scopes"), list) else []
+    expires_at = _epoch_to_iso(data.get("expires_at"))
+    data_access_expires_at = _epoch_to_iso(data.get("data_access_expires_at"))
+    is_valid = bool(data.get("is_valid")) and status < 400 and not error
+    return {
+        "ok": is_valid,
+        "status": "valid" if is_valid else classify_meta_error(status, payload),
+        "http_status": status,
+        "attempts": attempts,
+        "hint": token_hint(clean_token),
+        "app_id": str(data.get("app_id") or app_id or ""),
+        "type": str(data.get("type") or ""),
+        "application": str(data.get("application") or ""),
+        "profile_id": str(data.get("profile_id") or ""),
+        "user_id": str(data.get("user_id") or ""),
+        "expires_at": expires_at,
+        "data_access_expires_at": data_access_expires_at,
+        "scopes": scopes,
+        "error": error,
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _build_meta_social_token_health(integration: dict[str, Any] | None) -> dict[str, Any]:
+    if not integration:
+        return {"ok": False, "status": "integration_not_found"}
+    config = dict(integration.get("config_json") or {})
+    channel = str(integration.get("channel") or "").strip().lower()
+    page_token = _instagram_page_token(config)
+    user_token = _meta_social_user_token(config)
+    app_id = _meta_social_app_id(config)
+    app_secret = _meta_social_app_secret(config)
+    graph_version = _meta_social_graph_version(config)
+    page_id = str(config.get("page_id") or config.get("facebook_page_id") or "").strip()
+    can_auto_refresh = bool(user_token and app_id and app_secret and page_id)
+    page_health = _debug_meta_access_token(page_token, app_id=app_id, app_secret=app_secret, graph_version=graph_version)
+    user_health = _debug_meta_access_token(user_token, app_id=app_id, app_secret=app_secret, graph_version=graph_version) if user_token else {"ok": False, "status": "missing_user_token"}
+    recommendation = "ok"
+    if not page_token:
+        recommendation = "missing_page_token"
+    elif page_health.get("status") == "token_expired_or_invalid":
+        recommendation = "refresh_or_reconnect"
+    elif not can_auto_refresh:
+        recommendation = "manual_mode_no_auto_refresh"
+    elif not user_health.get("ok"):
+        recommendation = "reconnect_facebook_login"
+    return {
+        "ok": bool(page_health.get("ok")),
+        "status": page_health.get("status") or "unknown",
+        "channel": channel,
+        "integration_id": integration.get("id") or "",
+        "page_id": page_id,
+        "app_id": app_id,
+        "graph_version": graph_version,
+        "can_auto_refresh": can_auto_refresh,
+        "refresh_source": "oauth_user_token" if user_token else "manual_page_token",
+        "page_access_token": page_health,
+        "user_access_token": user_health,
+        "last_token_refresh": config.get("last_token_refresh") if isinstance(config.get("last_token_refresh"), dict) else {},
+        "recommendation": recommendation,
+    }
+
+
+def _refresh_meta_social_page_token(conn, *, tenant_id: str, channel: str) -> dict[str, Any]:
+    clean_channel = str(channel or "").strip().lower()
+    if clean_channel not in {"instagram", "facebook"}:
+        raise HTTPException(status_code=404, detail="meta_social_channel_not_supported")
+    integration = _load_meta_channel_integration(conn, tenant_id, clean_channel)
+    if not integration:
+        raise HTTPException(status_code=404, detail=f"{clean_channel}_integration_not_found")
+    config = dict(integration.get("config_json") or {})
+    app_id = _meta_social_app_id(config)
+    app_secret = _meta_social_app_secret(config)
+    graph_version = _meta_social_graph_version(config)
+    page_id = str(config.get("page_id") or config.get("facebook_page_id") or "").strip()
+    user_token = _meta_social_user_token(config)
+    page_token = _instagram_page_token(config)
+    health_before = _build_meta_social_token_health(integration)
+
+    if not page_id:
+        raise HTTPException(status_code=400, detail="page_id_required")
+    if not app_id or not app_secret:
+        return {
+            "ok": False,
+            "status": "missing_app_credentials",
+            "health": health_before,
+            "message": "Guarda Meta App ID y App Secret para poder extender tokens automaticamente.",
+        }
+    if not user_token:
+        return {
+            "ok": False,
+            "status": "manual_page_token_only",
+            "health": health_before,
+            "message": "Esta integracion solo tiene Page Access Token manual. Para auto-renovar, conecta con Facebook Login o guarda user_access_token.",
+        }
+
+    refreshed_user_token = user_token
+    exchange_status, exchange_payload, exchange_attempts = request_with_retry(
+        "GET",
+        "/oauth/access_token",
+        "",
+        graph_version=graph_version,
+        params={
+            "grant_type": "fb_exchange_token",
+            "client_id": app_id,
+            "client_secret": app_secret,
+            "fb_exchange_token": user_token,
+        },
+        retries=1,
+    )
+    exchange_ok = exchange_status < 400 and not meta_error(exchange_payload) and bool(exchange_payload.get("access_token"))
+    if exchange_ok:
+        refreshed_user_token = str(exchange_payload.get("access_token") or "").strip()
+        config["user_access_token"] = encrypt_secret(refreshed_user_token)
+        config["user_access_token_hint"] = token_hint(refreshed_user_token)
+        config["user_token_expires_at"] = _expires_in_to_iso(exchange_payload.get("expires_in"))
+
+    fields = "access_token,name"
+    if clean_channel == "instagram":
+        fields = "access_token,name,instagram_business_account{id,username,name,profile_picture_url}"
+    page_status, page_payload, page_attempts = request_with_retry(
+        "GET",
+        f"/{page_id}",
+        refreshed_user_token,
+        graph_version=graph_version,
+        params={"fields": fields},
+        retries=1,
+    )
+    if page_status >= 400 or meta_error(page_payload) or not page_payload.get("access_token"):
+        config["last_token_refresh"] = {
+            "ok": False,
+            "status": classify_meta_error(page_status, page_payload),
+            "channel": clean_channel,
+            "page_id": page_id,
+            "exchange_attempted": True,
+            "exchange_ok": exchange_ok,
+            "exchange_attempts": exchange_attempts,
+            "page_attempts": page_attempts,
+            "meta_error": meta_error(page_payload),
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+        }
+        conn.execute(
+            text(
+                """
+                UPDATE saas_integrations
+                SET config_json = CAST(:config_json AS jsonb), updated_at = NOW()
+                WHERE id = CAST(:integration_id AS uuid)
+                """
+            ),
+            {"integration_id": integration["id"], "config_json": json.dumps(config)},
+        )
+        return {"ok": False, "status": config["last_token_refresh"]["status"], "exchange": exchange_payload, "page": page_payload, "health": health_before}
+
+    refreshed_page_token = str(page_payload.get("access_token") or "").strip()
+    config["page_access_token"] = encrypt_secret(refreshed_page_token)
+    config["page_access_token_hint"] = token_hint(refreshed_page_token)
+    if page_payload.get("name"):
+        config["page_name"] = str(page_payload.get("name") or "")
+    if clean_channel == "instagram" and isinstance(page_payload.get("instagram_business_account"), dict):
+        ig = page_payload["instagram_business_account"]
+        config["instagram_business_account_id"] = str(ig.get("id") or config.get("instagram_business_account_id") or "")
+        config["instagram_username"] = str(ig.get("username") or ig.get("name") or config.get("instagram_username") or "")
+        if ig.get("profile_picture_url"):
+            config["instagram_profile_picture_url"] = str(ig.get("profile_picture_url") or "")
+
+    subscription = None
+    if clean_channel == "instagram":
+        subscription = _maybe_ensure_instagram_subscription(conn, tenant_id=tenant_id, integration_id=integration["id"], config=config)
+    if clean_channel == "facebook":
+        subscription = _maybe_ensure_facebook_subscription(conn, tenant_id=tenant_id, integration_id=integration["id"], config=config)
+
+    config["last_token_refresh"] = {
+        "ok": True,
+        "status": "page_token_refreshed",
+        "channel": clean_channel,
+        "page_id": page_id,
+        "exchange_attempted": True,
+        "exchange_ok": exchange_ok,
+        "exchange_status": exchange_status,
+        "exchange_attempts": exchange_attempts,
+        "page_status": page_status,
+        "page_attempts": page_attempts,
+        "page_access_token_hint": token_hint(refreshed_page_token),
+        "user_access_token_hint": token_hint(refreshed_user_token),
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "subscription_status": (subscription or {}).get("status") if isinstance(subscription, dict) else "",
+    }
+    conn.execute(
+        text(
+            """
+            UPDATE saas_integrations
+            SET config_json = CAST(:config_json AS jsonb), last_sync_at = NOW(), updated_at = NOW()
+            WHERE id = CAST(:integration_id AS uuid)
+            """
+        ),
+        {"integration_id": integration["id"], "config_json": json.dumps(config)},
+    )
+    refreshed_integration = {**integration, "config_json": config}
+    return {
+        "ok": True,
+        "status": "page_token_refreshed",
+        "channel": clean_channel,
+        "page_id": page_id,
+        "subscription": subscription,
+        "health": _build_meta_social_token_health(refreshed_integration),
+    }
 
 
 @router.get("", response_model=list[IntegrationOut])
@@ -598,6 +899,27 @@ def delete_integration(
     return {"ok": True, "deleted_id": row["id"], "provider": row["provider"], "channel": row["channel"]}
 
 
+@router.get("/meta/{channel}/token-health")
+def meta_social_token_health(channel: str, ctx: AuthContext = Depends(require_role("owner", "admin", "supervisor"))):
+    clean_channel = str(channel or "").strip().lower()
+    if clean_channel not in {"instagram", "facebook"}:
+        raise HTTPException(status_code=404, detail="meta_social_channel_not_supported")
+    with db_session() as conn:
+        set_tenant_context(conn, ctx.tenant_id)
+        integration = _load_meta_channel_integration(conn, ctx.tenant_id, clean_channel)
+        return _build_meta_social_token_health(integration)
+
+
+@router.post("/meta/{channel}/token-refresh")
+def refresh_meta_social_token(channel: str, ctx: AuthContext = Depends(require_role("owner", "admin"))):
+    clean_channel = str(channel or "").strip().lower()
+    if clean_channel not in {"instagram", "facebook"}:
+        raise HTTPException(status_code=404, detail="meta_social_channel_not_supported")
+    with db_session() as conn:
+        set_tenant_context(conn, ctx.tenant_id)
+        return _refresh_meta_social_page_token(conn, tenant_id=ctx.tenant_id, channel=clean_channel)
+
+
 @router.get("/meta/facebook/diagnostics")
 def facebook_diagnostics(ctx: AuthContext = Depends(require_role("owner", "admin", "supervisor"))):
     with db_session() as conn:
@@ -738,6 +1060,7 @@ def facebook_diagnostics(ctx: AuthContext = Depends(require_role("owner", "admin
         "granted_permissions": sorted(granted_permissions),
         "missing_permissions": missing_permissions,
         "meta_required_permissions": sorted(meta_required_permissions),
+        "token_health": _build_meta_social_token_health(integration),
         "config": _safe_config_for_output(config),
     }
 
@@ -768,15 +1091,48 @@ def list_whatsapp_phone_numbers(ctx: AuthContext = Depends(require_role("owner",
             integration_id=integration["id"],
         )
 
-        fields = "id,display_phone_number,verified_name,quality_rating,code_verification_status,name_status,platform_type"
-        query = urllib.parse.urlencode({"fields": fields})
-        data = _graph_request("GET", f"https://graph.facebook.com/{version}/{waba_id}/phone_numbers?{query}", token)
-        phone_numbers = data.get("data") if isinstance(data, dict) else []
+        phone_result = list_waba_phone_numbers(waba_id, token, graph_version=version, retries=1)
+        if not bool(phone_result.get("ok")):
+            response_payload = phone_result.get("response") if isinstance(phone_result.get("response"), dict) else {}
+            error_status = classify_meta_error(int(phone_result.get("http_status") or 0), response_payload)
+            error_detail = meta_error(response_payload)
+            config["last_phone_sync_status"] = error_status
+            config["last_phone_sync_error"] = {
+                "http_status": phone_result.get("http_status"),
+                "error_status": error_status,
+                "meta": error_detail,
+                "hint": _whatsapp_phone_sync_hint(error_status),
+            }
+            conn.execute(
+                text(
+                    """
+                    UPDATE saas_integrations
+                    SET config_json = CAST(:config_json AS jsonb), last_sync_at = NOW(), updated_at = NOW()
+                    WHERE id = CAST(:integration_id AS uuid)
+                    """
+                ),
+                {"integration_id": integration["id"], "config_json": json.dumps(config)},
+            )
+            raise HTTPException(
+                status_code=_meta_error_http_status(error_status),
+                detail={
+                    "code": "whatsapp_phone_sync_failed",
+                    "error_status": error_status,
+                    "hint": _whatsapp_phone_sync_hint(error_status),
+                    "waba_id": waba_id,
+                    "graph_version": version,
+                    "http_status": phone_result.get("http_status"),
+                    "meta": error_detail or response_payload,
+                    "subscription": subscription_result,
+                },
+            )
+        phone_numbers = phone_result.get("phone_numbers") if isinstance(phone_result, dict) else []
         if not isinstance(phone_numbers, list):
             phone_numbers = []
 
         config["phone_numbers"] = phone_numbers
         config["last_phone_sync_status"] = "ok"
+        config.pop("last_phone_sync_error", None)
         config["last_webhook_subscription_check"] = {
             "status": subscription_result.get("status"),
             "ok": bool(subscription_result.get("ok")),

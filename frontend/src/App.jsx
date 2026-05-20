@@ -295,11 +295,20 @@ const CHAT_EMOJIS = [
 ];
 const EMOJI_GROUPS = [
   { label: "Frecuentes", icon: "↺", items: CHAT_EMOJIS },
-  { label: "Caras", icon: "☺", items: ["😀", "😃", "😄", "😁", "😆", "😅", "😂", "🤣", "🙂", "🙃", "😉", "😊", "😇", "🥰", "😍", "😘", "😋", "😜", "🤪", "🤗", "🤭", "🤔", "😎", "🥳", "😌", "😔", "😢", "😭", "😤", "😡"] },
-  { label: "Gestos", icon: "☝", items: ["👍", "👎", "👌", "👏", "🙌", "🙏", "🤝", "💪", "👀", "🫶", "💅", "✍️", "💃", "🕺", "🏃", "🧘"] },
-  { label: "Ventas", icon: "$", items: ["💬", "📲", "📞", "📩", "✅", "❌", "⏰", "📌", "📦", "🚚", "💳", "💰", "🛍️", "🎁", "🏷️", "🧾", "📊", "📈", "🤝", "🔥"] },
-  { label: "Objetos", icon: "□", items: ["🌸", "💐", "💎", "✨", "⭐", "🌟", "❤️", "💚", "💙", "💜", "🖤", "🤍", "🎉", "🎊", "☕", "🍫", "🍔", "🎵", "📍", "🔗"] },
+  { label: "Caras y emociones", icon: "☺", keywords: "caras sonrisa feliz triste enojo amor risa sorpresa", items: ["😀", "😃", "😄", "😁", "😆", "😅", "😂", "🤣", "🥲", "🙂", "🙃", "😉", "😊", "😇", "🥰", "😍", "🤩", "😘", "😗", "😚", "😙", "😋", "😛", "😜", "🤪", "😝", "🤑", "🤗", "🤭", "🫢", "🫣", "🤫", "🤔", "🫡", "🤐", "🤨", "😐", "😑", "😶", "😏", "😒", "🙄", "😬", "😮‍💨", "🤥", "😌", "😔", "😪", "🤤", "😴", "😷", "🤒", "🤕", "🤢", "🤮", "🤧", "🥵", "🥶", "🥴", "😵", "🤯", "🤠", "🥳", "🥸", "😎", "🤓", "🧐", "😕", "🫤", "😟", "🙁", "☹️", "😮", "😯", "😲", "😳", "🥺", "🥹", "😦", "😧", "😨", "😰", "😥", "😢", "😭", "😱", "😖", "😣", "😞", "😓", "😩", "😫", "🥱", "😤", "😡", "😠", "🤬", "😈", "👿", "💀", "☠️", "💩", "🤡", "👻", "👽", "🤖"] },
+  { label: "Gestos y personas", icon: "☝", keywords: "manos gestos persona saludo ok gracias aplauso", items: ["👋", "🤚", "🖐️", "✋", "🖖", "🫱", "🫲", "👌", "🤌", "🤏", "✌️", "🤞", "🫰", "🤟", "🤘", "🤙", "👈", "👉", "👆", "👇", "☝️", "👍", "👎", "✊", "👊", "🤛", "🤜", "👏", "🙌", "🫶", "👐", "🤲", "🙏", "✍️", "💅", "🤳", "💪", "🦾", "🦵", "🦶", "👀", "👁️", "👄", "🧠", "🫂", "👤", "👥", "🗣️", "👶", "🧒", "👦", "👧", "🧑", "👩", "👨", "🧔", "👱", "👵", "👴", "🙍", "🙎", "🙅", "🙆", "💁", "🙋", "🧏", "🙇", "🤦", "🤷", "💃", "🕺", "🏃", "🚶", "🧘"] },
+  { label: "Corazones y simbolos", icon: "♡", keywords: "corazon amor check alerta estrella simbolos", items: ["❤️", "🧡", "💛", "💚", "💙", "💜", "🖤", "🤍", "🤎", "💔", "❣️", "💕", "💞", "💓", "💗", "💖", "💘", "💝", "💟", "☮️", "✝️", "☪️", "🕉️", "☸️", "✡️", "🔯", "🕎", "☯️", "☦️", "🛐", "⛎", "♈", "♉", "♊", "♋", "♌", "♍", "♎", "♏", "♐", "♑", "♒", "♓", "✅", "☑️", "✔️", "❌", "❎", "⚠️", "🚫", "⛔", "📛", "💯", "🔰", "♻️", "⭐", "🌟", "✨", "⚡", "🔥", "💥", "💫", "💦", "💨"] },
+  { label: "Ventas y negocio", icon: "$", keywords: "ventas ecommerce pago dinero envio compra tienda producto", items: ["💬", "📲", "📞", "☎️", "📩", "📧", "📨", "📮", "✅", "❌", "⏰", "⌛", "📌", "📍", "🗓️", "📅", "📦", "📫", "🚚", "🚛", "🛵", "✈️", "🚢", "💳", "💵", "💴", "💶", "💷", "💰", "🪙", "🏦", "🧾", "🧮", "🛍️", "🛒", "🏷️", "🎁", "🎟️", "📊", "📈", "📉", "📋", "📝", "📁", "🔐", "🔑", "🔗", "🌐", "🤝", "🙋", "💡", "🎯", "🚀", "🏆"] },
+  { label: "Comida y lugares", icon: "☕", keywords: "comida restaurante cafe hotel viaje lugar", items: ["☕", "🍵", "🧉", "🥤", "🧃", "🧋", "🍺", "🍻", "🥂", "🍷", "🍸", "🍹", "🍾", "🍽️", "🍴", "🥄", "🔪", "🥐", "🥖", "🥨", "🧀", "🥚", "🍳", "🥞", "🧇", "🥓", "🥩", "🍗", "🍖", "🌭", "🍔", "🍟", "🍕", "🥪", "🌮", "🌯", "🥙", "🧆", "🍝", "🍜", "🍲", "🍛", "🍣", "🍤", "🍙", "🍚", "🍦", "🍰", "🧁", "🍫", "🍪", "🍩", "🍎", "🍓", "🥭", "🏠", "🏢", "🏬", "🏨", "🏥", "🏫", "🏪", "🏖️", "🏝️", "⛰️", "🚗", "🚌", "🚕", "🚆", "✈️", "🛎️", "🛏️"] },
+  { label: "Objetos y naturaleza", icon: "□", keywords: "objetos flores perfume musica camara regalo", items: ["🌸", "🌺", "🌷", "🌹", "🥀", "🌻", "🌼", "💐", "🌿", "🍃", "🌱", "🌵", "🌴", "🌳", "☀️", "🌤️", "⛅", "🌧️", "🌈", "🌙", "💎", "🪞", "🧴", "🧼", "🛁", "🧽", "🧸", "🎈", "🎉", "🎊", "🎵", "🎶", "🎧", "🎤", "📷", "🎥", "💻", "📱", "⌚", "🖥️", "🖨️", "💡", "🔦", "🕯️", "🧲", "🧰", "🛠️", "⚙️", "🧪", "💊", "🩺", "📚", "📖", "✏️", "🖊️", "📎", "✂️"] },
 ];
+const EMOJI_SEARCH_TERMS = {
+  "😀": "sonrisa feliz happy cara", "😂": "risa carcajada lol", "🤣": "risa suelo", "😍": "amor ojos corazon", "🥰": "amor tierno gracias", "😘": "beso",
+  "😢": "triste llorar", "😭": "llanto llorar", "😡": "enojo bravo", "🙏": "gracias por favor oracion", "👏": "aplauso felicitaciones", "🙌": "celebrar manos",
+  "👍": "like ok bien aprobar", "👎": "no dislike", "🫶": "amor manos corazon", "🔥": "fuego hot promocion", "✨": "brillo magia", "✅": "check correcto listo",
+  "❌": "x error cancelar", "⏰": "hora tiempo", "📦": "paquete envio", "🚚": "envio domicilio transporte", "💳": "tarjeta pago", "💰": "dinero pago precio",
+  "🛍️": "compra tienda bolsa", "🎁": "regalo promo", "📲": "celular whatsapp mensaje", "💬": "chat mensaje", "📍": "ubicacion direccion",
+};
 const RECENT_EMOJIS_KEY = "scentra_recent_emojis";
 const EMPTY_WAVEFORM = Array.from({ length: 32 }, (_, idx) => 8 + ((idx * 7) % 18));
 const formatDuration = (seconds) => {
@@ -336,6 +345,12 @@ const providerModelsNotice = (data, provider) => {
   if (code === "credential_required") return `Modelos de referencia cargados. Agrega primero la API key de ${provider?.name || "este proveedor"} para consultar modelos reales.`;
   if (code === "provider_models_error") return `No se pudo validar la API de ${provider?.name || "este proveedor"}. Dejé modelos de referencia para que puedas continuar.`;
   return `Modelos de referencia cargados para ${provider?.name || "este proveedor"}.`;
+};
+
+const emojiMatchesNeedle = (emoji, needle, group) => {
+  if (!needle) return true;
+  const haystack = `${emoji} ${group?.label || ""} ${group?.keywords || ""} ${EMOJI_SEARCH_TERMS[emoji] || ""}`.toLowerCase();
+  return haystack.includes(needle);
 };
 
 const asObject = (value) => {
@@ -597,6 +612,7 @@ function App() {
   const [instagramOAuth, setInstagramOAuth] = useState({ state: "", assets: [], status: "", callbackUrl: "" });
   const [instagramDiagnostics, setInstagramDiagnostics] = useState(null);
   const [facebookDiagnostics, setFacebookDiagnostics] = useState(null);
+  const [metaTokenHealth, setMetaTokenHealth] = useState({ instagram: null, facebook: null });
   const [instagramBusy, setInstagramBusy] = useState(false);
   const [facebookBusy, setFacebookBusy] = useState(false);
   const [debugInboundForm, setDebugInboundForm] = useState({ from_phone: "573001112233", message: "Hola, prueba de webhook entrante", contact_name: "Cliente Debug" });
@@ -615,6 +631,8 @@ function App() {
   const [commentReplyText, setCommentReplyText] = useState("");
   const [commentAiSettings, setCommentAiSettings] = useState(null);
   const [commentBusy, setCommentBusy] = useState("");
+  const [commentEmojiOpen, setCommentEmojiOpen] = useState(false);
+  const [commentReactionOpen, setCommentReactionOpen] = useState(false);
   const [replyText, setReplyText] = useState("");
   const [attachmentFile, setAttachmentFile] = useState(null);
   const [attachmentKind, setAttachmentKind] = useState("");
@@ -727,7 +745,7 @@ function App() {
     ...EMOJI_GROUPS,
   ].map((group) => ({
     ...group,
-    items: emojiNeedle ? group.items.filter((emoji) => emoji.includes(emojiNeedle)) : group.items,
+    items: group.items.filter((emoji) => emojiMatchesNeedle(emoji, emojiNeedle, group)),
   })).filter((group) => group.items.length);
   const dashboardTotals = dashboardOverview?.totals || {};
   const dashboardFunnel = dashboardOverview?.funnel || [];
@@ -1770,11 +1788,45 @@ function App() {
     try {
       const data = await apiCall("/saas/v1/integrations/meta/facebook/diagnostics");
       setFacebookDiagnostics(data);
+      if (data?.token_health) setMetaTokenHealth((prev) => ({ ...prev, facebook: data.token_health }));
       showStatus(data?.ok ? "Facebook Diagnostics actualizado." : "Facebook aun no esta conectado.", data?.ok ? "ok" : "neutral");
     } catch (err) {
       showStatus(String(err.message || err), "error");
     } finally {
       setFacebookBusy(false);
+    }
+  };
+
+  const loadMetaTokenHealth = async (channel) => {
+    const cleanChannel = String(channel || "").toLowerCase();
+    const setBusy = cleanChannel === "facebook" ? setFacebookBusy : setInstagramBusy;
+    setBusy(true);
+    try {
+      const data = await apiCall(`/saas/v1/integrations/meta/${encodeURIComponent(cleanChannel)}/token-health`);
+      setMetaTokenHealth((prev) => ({ ...prev, [cleanChannel]: data }));
+      showStatus(data?.ok ? `Token ${cleanChannel} valido.` : `Token ${cleanChannel}: ${data?.recommendation || data?.status || "revisar"}`, data?.ok ? "ok" : "neutral");
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const refreshMetaToken = async (channel) => {
+    const cleanChannel = String(channel || "").toLowerCase();
+    const setBusy = cleanChannel === "facebook" ? setFacebookBusy : setInstagramBusy;
+    setBusy(true);
+    try {
+      const data = await apiCall(`/saas/v1/integrations/meta/${encodeURIComponent(cleanChannel)}/token-refresh`, { method: "POST" });
+      setMetaTokenHealth((prev) => ({ ...prev, [cleanChannel]: data?.health || data }));
+      showStatus(data?.ok ? `Token ${cleanChannel} renovado y validado.` : (data?.message || `No se pudo renovar ${cleanChannel}.`), data?.ok ? "ok" : "neutral");
+      await loadIntegrations();
+      if (cleanChannel === "instagram") await loadInstagramDiagnostics();
+      if (cleanChannel === "facebook") await loadFacebookDiagnostics();
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -1873,8 +1925,12 @@ function App() {
       // Browsers may block audio until the first user interaction.
     }
   };
-  const appendEmoji = (emoji) => {
-    setReplyText((prev) => `${prev}${emoji}`);
+  const appendEmoji = (emoji, target = "message") => {
+    if (target === "comment") {
+      setCommentReplyText((prev) => `${prev}${emoji}`);
+    } else {
+      setReplyText((prev) => `${prev}${emoji}`);
+    }
     setRecentEmojis((prev) => {
       const next = [emoji, ...prev.filter((item) => item !== emoji)].slice(0, 24);
       localStorage.setItem(RECENT_EMOJIS_KEY, JSON.stringify(next));
@@ -2173,6 +2229,24 @@ function App() {
       setCommentReplyText("");
       await loadSocialComments({ keepSelection: true });
       setSelectedComment((prev) => prev ? { ...prev, status: "replied", last_reply_text: commentReplyText.trim() } : prev);
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    } finally {
+      setCommentBusy("");
+    }
+  };
+  const reactToComment = async (emoji = "👍") => {
+    if (!selectedComment?.id) return;
+    setCommentBusy(`react-${selectedComment.id}`);
+    try {
+      await apiCall(`/saas/v1/social/comments/${encodeURIComponent(selectedComment.id)}/react`, {
+        method: "POST",
+        body: JSON.stringify({ emoji }),
+      });
+      setSelectedComment((prev) => prev ? { ...prev, last_reaction_emoji: emoji, reacted_at: new Date().toISOString() } : prev);
+      setSocialComments((prev) => prev.map((item) => item.id === selectedComment.id ? { ...item, last_reaction_emoji: emoji, reacted_at: new Date().toISOString() } : item));
+      setCommentReactionOpen(false);
+      showStatus(`Reaccionaste ${emoji} al comentario`, "ok");
     } catch (err) {
       showStatus(String(err.message || err), "error");
     } finally {
@@ -2753,7 +2827,7 @@ function App() {
                     <small>{conversation.last_message_text || "-"}</small>
                   </button>
                 )) : filteredSocialComments.map((comment) => (
-                  <button type="button" className={`conversation-item comment-item ${selectedComment?.id === comment.id ? "active" : ""}`} key={comment.id} onClick={() => { setSelectedComment(comment); setCommentReplyText(comment.ai_suggestion || ""); }}>
+                  <button type="button" className={`conversation-item comment-item ${selectedComment?.id === comment.id ? "active" : ""}`} key={comment.id} onClick={() => { setSelectedComment(comment); setCommentReplyText(comment.ai_suggestion || ""); setCommentEmojiOpen(false); setCommentReactionOpen(false); }}>
                     <span className="conversation-title"><strong>{comment.author_name || comment.author_username || comment.author_external_id || "Comentario"}</strong>{comment.status === "open" ? <em>1</em> : null}</span>
                     <span className="conversation-meta"><b>{channelLabel(comment.channel)}</b><small>{comment.status === "replied" ? "Respondido" : "Pendiente"}</small></span>
                     <small>{comment.message || "-"}</small>
@@ -2777,27 +2851,63 @@ function App() {
                     <div className="thread-actions"><button type="button" onClick={() => loadSocialComments({ keepSelection: true })}>Refrescar</button></div>
                   </div>
                   {selectedComment ? (
-                    <div className="comment-detail">
-                      <article className="social-post-card">
-                        {selectedComment.media_url ? <img src={selectedComment.media_url} alt="Publicacion" /> : null}
-                        <div>
+                    <div className="comment-detail business-suite-comments">
+                      <article className="social-post-card meta-post-preview">
+                        <div className="post-media-frame">
+                          {selectedComment.media_url ? <img src={selectedComment.media_url} alt="Publicacion" /> : <span>Post</span>}
+                        </div>
+                        <div className="post-preview-body">
                           <span>Publicacion asociada</span>
                           <strong>{selectedComment.post_caption || "Sin caption disponible"}</strong>
-                          {selectedComment.permalink_url ? <a href={selectedComment.permalink_url} target="_blank" rel="noreferrer">Ver publicacion</a> : null}
+                          <div className="post-preview-meta">
+                            <small>{channelLabel(selectedComment.channel)}</small>
+                            <small>{compactDateTimeLabel(selectedComment.external_created_time || selectedComment.created_at)}</small>
+                          </div>
+                          <div className="post-comment-focus">
+                            <div className="comment-author-line">
+                              <span className="mini-avatar">{String(selectedComment.author_name || selectedComment.author_username || "CM").slice(0, 2).toUpperCase()}</span>
+                              <div><b>{selectedComment.author_name || selectedComment.author_username || selectedComment.author_external_id}</b><small>Comentario seleccionado</small></div>
+                            </div>
+                            <p>{selectedComment.message}</p>
+                            <div className="comment-focus-actions">
+                              {selectedComment.last_reaction_emoji ? <mark>{selectedComment.last_reaction_emoji} reaccionado</mark> : null}
+                              {selectedComment.last_reply_text ? <mark>Respondido</mark> : null}
+                            </div>
+                          </div>
+                          {selectedComment.permalink_url ? <a href={selectedComment.permalink_url} target="_blank" rel="noreferrer">Ver publicacion en Meta</a> : null}
                         </div>
                       </article>
-                      <article className="social-comment-card">
-                        <span>{selectedComment.author_name || selectedComment.author_username || selectedComment.author_external_id}</span>
-                        <p>{selectedComment.message}</p>
-                        <small>{compactDateTimeLabel(selectedComment.external_created_time || selectedComment.created_at)}</small>
-                      </article>
                       {selectedComment.ai_suggestion ? <div className="ai-suggestion-card"><strong>Sugerencia IA</strong><p>{selectedComment.ai_suggestion}</p><button type="button" onClick={() => setCommentReplyText(selectedComment.ai_suggestion)}>Usar sugerencia</button></div> : null}
-                      <form className="comment-reply-box" onSubmit={sendCommentReply}>
-                        <textarea rows={4} value={commentReplyText} onChange={(event) => setCommentReplyText(event.target.value)} placeholder="Responder comentario..." />
-                        <div className="row-actions">
+                      <form className="comment-reply-box meta-comment-composer" onSubmit={sendCommentReply}>
+                        <div className="comment-composer-row">
+                          <textarea rows={3} value={commentReplyText} onChange={(event) => setCommentReplyText(event.target.value)} placeholder="Responder comentario..." />
+                          <button type="button" className="composer-icon" onClick={() => setCommentEmojiOpen((prev) => !prev)} title="Emojis">☺</button>
+                        </div>
+                        <div className="row-actions comment-actions">
+                          <div className="comment-reaction-wrap">
+                            <button type="button" onClick={() => setCommentReactionOpen((prev) => !prev)} disabled={Boolean(commentBusy)}>Reaccionar</button>
+                            {commentReactionOpen ? (
+                              <div className="emoji-panel comment-emoji-panel reaction-panel">
+                                {["👍", "❤️", "👏", "🔥", "😍", "😂", "😮", "😢"].map((emoji) => (
+                                  <button key={emoji} type="button" onClick={() => reactToComment(emoji)}>{emoji}</button>
+                                ))}
+                              </div>
+                            ) : null}
+                          </div>
                           <button type="button" onClick={() => generateCommentAiReply(selectedComment)} disabled={Boolean(commentBusy)}>{commentBusy === `ai-${selectedComment.id}` ? "Generando..." : "Generar con IA"}</button>
                           <button type="submit" className="primary" disabled={Boolean(commentBusy) || !commentReplyText.trim()}>{commentBusy === `reply-${selectedComment.id}` ? "Enviando..." : "Responder"}</button>
                         </div>
+                        {commentEmojiOpen ? (
+                          <div className="emoji-panel whatsapp-emoji-panel comment-emoji-panel">
+                            <input value={emojiSearch} onChange={(event) => setEmojiSearch(event.target.value)} placeholder="Buscar emoji..." />
+                            {visibleEmojiGroups.map((group) => (
+                              <div className="emoji-group" key={`comment-${group.label}`}>
+                                <strong>{group.icon} {group.label}</strong>
+                                <div>{group.items.map((emoji, idx) => <button key={`comment-${group.label}-${emoji}-${idx}`} type="button" onClick={() => appendEmoji(emoji, "comment")}>{emoji}</button>)}</div>
+                              </div>
+                            ))}
+                          </div>
+                        ) : null}
                       </form>
                     </div>
                   ) : <div className="empty">Selecciona un comentario para responderlo.</div>}
@@ -3205,8 +3315,18 @@ function App() {
                       <div className="row-actions">
                         <button type="button" className="primary" onClick={() => editInstagramIntegration(selectedInstagramIntegration)}>Cargar datos para editar</button>
                         <button type="button" onClick={() => openIntegrationSecretModal(selectedInstagramIntegration)}>Actualizar token</button>
+                        <button type="button" onClick={() => loadMetaTokenHealth("instagram")} disabled={instagramBusy}>Salud token</button>
+                        <button type="button" onClick={() => refreshMetaToken("instagram")} disabled={instagramBusy}>Renovar</button>
                         <button type="button" className="danger-button" onClick={() => deleteIntegration(selectedInstagramIntegration)}>Eliminar</button>
                       </div>
+                    </div>
+                  ) : null}
+                  {metaTokenHealth.instagram ? (
+                    <div className={`token-health-strip ${metaTokenHealth.instagram.ok ? "ok" : "warn"}`}>
+                      <strong>{metaTokenHealth.instagram.ok ? "Token Instagram operativo" : `Token Instagram: ${metaTokenHealth.instagram.recommendation || metaTokenHealth.instagram.status || "revisar"}`}</strong>
+                      <span>Fuente: {metaTokenHealth.instagram.refresh_source || "-"} / Auto-renovable: {metaTokenHealth.instagram.can_auto_refresh ? "si" : "no"}</span>
+                      <small>Page token {metaTokenHealth.instagram.page_access_token?.hint || "-"} {metaTokenHealth.instagram.page_access_token?.expires_at ? `/ vence ${compactDateTimeLabel(metaTokenHealth.instagram.page_access_token.expires_at)}` : ""}</small>
+                      {!metaTokenHealth.instagram.can_auto_refresh ? <small>Para auto-renovar necesitas conectar por Facebook Login o guardar un user token OAuth junto al App ID/App Secret.</small> : null}
                     </div>
                   ) : null}
                   <form className="meta-grid instagram-manual-grid" onSubmit={saveInstagramManual}>
@@ -3278,6 +3398,8 @@ function App() {
                         <div className="row-actions">
                           <button type="button" onClick={() => editInstagramIntegration(selectedInstagramIntegration)}>Editar</button>
                           <button type="button" onClick={() => openIntegrationSecretModal(selectedInstagramIntegration)}>Actualizar token</button>
+                          <button type="button" onClick={() => loadMetaTokenHealth("instagram")} disabled={instagramBusy}>Salud</button>
+                          <button type="button" onClick={() => refreshMetaToken("instagram")} disabled={instagramBusy}>Renovar</button>
                           <button type="button" className="danger-button" onClick={() => deleteIntegration(selectedInstagramIntegration)}>Eliminar</button>
                         </div>
                       </div>
@@ -3352,8 +3474,18 @@ function App() {
                       <div className="row-actions">
                         <button type="button" className="primary" onClick={() => editFacebookIntegration(selectedFacebookIntegration)}>Cargar datos para editar</button>
                         <button type="button" onClick={() => openIntegrationSecretModal(selectedFacebookIntegration)}>Actualizar token</button>
+                        <button type="button" onClick={() => loadMetaTokenHealth("facebook")} disabled={facebookBusy}>Salud token</button>
+                        <button type="button" onClick={() => refreshMetaToken("facebook")} disabled={facebookBusy}>Renovar</button>
                         <button type="button" className="danger-button" onClick={() => deleteIntegration(selectedFacebookIntegration)}>Eliminar</button>
                       </div>
+                    </div>
+                  ) : null}
+                  {metaTokenHealth.facebook ? (
+                    <div className={`token-health-strip ${metaTokenHealth.facebook.ok ? "ok" : "warn"}`}>
+                      <strong>{metaTokenHealth.facebook.ok ? "Token Facebook operativo" : `Token Facebook: ${metaTokenHealth.facebook.recommendation || metaTokenHealth.facebook.status || "revisar"}`}</strong>
+                      <span>Fuente: {metaTokenHealth.facebook.refresh_source || "-"} / Auto-renovable: {metaTokenHealth.facebook.can_auto_refresh ? "si" : "no"}</span>
+                      <small>Page token {metaTokenHealth.facebook.page_access_token?.hint || "-"} {metaTokenHealth.facebook.page_access_token?.expires_at ? `/ vence ${compactDateTimeLabel(metaTokenHealth.facebook.page_access_token.expires_at)}` : ""}</small>
+                      {!metaTokenHealth.facebook.can_auto_refresh ? <small>Para auto-renovar necesitas conectar por Facebook Login o guardar un user token OAuth junto al App ID/App Secret.</small> : null}
                     </div>
                   ) : null}
                   <form className="meta-grid instagram-manual-grid" onSubmit={saveFacebookManual}>
@@ -3418,6 +3550,8 @@ function App() {
                         <div className="row-actions">
                           <button type="button" onClick={() => editFacebookIntegration(selectedFacebookIntegration)}>Editar</button>
                           <button type="button" onClick={() => openIntegrationSecretModal(selectedFacebookIntegration)}>Actualizar token</button>
+                          <button type="button" onClick={() => loadMetaTokenHealth("facebook")} disabled={facebookBusy}>Salud</button>
+                          <button type="button" onClick={() => refreshMetaToken("facebook")} disabled={facebookBusy}>Renovar</button>
                           <button type="button" className="danger-button" onClick={() => deleteIntegration(selectedFacebookIntegration)}>Eliminar</button>
                         </div>
                       </div>

@@ -579,7 +579,9 @@ def _send_instagram_graph_text(integration: dict[str, Any], job: dict[str, Any])
     base_url = str(config.get("graph_base_url") or "https://graph.facebook.com").rstrip("/")
     version = _meta_graph_version(config)
     timeout_sec = int(config.get("timeout_sec") or os.getenv("SCENTRA_META_TIMEOUT_SEC") or "15")
-    url = f"{base_url}/{version}/me/messages"
+    page_id = str(config.get("page_id") or config.get("facebook_page_id") or "").strip()
+    node_id = urllib.parse.quote(page_id or "me", safe="")
+    url = f"{base_url}/{version}/{node_id}/messages"
     payload = {
         "recipient": {"id": recipient},
         "message": {"text": body_text[:1000]},
@@ -606,7 +608,9 @@ def _send_facebook_graph_text(integration: dict[str, Any], job: dict[str, Any]) 
     base_url = str(config.get("graph_base_url") or "https://graph.facebook.com").rstrip("/")
     version = _meta_graph_version(config)
     timeout_sec = int(config.get("timeout_sec") or os.getenv("SCENTRA_META_TIMEOUT_SEC") or "15")
-    url = f"{base_url}/{version}/me/messages"
+    page_id = str(config.get("page_id") or config.get("facebook_page_id") or "").strip()
+    node_id = urllib.parse.quote(page_id or "me", safe="")
+    url = f"{base_url}/{version}/{node_id}/messages"
     payload = {
         "recipient": {"id": recipient},
         "message": {"text": body_text[:2000]},

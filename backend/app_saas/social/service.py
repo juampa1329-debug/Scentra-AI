@@ -4,7 +4,7 @@ import json
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
@@ -112,6 +112,9 @@ def ensure_social_tables(conn: Connection) -> None:
                 ai_suggestion TEXT NOT NULL DEFAULT '',
                 last_reply_text TEXT NOT NULL DEFAULT '',
                 last_reply_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+                last_reaction_emoji TEXT NOT NULL DEFAULT '',
+                last_reaction_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+                reacted_at TIMESTAMP NULL,
                 payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
                 external_created_time TEXT NOT NULL DEFAULT '',
                 created_at TIMESTAMP NOT NULL DEFAULT NOW(),
@@ -121,6 +124,9 @@ def ensure_social_tables(conn: Connection) -> None:
             """
         )
     )
+    conn.execute(text("ALTER TABLE social_comments ADD COLUMN IF NOT EXISTS last_reaction_emoji TEXT NOT NULL DEFAULT ''"))
+    conn.execute(text("ALTER TABLE social_comments ADD COLUMN IF NOT EXISTS last_reaction_payload JSONB NOT NULL DEFAULT '{}'::jsonb"))
+    conn.execute(text("ALTER TABLE social_comments ADD COLUMN IF NOT EXISTS reacted_at TIMESTAMP NULL"))
     conn.execute(
         text(
             """
@@ -189,8 +195,104 @@ def normalize_social_comments(provider: str, payload: dict[str, Any], fallback_e
     return comments
 
 
+def _comment_integration_config(conn: Connection, tenant_id: str, channel: str) -> dict[str, Any]:
+    integration = _integration_for_channel(conn, tenant_id, channel)
+    config = dict((integration or {}).get("config_json") or {})
+    return config if isinstance(config, dict) else {}
+
+
+def _graph_get(url: str, token: str, timeout: int = 15) -> dict[str, Any]:
+    request = urllib.request.Request(
+        url,
+        method="GET",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/json", "User-Agent": "ScentraAI/1.0"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8", errors="replace") or "{}")
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError):
+        return {}
+
+
+def _media_from_facebook_attachments(payload: dict[str, Any]) -> str:
+    attachments = _as_dict(payload.get("attachments"))
+    data = _as_list(attachments.get("data"))
+    for item in data:
+        media = _as_dict(_as_dict(item).get("media"))
+        image = _as_dict(media.get("image"))
+        src = _clean(image.get("src") or media.get("source"), 1000)
+        if src:
+            return src
+    return ""
+
+
+def _enrich_social_comment(conn: Connection, tenant_id: str, comment: NormalizedSocialComment) -> NormalizedSocialComment:
+    config = _comment_integration_config(conn, tenant_id, comment.channel)
+    token = _page_token(config)
+    if not token:
+        return comment
+    version = _clean(config.get("graph_api_version") or "v24.0", 20)
+    base_url = _clean(config.get("graph_base_url") or "https://graph.facebook.com", 200).rstrip("/")
+    post_id = _clean(comment.external_post_id, 240)
+    comment_id = _clean(comment.external_comment_id, 240)
+
+    post_patch: dict[str, str] = {}
+    if post_id and (not comment.post_caption or not comment.post_media_url or not comment.post_permalink):
+        if comment.channel == "instagram":
+            fields = "id,caption,media_type,media_url,permalink,thumbnail_url,timestamp,username"
+            media = _graph_get(f"{base_url}/{version}/{urllib.parse.quote(post_id, safe='')}?{urllib.parse.urlencode({'fields': fields})}", token)
+            if media and not media.get("error"):
+                post_patch = {
+                    "post_caption": _clean(media.get("caption"), 4000),
+                    "post_media_url": _clean(media.get("media_url") or media.get("thumbnail_url"), 1000),
+                    "post_permalink": _clean(media.get("permalink"), 1000),
+                    "post_type": _clean(media.get("media_type"), 80),
+                    "external_created_time": comment.external_created_time or _ts(media.get("timestamp")),
+                }
+        else:
+            fields = "id,message,full_picture,permalink_url,created_time,attachments{media,type,url,title,description}"
+            media = _graph_get(f"{base_url}/{version}/{urllib.parse.quote(post_id, safe='')}?{urllib.parse.urlencode({'fields': fields})}", token)
+            if media and not media.get("error"):
+                post_patch = {
+                    "post_caption": _clean(media.get("message"), 4000),
+                    "post_media_url": _clean(media.get("full_picture") or _media_from_facebook_attachments(media), 1000),
+                    "post_permalink": _clean(media.get("permalink_url"), 1000),
+                    "post_type": _clean(_as_dict(_as_list(_as_dict(media.get("attachments")).get("data"))[0]).get("type") if _as_list(_as_dict(media.get("attachments")).get("data")) else "", 80),
+                    "external_created_time": comment.external_created_time or _ts(media.get("created_time")),
+                }
+
+    author_patch: dict[str, str] = {}
+    if comment_id and (not comment.author_name or not comment.author_username or not comment.message):
+        fields = "id,text,username,timestamp,from" if comment.channel == "instagram" else "id,message,from,created_time,permalink_url"
+        meta_comment = _graph_get(f"{base_url}/{version}/{urllib.parse.quote(comment_id, safe='')}?{urllib.parse.urlencode({'fields': fields})}", token)
+        if meta_comment and not meta_comment.get("error"):
+            from_payload = _as_dict(meta_comment.get("from"))
+            author_patch = {
+                "message": _clean(meta_comment.get("text") or meta_comment.get("message"), 4000),
+                "author_name": _clean(from_payload.get("name") or meta_comment.get("username"), 180),
+                "author_username": _clean(meta_comment.get("username"), 180),
+                "author_external_id": _clean(from_payload.get("id"), 180),
+                "external_created_time": comment.external_created_time or _ts(meta_comment.get("timestamp") or meta_comment.get("created_time")),
+                "post_permalink": _clean(meta_comment.get("permalink_url"), 1000),
+            }
+
+    return replace(
+        comment,
+        post_caption=comment.post_caption or post_patch.get("post_caption", ""),
+        post_media_url=comment.post_media_url or post_patch.get("post_media_url", ""),
+        post_permalink=comment.post_permalink or post_patch.get("post_permalink", "") or author_patch.get("post_permalink", ""),
+        post_type=comment.post_type or post_patch.get("post_type", ""),
+        message=comment.message or author_patch.get("message", ""),
+        author_name=comment.author_name or author_patch.get("author_name", ""),
+        author_username=comment.author_username or author_patch.get("author_username", ""),
+        author_external_id=comment.author_external_id or author_patch.get("author_external_id", ""),
+        external_created_time=comment.external_created_time or author_patch.get("external_created_time", "") or post_patch.get("external_created_time", ""),
+    )
+
+
 def store_social_comment(conn: Connection, tenant_id: str, comment: NormalizedSocialComment) -> dict[str, Any]:
     ensure_social_tables(conn)
+    comment = _enrich_social_comment(conn, tenant_id, comment)
     post = conn.execute(
         text(
             """
@@ -361,7 +463,8 @@ def list_social_comments(conn: Connection, tenant_id: str, *, channel: str = "",
             SELECT c.id::text, c.provider, c.channel, c.external_comment_id, c.parent_comment_id,
                    c.author_external_id, c.author_name, c.author_username, c.author_profile_pic,
                    c.message, c.status, c.ai_status, c.ai_suggestion, c.last_reply_text,
-                   c.last_reply_payload, c.payload_json, c.external_created_time,
+                   c.last_reply_payload, c.last_reaction_emoji, c.last_reaction_payload,
+                   c.reacted_at::text, c.payload_json, c.external_created_time,
                    c.created_at::text, c.updated_at::text,
                    p.id::text AS post_id, p.external_post_id, p.caption AS post_caption,
                    p.post_type, p.permalink_url, p.media_url, p.thumbnail_url
@@ -385,7 +488,8 @@ def _load_comment(conn: Connection, tenant_id: str, comment_id: str) -> dict[str
             SELECT c.id::text, c.provider, c.channel, c.external_comment_id, c.parent_comment_id,
                    c.author_external_id, c.author_name, c.author_username, c.author_profile_pic,
                    c.message, c.status, c.ai_status, c.ai_suggestion, c.last_reply_text,
-                   c.last_reply_payload, c.payload_json, c.external_created_time,
+                   c.last_reply_payload, c.last_reaction_emoji, c.last_reaction_payload,
+                   c.reacted_at::text, c.payload_json, c.external_created_time,
                    c.created_at::text, c.updated_at::text,
                    p.id::text AS post_id, p.external_post_id, p.caption AS post_caption,
                    p.post_type, p.permalink_url, p.media_url, p.thumbnail_url
@@ -479,6 +583,41 @@ def reply_to_social_comment(conn: Connection, tenant_id: str, comment_id: str, b
         {"tenant_id": tenant_id, "comment_id": comment_id, "reply": text_body, "payload": _json(response)},
     )
     return {"ok": True, "comment_id": comment_id, "reply": text_body, "provider_response": response}
+
+
+def react_to_social_comment(conn: Connection, tenant_id: str, comment_id: str, emoji: str = "👍") -> dict[str, Any]:
+    ensure_social_tables(conn)
+    comment = _load_comment(conn, tenant_id, comment_id)
+    clean_emoji = _clean(emoji, 20) or "👍"
+    integration = _integration_for_channel(conn, tenant_id, str(comment["channel"]))
+    config = dict((integration or {}).get("config_json") or {})
+    mode = str(config.get("dispatch_mode") or "stub").lower()
+    response: dict[str, Any] = {"mode": "stub", "id": f"stub:{uuid4().hex}", "emoji": clean_emoji}
+    if mode not in {"stub", "local", "disabled"}:
+        token = _page_token(config)
+        if not token:
+            raise HTTPException(status_code=400, detail="page_access_token_required")
+        version = _clean(config.get("graph_api_version") or "v24.0", 20)
+        base_url = _clean(config.get("graph_base_url") or "https://graph.facebook.com", 200).rstrip("/")
+        external_comment_id = urllib.parse.quote(str(comment["external_comment_id"]), safe="")
+        # Meta exposes comment reactions primarily as likes for API-managed Pages/IG assets.
+        response = _graph_post_form(f"{base_url}/{version}/{external_comment_id}/likes", token, {})
+        response["emoji"] = clean_emoji
+    conn.execute(
+        text(
+            """
+            UPDATE social_comments
+            SET last_reaction_emoji = :emoji,
+                last_reaction_payload = CAST(:payload AS jsonb),
+                reacted_at = NOW(),
+                updated_at = NOW()
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND id = CAST(:comment_id AS uuid)
+            """
+        ),
+        {"tenant_id": tenant_id, "comment_id": comment_id, "emoji": clean_emoji, "payload": _json(response)},
+    )
+    return {"ok": True, "comment_id": comment_id, "emoji": clean_emoji, "provider_response": response}
 
 
 def generate_social_comment_reply(conn: Connection, tenant_id: str, comment_id: str) -> dict[str, Any]:
