@@ -532,6 +532,23 @@ def _refresh_meta_social_page_token(conn, *, tenant_id: str, channel: str) -> di
     if not page_id:
         raise HTTPException(status_code=400, detail="page_id_required")
     if not app_id or not app_secret:
+        config["last_token_refresh"] = {
+            "ok": False,
+            "status": "missing_app_credentials",
+            "channel": clean_channel,
+            "page_id": page_id,
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+        }
+        conn.execute(
+            text(
+                """
+                UPDATE saas_integrations
+                SET config_json = CAST(:config_json AS jsonb), updated_at = NOW()
+                WHERE id = CAST(:integration_id AS uuid)
+                """
+            ),
+            {"integration_id": integration["id"], "config_json": json.dumps(config)},
+        )
         return {
             "ok": False,
             "status": "missing_app_credentials",
@@ -539,6 +556,23 @@ def _refresh_meta_social_page_token(conn, *, tenant_id: str, channel: str) -> di
             "message": "Guarda Meta App ID y App Secret para poder extender tokens automaticamente.",
         }
     if not user_token:
+        config["last_token_refresh"] = {
+            "ok": False,
+            "status": "manual_page_token_only",
+            "channel": clean_channel,
+            "page_id": page_id,
+            "checked_at": datetime.now(timezone.utc).isoformat(),
+        }
+        conn.execute(
+            text(
+                """
+                UPDATE saas_integrations
+                SET config_json = CAST(:config_json AS jsonb), updated_at = NOW()
+                WHERE id = CAST(:integration_id AS uuid)
+                """
+            ),
+            {"integration_id": integration["id"], "config_json": json.dumps(config)},
+        )
         return {
             "ok": False,
             "status": "manual_page_token_only",

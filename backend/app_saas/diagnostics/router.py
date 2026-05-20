@@ -375,6 +375,8 @@ def diagnostics_overview(ctx: AuthContext = Depends(get_current_user)):
             "api_ok": True,
             "embedded_worker_enabled": settings.saas_embedded_worker_enabled,
             "worker_idle_sec": settings.saas_worker_idle_sec,
+            "meta_token_refresh_enabled": settings.saas_meta_token_refresh_enabled,
+            "meta_token_refresh_interval_hours": settings.saas_meta_token_refresh_interval_hours,
             "cors_origins": settings.cors_origins,
         },
         "ai": {

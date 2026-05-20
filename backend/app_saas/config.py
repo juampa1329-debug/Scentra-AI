@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     saas_embedded_worker_enabled: bool = True
     saas_worker_idle_sec: int = 5
     saas_worker_batch_size: int = 25
+    saas_meta_token_refresh_enabled: bool = True
+    saas_meta_token_refresh_interval_hours: int = 12
+    saas_meta_token_refresh_batch_size: int = 10
     scentra_api_public_url: str = "https://api.scentra-ai.online"
     scentra_app_public_url: str = "https://app.scentra-ai.online"
     scentra_meta_app_id: str = ""

@@ -31,6 +31,7 @@ from app_saas.social.router import router as social_router
 from app_saas.tenants.router import router as tenants_router
 from app_saas.workers.dispatch import process_due_outbound_messages
 from app_saas.workers.ingest import process_due_webhook_events
+from app_saas.workers.meta_tokens import process_due_meta_token_refreshes
 from app_saas.workers.remarketing import process_due_remarketing_flows
 from app_saas.workers.triggers import process_due_scheduled_trigger_messages
 from app_saas.webhooks.router import router as webhooks_router
@@ -54,6 +55,7 @@ def _run_embedded_worker_tick() -> dict:
         "remarketing": process_due_remarketing_flows(limit=batch_size),
         "ai": process_due_ai_replies(limit=batch_size),
         "outbound": process_due_outbound_messages(limit=batch_size),
+        "meta_tokens": process_due_meta_token_refreshes(),
     }
 
 
