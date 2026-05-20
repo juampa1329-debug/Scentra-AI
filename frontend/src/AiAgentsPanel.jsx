@@ -127,7 +127,7 @@ function groupBy(items, key) {
   }, {});
 }
 
-export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOpenSettings }) {
+export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOpenSettings, onMilestone }) {
   const [agents, setAgents] = useState([]);
   const [templates, setTemplates] = useState([]);
   const [catalog, setCatalog] = useState({});
@@ -265,6 +265,13 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
       await loadAgents(true);
       setSelectedAgentId(data?.agent?.id || "");
       showStatus("Agente creado desde plantilla", "ok");
+      onMilestone?.(`agent:${agentType}:${data?.agent?.id || "nuevo"}`, {
+        eyebrow: "Nuevo agente",
+        title: `${typeLabel(agentType)} quedó creado`,
+        body: "Ya puedes ajustar sus herramientas, canales, memoria y reglas de aprobación. El Advisor queda disponible para ayudarte a operarlo.",
+        cta: "Abrir Advisor",
+        actionType: "advisor",
+      });
     } catch (err) {
       showStatus(String(err.message || err), "error");
     } finally {

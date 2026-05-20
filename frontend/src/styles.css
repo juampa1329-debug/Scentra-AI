@@ -1199,6 +1199,82 @@ nav { display: grid; gap: 8px; width: 100%; }
 .debug-result small {
   color: var(--muted);
 }
+.debug-mini-list {
+  display: grid;
+  gap: 6px;
+  margin-top: 4px;
+}
+.debug-mini-list span {
+  border: 1px solid rgba(183,231,224,0.12);
+  border-radius: 12px;
+  padding: 8px 10px;
+  background: rgba(0,0,0,0.12);
+  overflow-wrap: anywhere;
+}
+.compact-list {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  color: var(--soft);
+}
+.compact-list li {
+  margin: 5px 0;
+  line-height: 1.35;
+}
+.milestone-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 24;
+  display: grid;
+  place-items: end center;
+  padding: 24px;
+  background:
+    radial-gradient(circle at 50% 100%, rgba(20,184,166,0.24), transparent 34%),
+    rgba(2, 8, 10, 0.46);
+  backdrop-filter: blur(18px) saturate(150%);
+  animation: fade-in 180ms ease-out;
+}
+.milestone-card {
+  width: min(100%, 560px);
+  display: grid;
+  gap: 12px;
+  border-radius: 30px;
+  padding: 24px;
+  position: relative;
+  overflow: hidden;
+  animation: pop-in 220ms ease-out;
+}
+.milestone-card::before {
+  content: "";
+  position: absolute;
+  inset: -50% -12% auto auto;
+  width: 260px;
+  height: 260px;
+  border-radius: 999px;
+  background: radial-gradient(circle, rgba(52,211,153,0.28), transparent 66%);
+  pointer-events: none;
+}
+.milestone-eyebrow {
+  width: fit-content;
+  border: 1px solid rgba(52,211,153,0.34);
+  border-radius: 999px;
+  padding: 6px 10px;
+  color: var(--mint);
+  background: rgba(20,184,166,0.12);
+  font-size: 11px;
+  font-weight: 1000;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.milestone-card h2 {
+  margin: 0;
+  font-size: clamp(24px, 3vw, 34px);
+  letter-spacing: -0.04em;
+}
+.milestone-card p {
+  margin: 0;
+  color: var(--soft);
+  line-height: 1.5;
+}
 .advisor-widget {
   position: fixed;
   right: 22px;
@@ -1655,6 +1731,8 @@ nav { display: grid; gap: 8px; width: 100%; }
   .advisor-panel { width: 100%; max-height: calc(100vh - 24px); }
   .advisor-launcher { margin-left: auto; }
   .advisor-input { grid-template-columns: 1fr; }
+  .milestone-backdrop { padding: 12px; place-items: end center; }
+  .milestone-card { border-radius: 24px; padding: 18px; }
   .agents-hero-actions { display: grid; }
   .agent-card-grid, .template-agent-grid { grid-template-columns: 1fr; }
   .agent-editor-grid, .agent-editor-grid.three, .agent-builder-section.two, .agent-note-form, .agent-runtime-test, .agent-health-grid, .agent-run-row, .agent-action-form, .agent-action-row { grid-template-columns: 1fr; }

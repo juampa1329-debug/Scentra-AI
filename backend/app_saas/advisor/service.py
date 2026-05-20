@@ -913,17 +913,39 @@ def _structured_lines(value: Any, *, top_level: bool = False) -> list[str]:
     return lines
 
 
+def _json_candidate_from_text(text_value: str) -> tuple[Any, str] | None:
+    """Extract a JSON-looking payload even when the model mixed prose + JSON."""
+    starts = [index for index, char in enumerate(text_value) if char in "[{"]
+    for start in starts:
+        closers = ("}", "]") if text_value[start] == "{" else ("]", "}")
+        for closer in closers:
+            end = text_value.rfind(closer)
+            if end <= start:
+                continue
+            try:
+                return json.loads(text_value[start : end + 1]), text_value[:start].strip()
+            except (TypeError, json.JSONDecodeError):
+                continue
+    return None
+
+
 def _humanize_json_answer(raw: Any) -> str:
     text_value = _strip_json_fence(_clean(raw, 20000))
-    if not text_value or text_value[0] not in "[{":
+    if not text_value:
         return _clean(raw, 20000)
     try:
-        parsed = json.loads(text_value)
+        parsed = json.loads(text_value) if text_value[0] in "[{" else None
     except (TypeError, json.JSONDecodeError):
-        return _clean(raw, 20000)
+        parsed = None
+    prefix = ""
+    if parsed is None:
+        candidate = _json_candidate_from_text(text_value)
+        if not candidate:
+            return _clean(raw, 20000)
+        parsed, prefix = candidate
 
     lines = _structured_lines(parsed, top_level=True)
-    human = "\n".join(line for line in lines if _clean(line)).strip()
+    human = "\n".join(line for line in ([prefix] if prefix else []) + lines if _clean(line)).strip()
     if human:
         return human
     return _clean(raw, 20000)

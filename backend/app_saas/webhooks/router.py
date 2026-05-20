@@ -544,6 +544,117 @@ def update_endpoint(
     )
 
 
+@router.delete("/endpoints/{endpoint_id}")
+def delete_endpoint(
+    endpoint_id: str,
+    ctx: AuthContext = Depends(require_role("owner", "admin")),
+):
+    with db_session() as conn:
+        set_tenant_context(conn, ctx.tenant_id)
+        row = conn.execute(
+            text(
+                """
+                UPDATE saas_webhook_endpoints
+                SET is_active = FALSE, updated_at = NOW()
+                WHERE tenant_id = CAST(:tenant_id AS uuid)
+                  AND id = CAST(:endpoint_id AS uuid)
+                RETURNING id::text, provider, endpoint_key
+                """
+            ),
+            {"tenant_id": ctx.tenant_id, "endpoint_id": endpoint_id},
+        ).mappings().first()
+        if not row:
+            raise HTTPException(status_code=404, detail="webhook_endpoint_not_found")
+        conn.execute(
+            text(
+                """
+                INSERT INTO saas_audit_events (
+                    tenant_id, actor_user_id, action, resource_type, resource_id, details_json
+                )
+                VALUES (
+                    CAST(:tenant_id AS uuid), CAST(:user_id AS uuid), 'webhook_endpoint.deleted',
+                    'webhook_endpoint', :resource_id, CAST(:details_json AS jsonb)
+                )
+                """
+            ),
+            {
+                "tenant_id": ctx.tenant_id,
+                "user_id": ctx.user_id,
+                "resource_id": row["id"],
+                "details_json": json.dumps({"provider": row["provider"], "endpoint_key": row["endpoint_key"]}),
+            },
+        )
+    return {"ok": True, "deleted_id": row["id"], "provider": row["provider"], "endpoint_key": row["endpoint_key"]}
+
+
+@router.get("/endpoints/{endpoint_id}/verify")
+def verify_endpoint_setup(
+    endpoint_id: str,
+    ctx: AuthContext = Depends(get_current_user),
+):
+    with db_session() as conn:
+        set_tenant_context(conn, ctx.tenant_id)
+        endpoint = conn.execute(
+            text(
+                """
+                SELECT id::text, tenant_id::text, provider, endpoint_key, is_active, signature_required, last_seen_at::text
+                FROM saas_webhook_endpoints
+                WHERE tenant_id = CAST(:tenant_id AS uuid)
+                  AND id = CAST(:endpoint_id AS uuid)
+                LIMIT 1
+                """
+            ),
+            {"tenant_id": ctx.tenant_id, "endpoint_id": endpoint_id},
+        ).mappings().first()
+        if not endpoint:
+            raise HTTPException(status_code=404, detail="webhook_endpoint_not_found")
+        integration = conn.execute(
+            text(
+                """
+                SELECT id::text, status, updated_at::text
+                FROM saas_integrations
+                WHERE tenant_id = CAST(:tenant_id AS uuid)
+                  AND channel = :provider
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """
+            ),
+            {"tenant_id": ctx.tenant_id, "provider": endpoint["provider"]},
+        ).mappings().first()
+        recent_events = conn.execute(
+            text(
+                """
+                SELECT status, error, received_at::text
+                FROM saas_webhook_events
+                WHERE tenant_id = CAST(:tenant_id AS uuid)
+                  AND provider = :provider
+                ORDER BY received_at DESC
+                LIMIT 5
+                """
+            ),
+            {"tenant_id": ctx.tenant_id, "provider": endpoint["provider"]},
+        ).mappings().all()
+    callback_url = f"{str(settings.scentra_api_public_url or '').strip().rstrip('/')}/saas/v1/webhooks/{endpoint['provider']}/{endpoint['endpoint_key']}"
+    checks = [
+        {"code": "endpoint_active", "ok": bool(endpoint["is_active"]), "label": "Endpoint activo"},
+        {"code": "integration_present", "ok": bool(integration), "label": "Integracion del canal existe"},
+        {"code": "events_received", "ok": bool(endpoint["last_seen_at"]), "label": "Meta ya envio al menos un evento"},
+    ]
+    return {
+        "ok": all(item["ok"] for item in checks[:2]),
+        "endpoint": dict(endpoint),
+        "callback_url": callback_url,
+        "integration": dict(integration or {}),
+        "recent_events": [dict(row) for row in recent_events],
+        "checks": checks,
+        "next_steps": [
+            "Copia Callback URL y Verify token en Meta Developers si acabas de rotar o recrear el endpoint.",
+            "En Meta, confirma que el objeto correcto este suscrito: Page para Facebook/Instagram o WhatsApp Business Account para WhatsApp.",
+            "Envia un mensaje o comentario de prueba y vuelve a verificar para confirmar last_seen_at.",
+        ],
+    }
+
+
 @router.get("/events", response_model=list[WebhookEventOut])
 def list_events(
     provider: str = Query(""),

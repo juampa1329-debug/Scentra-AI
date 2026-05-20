@@ -9,6 +9,7 @@ import AiAgentsPanel from "./AiAgentsPanel.jsx";
 const API_BASE = (import.meta.env.VITE_API_BASE || "").replace(/\/$/, "");
 const TOKEN_KEY = "scentra_ai_access_token";
 const REFRESH_KEY = "scentra_ai_refresh_token";
+const SEEN_MILESTONES_KEY = "scentra_seen_milestones_v1";
 
 const AI_API_PROVIDERS = [
   { code: "google", category: "ai", name: "Google / Gemini", env: "GOOGLE_AI_API_KEY", alt: "GEMINI_API_KEY", models: "gemini-2.5-flash, gemini-2.5-pro, gemma-3-*", supportsModels: true },
@@ -128,9 +129,38 @@ function advisorDisplayContent(value) {
   const unfenced = raw.startsWith("```")
     ? raw.replace(/^```(?:json)?\s*/i, "").replace(/```$/i, "").trim()
     : raw;
-  if (!["{", "["].includes(unfenced.charAt(0))) return raw;
+  const parseCandidate = (text) => {
+    const starts = [];
+    for (let index = 0; index < text.length; index += 1) {
+      if (text[index] === "{" || text[index] === "[") starts.push(index);
+    }
+    for (const start of starts) {
+      const closers = text[start] === "{" ? ["}", "]"] : ["]", "}"];
+      for (const closer of closers) {
+        const end = text.lastIndexOf(closer);
+        if (end <= start) continue;
+        try {
+          return { parsed: JSON.parse(text.slice(start, end + 1)), prefix: text.slice(0, start).trim() };
+        } catch {
+          // Try the next possible JSON-looking segment.
+        }
+      }
+    }
+    return null;
+  };
   try {
-    const parsed = JSON.parse(unfenced);
+    let candidate = null;
+    if (["{", "["].includes(unfenced.charAt(0))) {
+      try {
+        candidate = { parsed: JSON.parse(unfenced), prefix: "" };
+      } catch {
+        candidate = parseCandidate(unfenced);
+      }
+    } else {
+      candidate = parseCandidate(unfenced);
+    }
+    if (!candidate) return raw;
+    const parsed = candidate.parsed;
     const labelFor = (key) => ({
       insights: "Insights",
       hallazgos: "Hallazgos",
@@ -202,7 +232,10 @@ function advisorDisplayContent(value) {
       });
       return lines;
     };
-    const lines = toHumanLines(parsed, true);
+    const lines = [
+      ...(candidate.prefix ? [candidate.prefix] : []),
+      ...toHumanLines(parsed, true),
+    ];
     const human = lines.filter(Boolean).join("\n").trim();
     return human || raw;
   } catch {
@@ -521,6 +554,7 @@ function App() {
   const [webhooks, setWebhooks] = useState([]);
   const [webhookEvents, setWebhookEvents] = useState([]);
   const [lastWebhookSecret, setLastWebhookSecret] = useState(null);
+  const [webhookCheck, setWebhookCheck] = useState(null);
   const [integrations, setIntegrations] = useState([]);
   const [billingOverview, setBillingOverview] = useState(null);
   const [billingPlans, setBillingPlans] = useState([]);
@@ -611,6 +645,7 @@ function App() {
   const [composerSending, setComposerSending] = useState(false);
   const [status, setStatus] = useState("");
   const [statusTone, setStatusTone] = useState("neutral");
+  const [milestoneNotice, setMilestoneNotice] = useState(null);
 
   const activeCompany = tenants.find((company) => company.tenant_id === me?.tenant_id);
   const currentUserName = userDisplayName(me);
@@ -789,6 +824,40 @@ function App() {
 
   const showStatus = (text, tone = "neutral") => { setStatus(text); setStatusTone(tone); };
 
+  const showMilestoneOnce = (key, notice = {}) => {
+    const cleanKey = String(key || "").trim();
+    if (!cleanKey) return;
+    try {
+      const seen = JSON.parse(localStorage.getItem(SEEN_MILESTONES_KEY) || "{}") || {};
+      if (seen[cleanKey]) return;
+      seen[cleanKey] = new Date().toISOString();
+      localStorage.setItem(SEEN_MILESTONES_KEY, JSON.stringify(seen));
+      setMilestoneNotice({ key: cleanKey, ...notice });
+    } catch {
+      setMilestoneNotice({ key: cleanKey, ...notice });
+    }
+  };
+
+  const closeMilestoneNotice = (runAction = false) => {
+    const actionType = milestoneNotice?.actionType || "";
+    setMilestoneNotice(null);
+    if (!runAction) return;
+    if (actionType === "advisor") setAdvisorOpen(true);
+    if (actionType === "settings-apis") {
+      setActiveView("settings");
+      setSettingsTab("apis");
+    }
+    if (actionType === "settings-debug") {
+      setActiveView("settings");
+      setSettingsTab("debug");
+      loadDiagnostics(true);
+    }
+    if (actionType === "settings-channels") {
+      setActiveView("settings");
+      setSettingsTab("channels");
+    }
+  };
+
   const refreshAccessToken = async () => {
     if (!API_BASE) throw new Error("VITE_API_BASE requerido");
     const storedRefreshToken = refreshToken || localStorage.getItem(REFRESH_KEY) || "";
@@ -905,13 +974,14 @@ function App() {
     setConversations([]); setSelectedConversation(null); setConversationMemory(null); setMessages([]); setReplyText("");
     clearComposerAttachment(); setCatalogDraft(null); setEmojiOpen(false); setAttachMenuOpen(false); setInboxChannelFilter("all"); setInboxSearch(""); setIsRecording(false); setRecordingSeconds(0); setRecordingLevels(EMPTY_WAVEFORM);
     recordingLevelsRef.current = EMPTY_WAVEFORM;
-    setIntegrations([]); setWebhooks([]); setWebhookEvents([]); setBillingOverview(null); setBillingPlans([]); setLastWebhookSecret(null);
+    setIntegrations([]); setWebhooks([]); setWebhookEvents([]); setWebhookCheck(null); setBillingOverview(null); setBillingPlans([]); setLastWebhookSecret(null);
     setApiCredentials([]); setCredentialModal(null); setCredentialModels({}); setKnowledgeSources([]); setDiagnostics(null); setAiGatewayProviders([]); setAiGatewayRuns([]);
     setAdvisorOpen(false); setAdvisorThreadId(""); setAdvisorMessages([]); setAdvisorInput(""); setAdvisorInsights([]); setAdvisorRecommendations([]); setAdvisorActions([]); setAdvisorMetrics(null); setAdvisorActivity([]); setAdvisorMemory(null); setAdvisorStreamStatus(""); setAdvisorLastSync(""); setAdvisorLoading(false);
     setInstagramDiagnostics(null); setFacebookDiagnostics(null); setInstagramOAuth({ state: "", assets: [], status: "", callbackUrl: "" });
     setInstagramForm(defaultInstagramForm());
     setDebugInboundResult(null); setSubscriptionCheck(null);
     setIntegrationSecretModal(null);
+    setMilestoneNotice(null);
     setWhatsappPhones([]); setPhoneRegisterForm({ phone_number_id: "", pin: "" });
   };
 
@@ -1265,6 +1335,13 @@ function App() {
     try {
       const data = await apiCall("/saas/v1/webhooks/endpoints", { method: "POST", body: JSON.stringify({ provider: webhookProvider, signature_required: webhookSignatureRequired }) });
       setLastWebhookSecret(data); showStatus("Endpoint webhook creado", "ok"); await loadWebhooks();
+      showMilestoneOnce(`webhook:${data?.provider || webhookProvider}:${data?.endpoint_key || "nuevo"}`, {
+        eyebrow: "Webhook listo",
+        title: "Endpoint preparado para Meta",
+        body: "Copia la Callback URL y el Verify token en Meta Developers. Luego usa Verificar para confirmar si ya entran eventos.",
+        cta: "Ver debug",
+        actionType: "settings-debug",
+      });
     } catch (err) { showStatus(String(err.message || err), "error"); }
   };
 
@@ -1281,10 +1358,17 @@ function App() {
       const configJson = { dispatch_mode: dispatchMode, phone_number_id: phoneNumberId, business_account_id: (integrationForm.business_account_id || "").trim(), app_id: (integrationForm.app_id || "").trim(), graph_api_version: (integrationForm.graph_api_version || "v24.0").trim(), access_token_env: accessTokenEnv };
       if (accessToken) configJson.access_token = accessToken;
       if (appSecret) configJson.app_secret = appSecret;
-      await apiCall("/saas/v1/integrations", { method: "POST", body: JSON.stringify({ provider: integrationForm.provider, channel: integrationForm.channel, status: integrationForm.status, secret_ref: accessToken ? "tenant:meta:whatsapp" : dispatchMode === "stub" ? "" : `env:${accessTokenEnv}`, config_json: configJson }) });
+      const savedIntegration = await apiCall("/saas/v1/integrations", { method: "POST", body: JSON.stringify({ provider: integrationForm.provider, channel: integrationForm.channel, status: integrationForm.status, secret_ref: accessToken ? "tenant:meta:whatsapp" : dispatchMode === "stub" ? "" : `env:${accessTokenEnv}`, config_json: configJson }) });
       if (metaAccessTokenRef.current) metaAccessTokenRef.current.value = "";
       if (metaAppSecretRef.current) metaAppSecretRef.current.value = "";
       showStatus("Integracion guardada", "ok"); await loadIntegrations(); await loadBilling();
+      showMilestoneOnce(`integration:whatsapp:${savedIntegration?.id || phoneNumberId || "meta"}`, {
+        eyebrow: "Canal conectado",
+        title: dispatchMode === "stub" ? "WhatsApp quedó en modo prueba" : "WhatsApp Cloud quedó configurado",
+        body: "El siguiente paso recomendado es verificar webhook, token y eventos entrantes desde Debug antes de usar campañas reales.",
+        cta: "Verificar canal",
+        actionType: "settings-debug",
+      });
     } catch (err) { showStatus(String(err.message || err), "error"); }
   };
 
@@ -1337,7 +1421,7 @@ function App() {
       };
       if (pageAccessToken) configJson.page_access_token = pageAccessToken;
       if (appSecret) configJson.app_secret = appSecret;
-      await apiCall("/saas/v1/integrations", {
+      const savedIntegration = await apiCall("/saas/v1/integrations", {
         method: "POST",
         body: JSON.stringify({
           provider: "meta",
@@ -1353,6 +1437,13 @@ function App() {
       await loadIntegrations();
       await loadBilling();
       await loadInstagramDiagnostics();
+      showMilestoneOnce(`integration:instagram:${savedIntegration?.id || instagramId || "meta"}`, {
+        eyebrow: "Instagram conectado",
+        title: "Instagram Business quedó listo para validar",
+        body: "Confirma permisos, subscribed_apps y último webhook desde Diagnóstico antes de automatizar DMs o comentarios.",
+        cta: "Ver debug",
+        actionType: "settings-debug",
+      });
     } catch (err) { showStatus(String(err.message || err), "error"); }
   };
 
@@ -1379,7 +1470,7 @@ function App() {
       };
       if (pageAccessToken) configJson.page_access_token = pageAccessToken;
       if (appSecret) configJson.app_secret = appSecret;
-      await apiCall("/saas/v1/integrations", {
+      const savedIntegration = await apiCall("/saas/v1/integrations", {
         method: "POST",
         body: JSON.stringify({
           provider: "meta",
@@ -1396,6 +1487,13 @@ function App() {
       await loadBilling();
       await loadDiagnostics(true);
       await loadFacebookDiagnostics();
+      showMilestoneOnce(`integration:facebook:${savedIntegration?.id || pageId || "meta"}`, {
+        eyebrow: "Facebook conectado",
+        title: "Facebook Messenger y comentarios quedan en revisión",
+        body: "Revisa que pages_messaging, pages_manage_metadata y los webhooks de Page estén activos para recibir DMs y comentarios.",
+        cta: "Ver debug",
+        actionType: "settings-debug",
+      });
     } catch (err) { showStatus(String(err.message || err), "error"); }
   };
 
@@ -1406,6 +1504,13 @@ function App() {
       setLastWebhookSecret(data);
       showStatus("Endpoint Instagram creado. Copia Callback URL y Verify token en Meta Developers.", "ok");
       await loadWebhooks();
+      showMilestoneOnce(`webhook:instagram:${data?.endpoint_key || "nuevo"}`, {
+        eyebrow: "Webhook Instagram",
+        title: "Endpoint de Instagram generado",
+        body: "Usa esta URL en Meta Developers y vuelve a Diagnóstico para confirmar que lleguen DMs o comentarios.",
+        cta: "Ver debug",
+        actionType: "settings-debug",
+      });
     } catch (err) { showStatus(String(err.message || err), "error"); }
   };
 
@@ -1417,6 +1522,13 @@ function App() {
       showStatus("Endpoint Facebook creado. Copia Callback URL y Verify token en Meta Developers.", "ok");
       await loadWebhooks();
       if (selectedFacebookIntegration) await loadFacebookDiagnostics();
+      showMilestoneOnce(`webhook:facebook:${data?.endpoint_key || "nuevo"}`, {
+        eyebrow: "Webhook Facebook",
+        title: "Endpoint de Facebook generado",
+        body: "Ahora suscribe messages, messaging_postbacks y feed en el Webhook de Page para recibir DMs y comentarios.",
+        cta: "Ver debug",
+        actionType: "settings-debug",
+      });
     } catch (err) { showStatus(String(err.message || err), "error"); }
   };
 
@@ -1504,6 +1616,13 @@ function App() {
       await loadIntegrations();
       if (secretChannel === "facebook") await loadFacebookDiagnostics();
       if (secretChannel === "instagram") await loadInstagramDiagnostics();
+      showMilestoneOnce(`integration-secret:${secretChannel}:${new Date().toISOString().slice(0, 19)}`, {
+        eyebrow: "Secreto actualizado",
+        title: "Credenciales cifradas correctamente",
+        body: "Scentra no vuelve a mostrar el token completo. Si el canal falla, usa Diagnóstico para revisar permisos y webhooks.",
+        cta: "Ver debug",
+        actionType: "settings-debug",
+      });
     } catch (err) { showStatus(String(err.message || err), "error"); }
   };
 
@@ -1669,9 +1788,39 @@ function App() {
       showStatus("No se pudo copiar automaticamente. Selecciona el texto y copialo manualmente.", "error");
     }
   };
-  const updateWebhookEndpoint = async (endpoint, patch) => { try { await apiCall(`/saas/v1/webhooks/endpoints/${encodeURIComponent(endpoint.id)}`, { method: "PATCH", body: JSON.stringify(patch) }); showStatus("Endpoint actualizado", "ok"); await loadWebhooks(); } catch (err) { showStatus(String(err.message || err), "error"); } };
-  const rotateWebhookToken = async (endpoint) => { try { const data = await apiCall(`/saas/v1/webhooks/endpoints/${encodeURIComponent(endpoint.id)}/rotate-token`, { method: "POST" }); setLastWebhookSecret(data); showStatus("Verify token rotado", "ok"); await loadWebhooks(); } catch (err) { showStatus(String(err.message || err), "error"); } };
-  const rotateWebhookSignature = async (endpoint) => { try { const data = await apiCall(`/saas/v1/webhooks/endpoints/${encodeURIComponent(endpoint.id)}/rotate-signature`, { method: "POST" }); setLastWebhookSecret(data); showStatus("Firma HMAC rotada", "ok"); await loadWebhooks(); } catch (err) { showStatus(String(err.message || err), "error"); } };
+  const updateWebhookEndpoint = async (endpoint, patch) => {
+    try {
+      await apiCall(`/saas/v1/webhooks/endpoints/${encodeURIComponent(endpoint.id)}`, { method: "PATCH", body: JSON.stringify(patch) });
+      showStatus("Endpoint actualizado", "ok");
+      await loadWebhooks();
+      setWebhookCheck(null);
+    } catch (err) { showStatus(String(err.message || err), "error"); }
+  };
+  const verifyWebhookEndpoint = async (endpoint) => {
+    if (!endpoint?.id) return;
+    try {
+      const data = await apiCall(`/saas/v1/webhooks/endpoints/${encodeURIComponent(endpoint.id)}/verify`);
+      setWebhookCheck(data);
+      showStatus(data?.ok ? "Endpoint verificado" : "Endpoint requiere ajustes", data?.ok ? "ok" : "neutral");
+    } catch (err) {
+      setWebhookCheck({ ok: false, error: String(err.message || err), endpoint });
+      showStatus(String(err.message || err), "error");
+    }
+  };
+  const deleteWebhookEndpoint = async (endpoint) => {
+    if (!endpoint?.id) return;
+    const ok = window.confirm(`Eliminar endpoint ${String(endpoint.provider || "").toUpperCase()}? Meta dejara de poder llamar esta URL hasta que crees/copias un endpoint nuevo.`);
+    if (!ok) return;
+    try {
+      await apiCall(`/saas/v1/webhooks/endpoints/${encodeURIComponent(endpoint.id)}`, { method: "DELETE" });
+      setLastWebhookSecret(null);
+      setWebhookCheck(null);
+      showStatus("Endpoint eliminado/desactivado", "ok");
+      await Promise.all([loadWebhooks(), loadDiagnostics(true)]);
+    } catch (err) { showStatus(String(err.message || err), "error"); }
+  };
+  const rotateWebhookToken = async (endpoint) => { try { const data = await apiCall(`/saas/v1/webhooks/endpoints/${encodeURIComponent(endpoint.id)}/rotate-token`, { method: "POST" }); setLastWebhookSecret(data); setWebhookCheck(null); showStatus("Verify token rotado", "ok"); await loadWebhooks(); } catch (err) { showStatus(String(err.message || err), "error"); } };
+  const rotateWebhookSignature = async (endpoint) => { try { const data = await apiCall(`/saas/v1/webhooks/endpoints/${encodeURIComponent(endpoint.id)}/rotate-signature`, { method: "POST" }); setLastWebhookSecret(data); setWebhookCheck(null); showStatus("Firma HMAC rotada", "ok"); await loadWebhooks(); } catch (err) { showStatus(String(err.message || err), "error"); } };
   const processWebhookEvents = async () => { try { const data = await apiCall("/saas/v1/webhooks/events/process", { method: "POST" }); showStatus(`Procesados: ${data?.result?.processed || 0}`, "ok"); await loadWebhooks(); } catch (err) { showStatus(String(err.message || err), "error"); } };
   const patchConversationLocal = (conversationId, patch) => {
     setConversations((prev) => prev.map((item) => item.id === conversationId ? { ...item, ...patch } : item));
@@ -2214,6 +2363,15 @@ function App() {
       });
       setCredentialModal(null);
       showStatus("Credencial guardada cifrada en backend", "ok");
+      showMilestoneOnce(`credential:${data?.credential_key || credentialModal.credential_key}:${data?.updated_at || data?.has_secret || "saved"}`, {
+        eyebrow: credentialModal.category === "ai" ? "IA conectada" : "Credencial segura",
+        title: credentialModal.category === "ai" ? `${credentialModal.name} quedó disponible` : `${credentialModal.name} quedó guardado`,
+        body: credentialModal.category === "ai"
+          ? "Carga los modelos disponibles y selecciona el modelo activo para que los agentes usen esta credencial."
+          : "La credencial quedó cifrada por empresa y solo se mostrará como pista protegida.",
+        cta: credentialModal.category === "ai" ? "Ver APIs" : "Entendido",
+        actionType: credentialModal.category === "ai" ? "settings-apis" : "",
+      });
     } catch (err) {
       showStatus(String(err.message || err), "error");
     } finally {
@@ -2788,6 +2946,7 @@ function App() {
             showStatus={showStatus}
             onOpenAdvisor={() => setAdvisorOpen(true)}
             onOpenSettings={() => { setActiveView("settings"); setSettingsTab("apis"); }}
+            onMilestone={showMilestoneOnce}
           />
         ) : (
           <section className="settings-page">
@@ -3313,7 +3472,7 @@ function App() {
                       <option value="stripe">Stripe</option>
                     </select>
                     <label className="check-row"><input type="checkbox" checked={webhookSignatureRequired} onChange={(event) => setWebhookSignatureRequired(event.target.checked)} /> Requerir firma HMAC</label>
-                    <button type="button" className="primary" onClick={createWebhook}>Crear endpoint</button>
+                    <button type="button" className="primary" onClick={createWebhook}>Crear / actualizar endpoint</button>
                   </div>
                   {lastWebhookSecret ? (
                     <div className="secret-box">
@@ -3339,14 +3498,35 @@ function App() {
                         </div>
                         <div className="callback-box"><code>{fullWebhookUrl(endpoint.url_path)}</code><button type="button" onClick={() => copyText(fullWebhookUrl(endpoint.url_path), "Callback URL")}>Copiar URL</button></div>
                         <div className="row-actions">
+                          <button type="button" onClick={() => verifyWebhookEndpoint(endpoint)}>Verificar</button>
                           <button type="button" onClick={() => updateWebhookEndpoint(endpoint, { signature_required: !endpoint.signature_required })}>{endpoint.signature_required ? "Permitir token" : "Exigir firma"}</button>
                           <button type="button" onClick={() => rotateWebhookToken(endpoint)}>Rotar token</button>
                           <button type="button" onClick={() => rotateWebhookSignature(endpoint)}>Rotar firma</button>
+                          <button type="button" className="danger-button" onClick={() => deleteWebhookEndpoint(endpoint)}>Eliminar</button>
                         </div>
                       </div>
                     ))}
                     {webhooks.length === 0 ? <div className="empty">Sin endpoints webhook.</div> : null}
                   </div>
+                  {webhookCheck ? (
+                    <div className={`debug-result ${webhookCheck.ok ? "ok" : "bad"}`}>
+                      <strong>{webhookCheck.ok ? "Endpoint operativo" : "Endpoint con ajustes pendientes"}</strong>
+                      {webhookCheck.error ? <span>{webhookCheck.error}</span> : null}
+                      {webhookCheck.callback_url ? <div className="secret-value-row"><code>{webhookCheck.callback_url}</code><button type="button" onClick={() => copyText(webhookCheck.callback_url, "Callback URL")}>Copiar URL</button></div> : null}
+                      <div className="debug-checks">
+                        {(webhookCheck.checks || []).map((check) => <span className={check.ok ? "ok" : "warn"} key={check.code}>{check.label}</span>)}
+                      </div>
+                      {webhookCheck.integration?.id ? <small>Integracion vinculada: {webhookCheck.integration.status || "sin estado"} / actualizada {compactDateTimeLabel(webhookCheck.integration.updated_at)}</small> : <small>No hay integracion activa para este provider. Si eliminaste el canal, elimina tambien el endpoint o crea la integracion nuevamente.</small>}
+                      {(webhookCheck.recent_events || []).length ? (
+                        <div className="debug-mini-list">
+                          {(webhookCheck.recent_events || []).map((event, index) => (
+                            <span key={`${event.received_at}-${index}`}>{compactDateTimeLabel(event.received_at)} · {event.status || "evento"}{event.error ? ` · ${event.error}` : ""}</span>
+                          ))}
+                        </div>
+                      ) : <small>Sin eventos recientes para este endpoint.</small>}
+                      {(webhookCheck.next_steps || []).length ? <ul className="compact-list">{webhookCheck.next_steps.map((step) => <li key={step}>{step}</li>)}</ul> : null}
+                    </div>
+                  ) : null}
                   <div className="panel-actions"><button type="button" onClick={processWebhookEvents}>Procesar eventos pendientes</button></div>
                 </article>
               </div>
@@ -3608,7 +3788,7 @@ function App() {
             {advisorMemory?.summary ? (
               <div className="advisor-memory">
                 <strong>Memoria activa</strong>
-                <span>{advisorMemory.summary}</span>
+                <span>{advisorDisplayContent(advisorMemory.summary)}</span>
               </div>
             ) : null}
             <div className="advisor-chat" ref={advisorChatRef}>
@@ -3640,6 +3820,22 @@ function App() {
           </div>
         )}
       </section>
+      {milestoneNotice ? (
+        <div className="milestone-backdrop" role="presentation" onMouseDown={() => closeMilestoneNotice(false)}>
+          <section className="milestone-card glass-card" role="dialog" aria-modal="true" aria-label="Actualizacion importante" onMouseDown={(event) => event.stopPropagation()}>
+            <span className="milestone-eyebrow">{milestoneNotice.eyebrow || "Actualizacion importante"}</span>
+            <h2>{milestoneNotice.title || "Scentra quedo actualizado"}</h2>
+            <p>{milestoneNotice.body || "Esta mejora ya esta lista para usarse en tu empresa."}</p>
+            {Array.isArray(milestoneNotice.items) && milestoneNotice.items.length ? (
+              <ul className="compact-list">{milestoneNotice.items.map((item) => <li key={item}>{item}</li>)}</ul>
+            ) : null}
+            <div className="panel-actions">
+              <button type="button" className="primary" onClick={() => closeMilestoneNotice(Boolean(milestoneNotice.actionType))}>{milestoneNotice.cta || "Entendido"}</button>
+              <button type="button" onClick={() => closeMilestoneNotice(false)}>Cerrar</button>
+            </div>
+          </section>
+        </div>
+      ) : null}
       {aiTesterOpen ? <div className="modal-backdrop" role="presentation" onMouseDown={() => setAiTesterOpen(false)}><section className="modal-window glass-card" role="dialog" aria-modal="true" aria-label="Probar IA" onMouseDown={(event) => event.stopPropagation()}><div className="panel-head"><h2>Probar IA</h2><button type="button" onClick={() => setAiTesterOpen(false)}>Cerrar</button></div><form onSubmit={submitAiTest} className="modal-form"><label>Phone<input placeholder="57300..." value={aiTest.phone} onChange={(event) => setAiTest((prev) => ({ ...prev, phone: event.target.value }))} /></label><label>Mensaje<textarea rows={5} placeholder="Escribe un mensaje de prueba..." value={aiTest.message} onChange={(event) => setAiTest((prev) => ({ ...prev, message: event.target.value }))} /></label>{aiTestResult ? <div className="ai-test-result"><strong>Respuesta IA</strong><p>{aiTestResult}</p></div> : null}<div className="panel-actions"><button type="submit" className="primary">Procesar</button><button type="button" onClick={() => { setAiTest({ phone: "", message: "" }); setAiTestResult(""); }}>Limpiar</button></div></form></section></div> : null}
       {integrationSecretModal ? (
         <div className="modal-backdrop" role="presentation" onMouseDown={() => setIntegrationSecretModal(null)}>
