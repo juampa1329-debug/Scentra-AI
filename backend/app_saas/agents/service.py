@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
@@ -329,6 +330,10 @@ def _jsonable(value: Any) -> Any:
     return value
 
 
+def _uuid() -> str:
+    return str(uuid.uuid4())
+
+
 def _json_value(value: Any, fallback: Any) -> Any:
     if value is None:
         return fallback
@@ -355,6 +360,14 @@ def _normalize_status(value: str) -> str:
 
 
 def _ensure_tables(conn: Connection) -> None:
+    try:
+        with conn.begin_nested():
+            conn.execute(text("CREATE EXTENSION IF NOT EXISTS pgcrypto"))
+    except Exception:
+        # Some managed/shared Postgres roles cannot create extensions. The
+        # service supplies UUIDs explicitly on inserts, so existing installs can
+        # still operate even when pgcrypto cannot be enabled by this DB user.
+        pass
     conn.execute(
         text(
             """
@@ -374,8 +387,22 @@ def _ensure_tables(conn: Connection) -> None:
     conn.execute(
         text(
             """
+            ALTER TABLE saas_ai_agent_plan_limits
+              ADD COLUMN IF NOT EXISTS max_ai_agents INTEGER NOT NULL DEFAULT 1,
+              ADD COLUMN IF NOT EXISTS max_active_ai_agents INTEGER NOT NULL DEFAULT 1,
+              ADD COLUMN IF NOT EXISTS allowed_agent_types_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+              ADD COLUMN IF NOT EXISTS builder_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+              ADD COLUMN IF NOT EXISTS notes TEXT NOT NULL DEFAULT '',
+              ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+              ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
             CREATE TABLE IF NOT EXISTS saas_ai_agents (
-                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                id UUID PRIMARY KEY,
                 tenant_id UUID NOT NULL REFERENCES saas_tenants(id) ON DELETE CASCADE,
                 agent_type TEXT NOT NULL,
                 name TEXT NOT NULL,
@@ -400,12 +427,41 @@ def _ensure_tables(conn: Connection) -> None:
     conn.execute(
         text(
             """
-            CREATE UNIQUE INDEX IF NOT EXISTS ux_saas_ai_agents_tenant_type_lower_name
-            ON saas_ai_agents (tenant_id, agent_type, lower(name))
-            WHERE status <> 'archived'
+            ALTER TABLE saas_ai_agents
+              ADD COLUMN IF NOT EXISTS tenant_id UUID NULL,
+              ADD COLUMN IF NOT EXISTS agent_type TEXT NOT NULL DEFAULT 'advisor',
+              ADD COLUMN IF NOT EXISTS name TEXT NOT NULL DEFAULT '',
+              ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT '',
+              ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'draft',
+              ADD COLUMN IF NOT EXISTS provider_policy_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+              ADD COLUMN IF NOT EXISTS personality_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+              ADD COLUMN IF NOT EXISTS goals_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+              ADD COLUMN IF NOT EXISTS rules_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+              ADD COLUMN IF NOT EXISTS channels_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+              ADD COLUMN IF NOT EXISTS tools_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+              ADD COLUMN IF NOT EXISTS memory_policy_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+              ADD COLUMN IF NOT EXISTS approval_policy_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+              ADD COLUMN IF NOT EXISTS metrics_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+              ADD COLUMN IF NOT EXISTS created_by_user_id UUID NULL,
+              ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+              ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW()
             """
         )
     )
+    try:
+        with conn.begin_nested():
+            conn.execute(
+                text(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS ux_saas_ai_agents_tenant_type_lower_name
+                    ON saas_ai_agents (tenant_id, agent_type, lower(name))
+                    WHERE status <> 'archived'
+                    """
+                )
+            )
+    except Exception:
+        # Duplicate legacy rows should not block the agent registry from loading.
+        pass
     conn.execute(
         text(
             """
@@ -417,8 +473,22 @@ def _ensure_tables(conn: Connection) -> None:
     conn.execute(
         text(
             """
+            ALTER TABLE saas_ai_agent_events
+              ADD COLUMN IF NOT EXISTS tenant_id UUID NULL,
+              ADD COLUMN IF NOT EXISTS agent_id UUID NULL,
+              ADD COLUMN IF NOT EXISTS actor_user_id UUID NULL,
+              ADD COLUMN IF NOT EXISTS event_type TEXT NOT NULL DEFAULT 'agent.event',
+              ADD COLUMN IF NOT EXISTS summary TEXT NOT NULL DEFAULT '',
+              ADD COLUMN IF NOT EXISTS details_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+              ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW()
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
             CREATE TABLE IF NOT EXISTS saas_ai_agent_events (
-                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                id UUID PRIMARY KEY,
                 tenant_id UUID NOT NULL REFERENCES saas_tenants(id) ON DELETE CASCADE,
                 agent_id UUID NULL REFERENCES saas_ai_agents(id) ON DELETE CASCADE,
                 actor_user_id UUID NULL REFERENCES saas_users(id) ON DELETE SET NULL,
@@ -1105,9 +1175,10 @@ def _audit(
         text(
             """
             INSERT INTO saas_ai_agent_events (
-                tenant_id, agent_id, actor_user_id, event_type, summary, details_json
+                id, tenant_id, agent_id, actor_user_id, event_type, summary, details_json
             )
             VALUES (
+                CAST(:id AS uuid),
                 CAST(:tenant_id AS uuid),
                 CASE WHEN :agent_id = '' THEN NULL ELSE CAST(:agent_id AS uuid) END,
                 CASE WHEN :actor_user_id = '' THEN NULL ELSE CAST(:actor_user_id AS uuid) END,
@@ -1118,6 +1189,7 @@ def _audit(
             """
         ),
         {
+            "id": _uuid(),
             "tenant_id": tenant_id,
             "agent_id": agent_id or "",
             "actor_user_id": actor_user_id or "",
@@ -1213,12 +1285,12 @@ def _insert_agent(
             text(
                 """
                 INSERT INTO saas_ai_agents (
-                    tenant_id, agent_type, name, description, status, provider_policy_json,
+                    id, tenant_id, agent_type, name, description, status, provider_policy_json,
                     personality_json, goals_json, rules_json, channels_json, tools_json,
                     memory_policy_json, approval_policy_json, metrics_json, created_by_user_id, updated_at
                 )
                 VALUES (
-                    CAST(:tenant_id AS uuid), :agent_type, :name, :description, :status,
+                    CAST(:id AS uuid), CAST(:tenant_id AS uuid), :agent_type, :name, :description, :status,
                     CAST(:provider_policy_json AS jsonb),
                     CAST(:personality_json AS jsonb),
                     CAST(:goals_json AS jsonb),
@@ -1238,6 +1310,7 @@ def _insert_agent(
                 """
             ),
             {
+                "id": _uuid(),
                 "tenant_id": tenant_id,
                 "agent_type": agent_type,
                 "name": name,
@@ -1285,7 +1358,13 @@ def create_from_template(conn: Connection, tenant_id: str, user_id: str, agent_t
 def list_agents(conn: Connection, tenant_id: str, *, include_archived: bool = False, seed_advisor: bool = True) -> list[dict[str, Any]]:
     _ensure_tables(conn)
     if seed_advisor:
-        ensure_default_advisor_agent(conn, tenant_id)
+        try:
+            with conn.begin_nested():
+                ensure_default_advisor_agent(conn, tenant_id)
+        except Exception:
+            # Listing the registry must remain available in demo/trial even if
+            # an older database state blocks automatic Advisor seeding.
+            pass
     where_archived = "" if include_archived else "AND status <> 'archived'"
     rows = conn.execute(
         text(
@@ -1337,24 +1416,29 @@ def _hydrate_metrics(conn: Connection, item: dict[str, Any]) -> dict[str, Any]:
         try:
             from app_saas.advisor.service import ensure_advisor_tables
 
-            ensure_advisor_tables(conn)
+            with conn.begin_nested():
+                ensure_advisor_tables(conn)
         except Exception:
             metrics.update({"metrics_warning": "advisor_tables_unavailable"})
             item["metrics_json"] = metrics
             return item
-        row = conn.execute(
-            text(
-                """
-                SELECT
-                    (SELECT COUNT(*)::int FROM saas_advisor_actions WHERE tenant_id = CAST(:tenant_id AS uuid) AND status IN ('draft','pending_approval','approved')) AS pending_actions,
-                    (SELECT COUNT(*)::int FROM saas_advisor_messages WHERE tenant_id = CAST(:tenant_id AS uuid) AND role = 'assistant' AND created_at >= NOW() - INTERVAL '7 days') AS assistant_messages_7d,
-                    (SELECT COUNT(*)::int FROM saas_ai_insights WHERE tenant_id = CAST(:tenant_id AS uuid) AND status = 'open') AS open_insights
-                """
-            ),
-            {"tenant_id": item["tenant_id"]},
-        ).mappings().first()
-        if row:
-            metrics.update({key: int(row[key] or 0) for key in row.keys()})
+        try:
+            with conn.begin_nested():
+                row = conn.execute(
+                    text(
+                        """
+                        SELECT
+                            (SELECT COUNT(*)::int FROM saas_advisor_actions WHERE tenant_id = CAST(:tenant_id AS uuid) AND status IN ('draft','pending_approval','approved')) AS pending_actions,
+                            (SELECT COUNT(*)::int FROM saas_advisor_messages WHERE tenant_id = CAST(:tenant_id AS uuid) AND role = 'assistant' AND created_at >= NOW() - INTERVAL '7 days') AS assistant_messages_7d,
+                            (SELECT COUNT(*)::int FROM saas_ai_insights WHERE tenant_id = CAST(:tenant_id AS uuid) AND status = 'open') AS open_insights
+                        """
+                    ),
+                    {"tenant_id": item["tenant_id"]},
+                ).mappings().first()
+            if row:
+                metrics.update({key: int(row[key] or 0) for key in row.keys()})
+        except Exception:
+            metrics.update({"metrics_warning": "advisor_metrics_unavailable"})
     item["metrics_json"] = metrics
     return item
 
