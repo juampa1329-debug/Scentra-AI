@@ -8,7 +8,6 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError
 
 from app_saas.config import settings
 from app_saas.db import db_session, set_tenant_context
@@ -292,6 +291,7 @@ def list_endpoints(ctx: AuthContext = Depends(get_current_user)):
                     last_seen_at::text
                 FROM saas_webhook_endpoints
                 WHERE tenant_id = CAST(:tenant_id AS uuid)
+                  AND is_active = TRUE
                 ORDER BY provider ASC
                 """
             ),
@@ -324,94 +324,63 @@ def create_endpoint(
 
     with db_session() as conn:
         set_tenant_context(conn, ctx.tenant_id)
-        try:
-            row = conn.execute(
-                text(
-                    """
-                    INSERT INTO saas_webhook_endpoints (
-                        tenant_id,
-                        provider,
-                        endpoint_key,
-                        verify_secret_ref,
-                        verify_token_hash,
-                        signature_secret_hash,
-                        signature_secret_salt,
-                        signature_required,
-                        is_active
-                    )
-                    VALUES (
-                        CAST(:tenant_id AS uuid),
-                        :provider,
-                        :endpoint_key,
-                        :verify_secret_ref,
-                        :verify_token_hash,
-                        :signature_secret_hash,
-                        :signature_secret_salt,
-                        :signature_required,
-                        :is_active
-                    )
-                    RETURNING
-                        id::text,
-                        tenant_id::text,
-                        provider,
-                        endpoint_key,
-                        is_active,
-                        signature_required,
-                        last_seen_at::text
-                    """
-                ),
-                {
-                    "tenant_id": ctx.tenant_id,
-                    "provider": provider,
-                    "endpoint_key": endpoint_key,
-                    "verify_secret_ref": f"local:{provider}:{endpoint_key}",
-                    "verify_token_hash": hash_secret(verify_token),
-                    "signature_secret_hash": hash_secret(signature_secret),
-                    "signature_secret_salt": signature_salt,
-                    "signature_required": bool(payload.signature_required),
-                    "is_active": bool(payload.is_active),
-                },
-            ).mappings().first()
-        except IntegrityError:
-            row = conn.execute(
-                text(
-                    """
-                    UPDATE saas_webhook_endpoints
-                    SET
-                        endpoint_key = :endpoint_key,
-                        verify_secret_ref = :verify_secret_ref,
-                        verify_token_hash = :verify_token_hash,
-                        signature_secret_hash = :signature_secret_hash,
-                        signature_secret_salt = :signature_secret_salt,
-                        signature_required = :signature_required,
-                        is_active = :is_active,
-                        updated_at = NOW()
-                    WHERE tenant_id = CAST(:tenant_id AS uuid)
-                      AND provider = :provider
-                    RETURNING
-                        id::text,
-                        tenant_id::text,
-                        provider,
-                        endpoint_key,
-                        is_active,
-                        signature_required,
-                        last_seen_at::text
-                    """
-                ),
-                {
-                    "tenant_id": ctx.tenant_id,
-                    "provider": provider,
-                    "endpoint_key": endpoint_key,
-                    "verify_secret_ref": f"local:{provider}:{endpoint_key}",
-                    "verify_token_hash": hash_secret(verify_token),
-                    "signature_secret_hash": hash_secret(signature_secret),
-                    "signature_secret_salt": signature_salt,
-                    "signature_required": bool(payload.signature_required),
-                    "is_active": bool(payload.is_active),
-                },
-            ).mappings().first()
-            if not row:
-                raise HTTPException(status_code=409, detail="webhook_endpoint_already_exists")
+        row = conn.execute(
+            text(
+                """
+                INSERT INTO saas_webhook_endpoints (
+                    tenant_id,
+                    provider,
+                    endpoint_key,
+                    verify_secret_ref,
+                    verify_token_hash,
+                    signature_secret_hash,
+                    signature_secret_salt,
+                    signature_required,
+                    is_active
+                )
+                VALUES (
+                    CAST(:tenant_id AS uuid),
+                    :provider,
+                    :endpoint_key,
+                    :verify_secret_ref,
+                    :verify_token_hash,
+                    :signature_secret_hash,
+                    :signature_secret_salt,
+                    :signature_required,
+                    :is_active
+                )
+                ON CONFLICT (tenant_id, provider)
+                DO UPDATE SET
+                    endpoint_key = EXCLUDED.endpoint_key,
+                    verify_secret_ref = EXCLUDED.verify_secret_ref,
+                    verify_token_hash = EXCLUDED.verify_token_hash,
+                    signature_secret_hash = EXCLUDED.signature_secret_hash,
+                    signature_secret_salt = EXCLUDED.signature_secret_salt,
+                    signature_required = EXCLUDED.signature_required,
+                    is_active = EXCLUDED.is_active,
+                    updated_at = NOW()
+                RETURNING
+                    id::text,
+                    tenant_id::text,
+                    provider,
+                    endpoint_key,
+                    is_active,
+                    signature_required,
+                    last_seen_at::text
+                """
+            ),
+            {
+                "tenant_id": ctx.tenant_id,
+                "provider": provider,
+                "endpoint_key": endpoint_key,
+                "verify_secret_ref": f"local:{provider}:{endpoint_key}",
+                "verify_token_hash": hash_secret(verify_token),
+                "signature_secret_hash": hash_secret(signature_secret),
+                "signature_secret_salt": signature_salt,
+                "signature_required": bool(payload.signature_required),
+                "is_active": bool(payload.is_active),
+            },
+        ).mappings().first()
 
     return WebhookEndpointOut(
         **dict(row),
