@@ -13,14 +13,19 @@ from sqlalchemy.engine import Connection
 
 INSTAGRAM_OAUTH_SCOPES = [
     "instagram_basic",
+    "instagram_manage_comments",
     "instagram_manage_messages",
     "pages_manage_metadata",
+    "pages_manage_engagement",
     "pages_messaging",
     "pages_read_engagement",
+    "pages_read_user_content",
     "business_management",
 ]
 
-INSTAGRAM_SUBSCRIBED_FIELDS = ["messages", "messaging_postbacks", "comments", "mentions"]
+# These are Page subscribed_apps fields. Instagram comment webhooks are configured
+# in the Meta app webhook product, while Page subscription uses feed/mention.
+INSTAGRAM_SUBSCRIBED_FIELDS = ["messages", "messaging_postbacks", "feed", "mention"]
 TRANSIENT_META_CODES = {1, 2, 4, 17, 32, 613}
 
 

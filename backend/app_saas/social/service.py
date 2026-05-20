@@ -154,7 +154,7 @@ def normalize_social_comments(provider: str, payload: dict[str, Any], fallback_e
             change_dict = _as_dict(change)
             field = _clean(change_dict.get("field"), 80).lower()
             value = _as_dict(change_dict.get("value"))
-            if field not in {"comments", "comment", "mentions", "feed"}:
+            if field not in {"comments", "comment", "mentions", "mention", "feed"}:
                 continue
             verb = _clean(value.get("verb"), 80).lower()
             item = _clean(value.get("item"), 80).lower()

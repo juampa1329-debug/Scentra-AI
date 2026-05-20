@@ -1335,7 +1335,7 @@ function App() {
         app_id: String(instagramForm.app_id || "").trim(),
         graph_api_version: String(instagramForm.graph_api_version || "v24.0").trim(),
         webhook_callback_url: `${API_BASE}/saas/v1/webhooks/instagram/{endpoint_key}`,
-        subscribed_fields: ["messages", "messaging_postbacks", "comments", "mentions"],
+        subscribed_fields: ["messages", "messaging_postbacks", "feed", "mention"],
       };
       if (pageAccessToken) configJson.page_access_token = pageAccessToken;
       if (appSecret) configJson.app_secret = appSecret;
@@ -1475,7 +1475,7 @@ function App() {
       app_id: integrationSecretModal.app_id || "",
       graph_api_version: integrationSecretModal.graph_api_version || "v24.0",
       webhook_callback_url: `${API_BASE}/saas/v1/webhooks/${secretChannel}/{endpoint_key}`,
-      subscribed_fields: secretChannel === "facebook" ? ["messages", "messaging_postbacks", "feed"] : ["messages", "messaging_postbacks", "comments", "mentions"],
+      subscribed_fields: secretChannel === "facebook" ? ["messages", "messaging_postbacks", "feed"] : ["messages", "messaging_postbacks", "feed", "mention"],
     } : {
       dispatch_mode: integrationSecretModal.dispatch_mode || "stub",
       phone_number_id: integrationSecretModal.phone_number_id || "",
@@ -3129,7 +3129,7 @@ function App() {
                   <div className="manual-mode-box">
                     <div>
                       <strong>Webhook Instagram para app propia</strong>
-                      <span>Crea un endpoint por tenant y copia Callback URL + Verify token en Meta Developers. Suscribe eventos: messages, messaging_postbacks, comments y mentions.</span>
+                      <span>Crea un endpoint por tenant y copia Callback URL + Verify token en Meta Developers. En Page subscribed_apps se usan: messages, messaging_postbacks, feed y mention.</span>
                     </div>
                     <button type="button" onClick={createInstagramWebhookEndpoint}>Crear endpoint Instagram</button>
                   </div>
