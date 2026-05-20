@@ -337,6 +337,26 @@ def _load_meta_channel_integration(conn, tenant_id: str, channel: str) -> dict[s
     return dict(row) if row else None
 
 
+def _permission_names_from_payload(payload: dict[str, Any]) -> set[str]:
+    data = payload.get("data") if isinstance(payload, dict) else []
+    granted: set[str] = set()
+    if isinstance(data, list):
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("status") or "").lower() == "granted" and item.get("permission"):
+                granted.add(str(item["permission"]))
+    return granted
+
+
+def _permission_names_from_meta_message(message: str) -> set[str]:
+    clean_message = str(message or "")
+    names = set(re.findall(r"\b(?:pages|instagram|business)_[a-z0-9_]+\b", clean_message))
+    if "permission" in clean_message.lower() and "pages_messaging" in clean_message:
+        names.add("pages_messaging")
+    return names
+
+
 @router.get("", response_model=list[IntegrationOut])
 def list_integrations(ctx: AuthContext = Depends(get_current_user)):
     with db_session() as conn:
@@ -614,6 +634,17 @@ def facebook_diagnostics(ctx: AuthContext = Depends(require_role("owner", "admin
             }
         else:
             permissions = {"ok": False, "response": {"error": "page_access_token_missing"}, "error_status": "missing_page_access_token"}
+        required_permissions = [
+            "pages_manage_metadata",
+            "pages_messaging",
+            "pages_read_engagement",
+            "pages_read_user_content",
+            "pages_manage_engagement",
+        ]
+        granted_permissions = _permission_names_from_payload(permissions.get("response") or {})
+        subscription_error_text = str(subscription.get("error") or "")
+        meta_required_permissions = _permission_names_from_meta_message(subscription_error_text)
+        missing_permissions = sorted(set(required_permissions) - granted_permissions) if granted_permissions else []
 
         webhook = conn.execute(
             text(
@@ -703,13 +734,10 @@ def facebook_diagnostics(ctx: AuthContext = Depends(require_role("owner", "admin
         "last_comment": dict(last_comment or {}),
         "recent_errors": [dict(row) for row in recent_errors],
         "subscription_checks": [dict(row) for row in checks],
-        "required_permissions": [
-            "pages_manage_metadata",
-            "pages_messaging",
-            "pages_read_engagement",
-            "pages_read_user_content",
-            "pages_manage_engagement",
-        ],
+        "required_permissions": required_permissions,
+        "granted_permissions": sorted(granted_permissions),
+        "missing_permissions": missing_permissions,
+        "meta_required_permissions": sorted(meta_required_permissions),
         "config": _safe_config_for_output(config),
     }
 

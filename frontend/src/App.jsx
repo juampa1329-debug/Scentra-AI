@@ -735,11 +735,9 @@ function App() {
     && String(item.channel || "").toLowerCase() === "facebook"
   ));
   const selectedFacebookConfig = selectedFacebookIntegration?.config_json || {};
-  const facebookGrantedPermissions = new Set((facebookDiagnostics?.permissions?.response?.data || [])
-    .filter((item) => String(item.status || "").toLowerCase() === "granted")
-    .map((item) => item.permission));
-  const facebookMissingPermissions = (facebookDiagnostics?.required_permissions || [])
-    .filter((permission) => !facebookGrantedPermissions.has(permission));
+  const facebookGrantedPermissions = facebookDiagnostics?.granted_permissions || [];
+  const facebookMissingPermissions = facebookDiagnostics?.missing_permissions || [];
+  const facebookMetaRequiredPermissions = facebookDiagnostics?.meta_required_permissions || [];
   const integrationToForm = (integration) => {
     const config = integration?.config_json || {};
     return {
@@ -3289,7 +3287,9 @@ function App() {
                       {facebookDiagnostics.ok ? <small>Webhook Facebook: {facebookDiagnostics.webhook_callback_url || "-"} / Ultimo evento: {facebookDiagnostics.webhook_status?.last_seen_at || "sin eventos"}</small> : null}
                       {facebookDiagnostics.last_message?.id ? <small>Ultimo DM: {facebookDiagnostics.last_message.display_name || facebookDiagnostics.last_message.external_contact_id} - {facebookDiagnostics.last_message.last_message_text}</small> : null}
                       {facebookDiagnostics.last_comment?.id ? <small>Ultimo comentario: {facebookDiagnostics.last_comment.author_name || facebookDiagnostics.last_comment.author_username || "Usuario"} - {facebookDiagnostics.last_comment.message}</small> : null}
-                      {facebookMissingPermissions.length ? <small>Permisos faltantes: {facebookMissingPermissions.join(", ")}</small> : <small>Permisos Facebook requeridos: completos o no reportados como faltantes.</small>}
+                      {facebookMetaRequiredPermissions.length ? <small>Meta esta reclamando: {facebookMetaRequiredPermissions.join(", ")}</small> : null}
+                      {facebookMissingPermissions.length ? <small>Permisos faltantes segun el token: {facebookMissingPermissions.join(", ")}</small> : <small>Permisos Facebook requeridos: completos o no reportados por este token.</small>}
+                      {facebookGrantedPermissions.length ? <small>Permisos concedidos detectados: {facebookGrantedPermissions.join(", ")}</small> : null}
                       {(facebookDiagnostics.subscription_checks || []).slice(0, 3).map((item, idx) => <small key={`${item.created_at}-${idx}`}>{compactDateTimeLabel(item.created_at)} - {item.status} {item.error || item.meta_error_message || ""}</small>)}
                       {(facebookDiagnostics.recent_errors || []).slice(0, 3).map((item, idx) => <small key={`${item.received_at}-${idx}`}>{compactDateTimeLabel(item.received_at)} - webhook {item.status}: {item.error}</small>)}
                     </div>
