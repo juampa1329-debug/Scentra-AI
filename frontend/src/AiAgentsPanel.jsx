@@ -86,6 +86,33 @@ const typeLabel = (type) => ({
   multi_location_ops: "Multi-sede",
 }[String(type || "").toLowerCase()] || type);
 
+const categoryLabel = (category) => ({
+  strategy: "Estrategia",
+  revenue: "Ventas",
+  service: "Soporte",
+  crm: "CRM",
+  marketing: "Marketing",
+  growth: "Growth",
+  ops: "Operaciones",
+  executive: "Ejecutivo",
+  knowledge: "Conocimiento",
+  automation: "Automatizacion",
+  vertical_restaurant: "Restaurantes",
+  vertical_hospitality: "Hoteleria",
+  vertical_services: "Servicios / citas",
+  vertical_real_estate: "Inmobiliaria",
+  vertical_education: "Educacion",
+  vertical_automotive: "Automotriz",
+  vertical_beauty: "Belleza",
+  vertical_logistics: "Logistica",
+  vertical_finance: "Finanzas / cartera",
+  vertical_reputation: "Reputacion",
+  vertical_health: "Salud",
+  vertical_travel: "Turismo",
+  vertical_hr: "RRHH",
+  vertical_operations: "Multi-sede",
+}[String(category || "").toLowerCase()] || category || "General");
+
 function asList(value) {
   return Array.isArray(value) ? value.filter(Boolean) : [];
 }
@@ -150,6 +177,7 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
   const [catalog, setCatalog] = useState({});
   const [limits, setLimits] = useState(null);
   const [events, setEvents] = useState([]);
+  const [memories, setMemories] = useState([]);
   const [selectedAgentId, setSelectedAgentId] = useState("");
   const [editor, setEditor] = useState(null);
   const [eventNote, setEventNote] = useState("");
@@ -165,6 +193,10 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
   const [dirty, setDirty] = useState(false);
   const [loading, setLoading] = useState(false);
   const [busyKey, setBusyKey] = useState("");
+  const [agentView, setAgentView] = useState("agents");
+  const [catalogCategory, setCatalogCategory] = useState("all");
+  const [catalogSearch, setCatalogSearch] = useState("");
+  const [archiveDraft, setArchiveDraft] = useState(null);
 
   const selectedAgent = useMemo(
     () => agents.find((agent) => agent.id === selectedAgentId) || agents[0] || null,
@@ -189,21 +221,44 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
   const agentActionDrafts = asList(runtimeSummary?.actions);
   const availableActionPresets = actionPresetCatalog.filter((preset) => !asList(editor?.tools).length || asList(editor?.tools).includes(preset.tool_code));
   const selectedActionPreset = actionPresetCatalog.find((preset) => preset.tool_code === actionDraft.preset) || availableActionPresets[0] || actionPresetCatalog[0] || {};
+  const catalogCategories = useMemo(
+    () => Array.from(new Set(templates.map((template) => String(template.category || "").trim()).filter(Boolean)))
+      .sort((a, b) => categoryLabel(a).localeCompare(categoryLabel(b), "es")),
+    [templates],
+  );
+  const filteredTemplates = useMemo(() => {
+    const search = catalogSearch.trim().toLowerCase();
+    return templates.filter((template) => {
+      const category = String(template.category || "").toLowerCase();
+      if (catalogCategory !== "all" && category !== catalogCategory) return false;
+      if (!search) return true;
+      return [
+        template.name,
+        template.headline,
+        template.description,
+        template.agent_type,
+        typeLabel(template.agent_type),
+        categoryLabel(template.category),
+      ].some((value) => String(value || "").toLowerCase().includes(search));
+    });
+  }, [templates, catalogCategory, catalogSearch]);
 
   const loadAgents = async (silent = false) => {
     setLoading(true);
     try {
-      const [agentData, templateData, catalogData] = await Promise.all([
+      const [agentData, templateData, catalogData, memoryData] = await Promise.all([
         apiCall("/saas/v1/agents"),
         apiCall("/saas/v1/agents/templates"),
         apiCall("/saas/v1/agents/catalog"),
+        apiCall("/saas/v1/agents/memories"),
       ]);
       const nextAgents = agentData?.agents || [];
       setAgents(nextAgents);
       setTemplates(templateData?.templates || []);
       setCatalog(catalogData?.catalog || {});
+      setMemories(memoryData?.memories || []);
       setLimits(agentData?.limits || null);
-      if (!selectedAgentId && nextAgents[0]?.id) setSelectedAgentId(nextAgents[0].id);
+      setSelectedAgentId((current) => (current && nextAgents.some((agent) => agent.id === current) ? current : (nextAgents[0]?.id || "")));
       if (!silent) showStatus("AI Agents actualizado", "ok");
     } catch (err) {
       showStatus(String(err.message || err), "error");
@@ -362,6 +417,64 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
     }
   };
 
+  const openArchiveAgent = (agent) => {
+    if (!agent?.id) return;
+    if (agent.agent_type === "advisor") {
+      showStatus("El Advisor base no se elimina; puedes pausarlo si no quieres usarlo.", "error");
+      return;
+    }
+    setArchiveDraft({
+      agent,
+      preserveMemory: true,
+      memoryTitle: `Memoria de ${agent.name}`,
+      notes: "",
+    });
+  };
+
+  const archiveSelectedAgent = async () => {
+    const draft = archiveDraft;
+    if (!draft?.agent?.id) return;
+    setBusyKey(`archive:${draft.agent.id}`);
+    try {
+      const data = await apiCall(`/saas/v1/agents/${encodeURIComponent(draft.agent.id)}/archive`, {
+        method: "POST",
+        body: JSON.stringify({
+          preserve_memory: Boolean(draft.preserveMemory),
+          memory_title: draft.memoryTitle,
+          notes: draft.notes,
+        }),
+      });
+      setArchiveDraft(null);
+      setSelectedAgentId("");
+      await loadAgents(true);
+      if (data?.memory?.id) setAgentView("memories");
+      showStatus(data?.memory?.id ? "Agente eliminado y memoria guardada" : "Agente eliminado", "ok");
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    } finally {
+      setBusyKey("");
+    }
+  };
+
+  const restoreMemory = async (memory) => {
+    if (!memory?.id) return;
+    setBusyKey(`restore:${memory.id}`);
+    try {
+      const data = await apiCall(`/saas/v1/agents/memories/${encodeURIComponent(memory.id)}/restore`, {
+        method: "POST",
+        body: JSON.stringify({ name: `${memory.source_agent_name || memory.title || "Agente"} restaurado`, status: "draft" }),
+      });
+      await loadAgents(true);
+      if (data?.agent?.id) setSelectedAgentId(data.agent.id);
+      setAgentView("agents");
+      showStatus("Agente restaurado desde memoria", "ok");
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    } finally {
+      setBusyKey("");
+    }
+  };
+
   const addEventNote = async (event) => {
     event.preventDefault();
     const summary = eventNote.trim();
@@ -462,6 +575,14 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
         <article className="metric-card rose"><span>Runtime seleccionado</span><strong>{runtimeHealth.label || "Sin datos"}</strong><small>{number(runtimeMetrics.runs_7d || 0)} runs / {number(runtimeMetrics.tokens_7d || 0)} tokens 7d</small></article>
       </section>
 
+      <nav className="agent-tabs glass-card" aria-label="Secciones de AI Agents">
+        <button type="button" className={agentView === "agents" ? "active" : ""} onClick={() => setAgentView("agents")}>Mis agentes</button>
+        <button type="button" className={agentView === "catalog" ? "active" : ""} onClick={() => setAgentView("catalog")}>Catalogo</button>
+        <button type="button" className={agentView === "memories" ? "active" : ""} onClick={() => setAgentView("memories")}>Memorias guardadas <span>{number(memories.length)}</span></button>
+      </nav>
+
+      {agentView === "agents" ? (
+        <>
       <section className="agents-layout builder">
         <article className="panel glass-card">
           <div className="panel-head">
@@ -734,42 +855,14 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
                 {selectedAgent.status === "active" ? <button type="button" disabled={busyKey === `paused:${selectedAgent.id}`} onClick={() => setStatus(selectedAgent, "paused")}>Pausar</button> : null}
                 {selectedAgent.agent_type === "advisor" ? <button type="button" onClick={onOpenAdvisor}>Abrir copiloto</button> : null}
                 <button type="button" onClick={onOpenSettings}>Configurar APIs/modelos</button>
+                {selectedAgent.agent_type !== "advisor" ? <button type="button" className="danger-button" onClick={() => openArchiveAgent(selectedAgent)}>Eliminar</button> : null}
               </div>
             </div>
           ) : <div className="empty">Selecciona un agente para abrir el builder.</div>}
         </article>
       </section>
 
-      <section className="agents-layout bottom">
-        <article className="panel glass-card">
-          <div className="panel-head">
-            <div><h2>Plantillas de agentes</h2><span>creacion guiada por tipo de agente</span></div>
-          </div>
-          <div className="template-agent-grid">
-            {templates.map((template) => {
-              const alreadyExists = agents.some((agent) => agent.agent_type === template.agent_type && agent.status !== "archived");
-              const allowedByPlan = !allowedAgentTypes.size || allowedAgentTypes.has(String(template.agent_type || "").toLowerCase());
-              const disabled = alreadyExists || !allowedByPlan || remainingTotal <= 0 || !limits?.builder_enabled || busyKey === `create:${template.agent_type}`;
-              return (
-                <article className={`template-agent-card ${allowedByPlan ? "" : "locked"}`} key={template.agent_type}>
-                  <div className="agent-card-head">
-                    <span>{template.category}</span>
-                    <em>{typeLabel(template.agent_type)}</em>
-                  </div>
-                  <strong>{template.name}</strong>
-                  <p>{template.headline}</p>
-                  <div className="agent-chip-row">
-                    {asList(template.channels).slice(0, 3).map((item) => <span key={item}>{item}</span>)}
-                  </div>
-                  <button type="button" className={alreadyExists || !allowedByPlan ? "" : "primary"} disabled={disabled} onClick={() => createFromTemplate(template.agent_type)}>
-                    {alreadyExists ? "Ya creado" : !allowedByPlan ? "Plan requerido" : remainingTotal <= 0 ? "Limite del plan" : "Crear agente"}
-                  </button>
-                </article>
-              );
-            })}
-          </div>
-        </article>
-
+      <section className="agents-layout bottom compact">
         <article className="panel glass-card">
           <div className="panel-head">
             <div><h2>Runs AI Gateway</h2><span>ultimas ejecuciones del agente</span></div>
@@ -807,6 +900,115 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
           </div>
         </article>
       </section>
+        </>
+      ) : null}
+
+      {agentView === "catalog" ? (
+        <section className="panel glass-card agent-catalog-panel">
+          <div className="panel-head">
+            <div><h2>Catalogo de agentes</h2><span>filtra por funcion o tipo de negocio</span></div>
+            <button type="button" onClick={() => { setCatalogCategory("all"); setCatalogSearch(""); }}>Limpiar filtros</button>
+          </div>
+          <div className="agent-catalog-filters">
+            <input value={catalogSearch} onChange={(event) => setCatalogSearch(event.target.value)} placeholder="Buscar por industria, funcion, canal o herramienta..." />
+            <div className="agent-filter-pills">
+              <button type="button" className={catalogCategory === "all" ? "active" : ""} onClick={() => setCatalogCategory("all")}>Todos</button>
+              {catalogCategories.map((category) => (
+                <button type="button" key={category} className={catalogCategory === category.toLowerCase() ? "active" : ""} onClick={() => setCatalogCategory(category.toLowerCase())}>
+                  {categoryLabel(category)}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="template-agent-grid catalog">
+            {filteredTemplates.map((template) => {
+              const alreadyExists = agents.some((agent) => agent.agent_type === template.agent_type && agent.status !== "archived");
+              const allowedByPlan = !allowedAgentTypes.size || allowedAgentTypes.has(String(template.agent_type || "").toLowerCase());
+              const disabled = alreadyExists || !allowedByPlan || remainingTotal <= 0 || !limits?.builder_enabled || busyKey === `create:${template.agent_type}`;
+              return (
+                <article className={`template-agent-card ${allowedByPlan ? "" : "locked"}`} key={template.agent_type}>
+                  <div className="agent-card-head">
+                    <span>{categoryLabel(template.category)}</span>
+                    <em>{typeLabel(template.agent_type)}</em>
+                  </div>
+                  <strong>{template.name}</strong>
+                  <p>{template.headline || template.description}</p>
+                  <div className="agent-chip-row">
+                    {asList(template.channels).slice(0, 3).map((item) => <span key={item}>{item}</span>)}
+                    {asList(template.tools).length ? <span>{number(asList(template.tools).length)} tools</span> : null}
+                  </div>
+                  <button type="button" className={alreadyExists || !allowedByPlan ? "" : "primary"} disabled={disabled} onClick={() => createFromTemplate(template.agent_type)}>
+                    {alreadyExists ? "Ya creado" : !allowedByPlan ? "Plan requerido" : remainingTotal <= 0 ? "Limite del plan" : "Crear agente"}
+                  </button>
+                </article>
+              );
+            })}
+            {!filteredTemplates.length ? <div className="empty">No encontramos agentes con esos filtros.</div> : null}
+          </div>
+        </section>
+      ) : null}
+
+      {agentView === "memories" ? (
+        <section className="panel glass-card agent-memory-panel">
+          <div className="panel-head">
+            <div><h2>Memorias guardadas</h2><span>snapshots de agentes eliminados para reutilizar despues</span></div>
+            <button type="button" onClick={() => loadAgents(false)}>Refrescar</button>
+          </div>
+          <div className="agent-memory-grid">
+            {memories.map((memory) => (
+              <article className="agent-memory-card" key={memory.id}>
+                <div className="agent-card-head">
+                  <span>{categoryLabel(memory.source_agent_type)}</span>
+                  <em>{typeLabel(memory.source_agent_type)}</em>
+                </div>
+                <strong>{memory.title || memory.source_agent_name}</strong>
+                <p>{memory.notes || `Memoria conservada desde ${memory.source_agent_name}.`}</p>
+                <div className="agent-chip-row">
+                  {asList(memory.summary?.channels).map((item) => <span key={item}>{item}</span>)}
+                  {asList(memory.summary?.tools).slice(0, 3).map((item) => <span key={item}>{item}</span>)}
+                </div>
+                <small>{memory.created_at}</small>
+                <button type="button" className="primary" disabled={remainingTotal <= 0 || busyKey === `restore:${memory.id}`} onClick={() => restoreMemory(memory)}>
+                  {remainingTotal <= 0 ? "Sin cupo del plan" : busyKey === `restore:${memory.id}` ? "Restaurando..." : "Crear agente desde memoria"}
+                </button>
+              </article>
+            ))}
+            {!memories.length ? <div className="empty">Aun no hay memorias guardadas. Cuando elimines un agente, puedes conservar su memoria aqui.</div> : null}
+          </div>
+        </section>
+      ) : null}
+
+      {archiveDraft ? (
+        <div className="modal-backdrop" role="presentation" onMouseDown={() => setArchiveDraft(null)}>
+          <section className="modal-card glass-card agent-archive-modal" role="dialog" aria-modal="true" aria-label="Eliminar agente" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="panel-head">
+              <div><h2>Eliminar agente</h2><span>{archiveDraft.agent?.name}</span></div>
+              <button type="button" onClick={() => setArchiveDraft(null)}>Cerrar</button>
+            </div>
+            <p>El agente se quitara de la operacion. Puedes conservar su memoria para crear otro agente despues sin perder configuracion, reglas, objetivos y contexto reciente.</p>
+            <label className="check-row">
+              <input type="checkbox" checked={Boolean(archiveDraft.preserveMemory)} onChange={(event) => setArchiveDraft((prev) => ({ ...prev, preserveMemory: event.target.checked }))} />
+              <span><b>Conservar memoria del agente</b><small>Guarda un snapshot reutilizable en la subpestaña Memorias guardadas.</small></span>
+            </label>
+            {archiveDraft.preserveMemory ? (
+              <>
+                <label>Titulo de la memoria
+                  <input value={archiveDraft.memoryTitle} onChange={(event) => setArchiveDraft((prev) => ({ ...prev, memoryTitle: event.target.value }))} />
+                </label>
+                <label>Notas internas
+                  <textarea rows={3} value={archiveDraft.notes} onChange={(event) => setArchiveDraft((prev) => ({ ...prev, notes: event.target.value }))} placeholder="Ej: conservar tono, herramientas y reglas para nueva version del agente." />
+                </label>
+              </>
+            ) : null}
+            <div className="panel-actions">
+              <button type="button" onClick={() => setArchiveDraft(null)}>Cancelar</button>
+              <button type="button" className="danger-button" disabled={busyKey === `archive:${archiveDraft.agent?.id}`} onClick={archiveSelectedAgent}>
+                {busyKey === `archive:${archiveDraft.agent?.id}` ? "Eliminando..." : "Eliminar agente"}
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
     </section>
   );
 }

@@ -781,6 +781,33 @@ def _ensure_tables(conn: Connection) -> None:
             """
         )
     )
+    conn.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS saas_ai_agent_memory_archives (
+                id UUID PRIMARY KEY,
+                tenant_id UUID NOT NULL REFERENCES saas_tenants(id) ON DELETE CASCADE,
+                source_agent_id UUID NULL,
+                source_agent_type TEXT NOT NULL DEFAULT '',
+                source_agent_name TEXT NOT NULL DEFAULT '',
+                title TEXT NOT NULL DEFAULT '',
+                notes TEXT NOT NULL DEFAULT '',
+                snapshot_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                reusable_payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_by_user_id UUID NULL REFERENCES saas_users(id) ON DELETE SET NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_saas_ai_agent_memory_archives_tenant_created
+            ON saas_ai_agent_memory_archives (tenant_id, created_at DESC)
+            """
+        )
+    )
     _seed_plan_limits(conn)
 
 
@@ -1815,6 +1842,204 @@ def set_agent_status(conn: Connection, tenant_id: str, user_id: str, agent_id: s
     if clean_status == "active":
         _assert_activation_allowed(conn, tenant_id, agent_id)
     return update_agent(conn, tenant_id, user_id, agent_id, {"status": clean_status})
+
+
+def _agent_archive_payload(agent: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "agent_type": agent.get("agent_type") or "advisor",
+        "name": f"{agent.get('name') or 'Agente'} restaurado"[:160],
+        "description": agent.get("description") or "",
+        "status": "draft",
+        "provider_policy_json": agent.get("provider_policy_json") or {},
+        "personality_json": agent.get("personality_json") or {},
+        "goals_json": agent.get("goals_json") or [],
+        "rules_json": agent.get("rules_json") or [],
+        "channels_json": agent.get("channels_json") or [],
+        "tools_json": agent.get("tools_json") or [],
+        "memory_policy_json": agent.get("memory_policy_json") or {},
+        "approval_policy_json": agent.get("approval_policy_json") or {},
+        "metrics_json": {
+            "restored_from_memory": True,
+            "source_agent_type": agent.get("agent_type") or "",
+            "category": agent.get("category") or "",
+        },
+    }
+
+
+def create_agent_memory_archive(
+    conn: Connection,
+    tenant_id: str,
+    user_id: str,
+    agent_id: str,
+    *,
+    title: str = "",
+    notes: str = "",
+) -> dict[str, Any]:
+    _ensure_tables(conn)
+    agent = get_agent(conn, tenant_id, agent_id)
+    if agent.get("agent_type") == "advisor":
+        raise HTTPException(status_code=400, detail={"code": "advisor_memory_archive_blocked"})
+    recent_events = list_agent_events(conn, tenant_id, agent_id, limit=20)
+    archive_title = _clean(title, 180) or f"Memoria de {agent['name']}"
+    snapshot = {
+        "agent": agent,
+        "recent_events": recent_events,
+        "memory_policy": agent.get("memory_policy_json") or {},
+        "goals": agent.get("goals_json") or [],
+        "rules": agent.get("rules_json") or [],
+    }
+    reusable_payload = _agent_archive_payload(agent)
+    row = conn.execute(
+        text(
+            """
+            INSERT INTO saas_ai_agent_memory_archives (
+                id, tenant_id, source_agent_id, source_agent_type, source_agent_name,
+                title, notes, snapshot_json, reusable_payload_json, created_by_user_id
+            )
+            VALUES (
+                CAST(:id AS uuid), CAST(:tenant_id AS uuid), CAST(:agent_id AS uuid),
+                :agent_type, :agent_name, :title, :notes,
+                CAST(:snapshot AS jsonb), CAST(:reusable_payload AS jsonb),
+                CASE WHEN :user_id = '' THEN NULL ELSE CAST(:user_id AS uuid) END
+            )
+            RETURNING id::text, tenant_id::text, source_agent_id::text, source_agent_type,
+                      source_agent_name, title, notes, snapshot_json, reusable_payload_json,
+                      created_by_user_id::text, created_at::text
+            """
+        ),
+        {
+            "id": _uuid(),
+            "tenant_id": tenant_id,
+            "agent_id": agent_id,
+            "agent_type": agent["agent_type"],
+            "agent_name": agent["name"],
+            "title": archive_title,
+            "notes": _clean(notes, 1200),
+            "snapshot": _json(snapshot),
+            "reusable_payload": _json(reusable_payload),
+            "user_id": user_id or "",
+        },
+    ).mappings().first()
+    memory = _memory_archive_row_to_dict(dict(row))
+    _audit(
+        conn,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        actor_user_id=user_id,
+        event_type="agent.memory_archived",
+        summary=f"Memoria guardada antes de eliminar {agent['name']}.",
+        details={"memory_archive_id": memory["id"], "agent_type": agent["agent_type"]},
+    )
+    return memory
+
+
+def archive_agent_with_memory(
+    conn: Connection,
+    tenant_id: str,
+    user_id: str,
+    agent_id: str,
+    *,
+    preserve_memory: bool = False,
+    memory_title: str = "",
+    notes: str = "",
+) -> dict[str, Any]:
+    current = get_agent(conn, tenant_id, agent_id)
+    if current.get("agent_type") == "advisor":
+        raise HTTPException(status_code=400, detail={"code": "advisor_archive_blocked"})
+    memory = None
+    if preserve_memory:
+        memory = create_agent_memory_archive(conn, tenant_id, user_id, agent_id, title=memory_title, notes=notes)
+    agent = set_agent_status(conn, tenant_id, user_id, agent_id, "archived")
+    return {"agent": agent, "memory": memory}
+
+
+def _memory_archive_row_to_dict(row: dict[str, Any]) -> dict[str, Any]:
+    snapshot = _json_value(row.get("snapshot_json"), {})
+    reusable_payload = _json_value(row.get("reusable_payload_json"), {})
+    return {
+        "id": str(row.get("id") or ""),
+        "tenant_id": str(row.get("tenant_id") or ""),
+        "source_agent_id": str(row.get("source_agent_id") or ""),
+        "source_agent_type": str(row.get("source_agent_type") or ""),
+        "source_agent_name": str(row.get("source_agent_name") or ""),
+        "title": str(row.get("title") or ""),
+        "notes": str(row.get("notes") or ""),
+        "snapshot_json": snapshot,
+        "reusable_payload_json": reusable_payload,
+        "created_by_user_id": str(row.get("created_by_user_id") or ""),
+        "created_at": str(row.get("created_at") or ""),
+        "summary": {
+            "goals": _json_value(snapshot.get("goals"), [])[:5] if isinstance(snapshot, dict) else [],
+            "tools": _json_value(reusable_payload.get("tools_json"), [])[:8] if isinstance(reusable_payload, dict) else [],
+            "channels": _json_value(reusable_payload.get("channels_json"), [])[:5] if isinstance(reusable_payload, dict) else [],
+        },
+    }
+
+
+def list_agent_memory_archives(conn: Connection, tenant_id: str, limit: int = 100) -> list[dict[str, Any]]:
+    _ensure_tables(conn)
+    rows = conn.execute(
+        text(
+            """
+            SELECT id::text, tenant_id::text, source_agent_id::text, source_agent_type,
+                   source_agent_name, title, notes, snapshot_json, reusable_payload_json,
+                   created_by_user_id::text, created_at::text
+            FROM saas_ai_agent_memory_archives
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+            ORDER BY created_at DESC
+            LIMIT :limit
+            """
+        ),
+        {"tenant_id": tenant_id, "limit": max(1, min(int(limit or 100), 200))},
+    ).mappings().all()
+    return [_memory_archive_row_to_dict(dict(row)) for row in rows]
+
+
+def create_agent_from_memory_archive(
+    conn: Connection,
+    tenant_id: str,
+    user_id: str,
+    memory_id: str,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    _ensure_tables(conn)
+    row = conn.execute(
+        text(
+            """
+            SELECT id::text, tenant_id::text, source_agent_type, source_agent_name,
+                   title, notes, reusable_payload_json
+            FROM saas_ai_agent_memory_archives
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND id = CAST(:memory_id AS uuid)
+            LIMIT 1
+            """
+        ),
+        {"tenant_id": tenant_id, "memory_id": memory_id},
+    ).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="agent_memory_not_found")
+    archive = dict(row)
+    reusable_payload = _json_value(archive.get("reusable_payload_json"), {})
+    if not isinstance(reusable_payload, dict):
+        raise HTTPException(status_code=400, detail={"code": "agent_memory_payload_invalid"})
+    data = dict(reusable_payload)
+    overrides = payload or {}
+    if _clean(overrides.get("name"), 160):
+        data["name"] = _clean(overrides.get("name"), 160)
+    if _clean(overrides.get("status"), 40):
+        data["status"] = _normalize_status(str(overrides.get("status")))
+    data["status"] = "draft" if data.get("status") == "archived" else data.get("status", "draft")
+    item = _insert_agent(conn, tenant_id=tenant_id, user_id=user_id, payload=data)
+    _audit(
+        conn,
+        tenant_id=tenant_id,
+        agent_id=item["id"],
+        actor_user_id=user_id,
+        event_type="agent.memory_restored",
+        summary=f"{item['name']} creado desde memoria guardada.",
+        details={"memory_archive_id": memory_id, "source_agent_name": archive.get("source_agent_name") or ""},
+    )
+    return item
 
 
 def list_agent_events(conn: Connection, tenant_id: str, agent_id: str | None = None, limit: int = 60) -> list[dict[str, Any]]:

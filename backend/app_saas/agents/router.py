@@ -1,18 +1,28 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Body, Depends, Query
 
-from app_saas.agents.schemas import AgentActionDraftIn, AgentEventIn, AiAgentCreateIn, AiAgentPatchIn
+from app_saas.agents.schemas import (
+    AgentActionDraftIn,
+    AgentArchiveIn,
+    AgentEventIn,
+    AgentMemoryRestoreIn,
+    AiAgentCreateIn,
+    AiAgentPatchIn,
+)
 from app_saas.agents.service import (
     add_agent_event,
     agent_runtime_summary,
+    archive_agent_with_memory,
     builder_catalog,
     create_agent_action_draft,
     create_agent,
+    create_agent_from_memory_archive,
     create_from_template,
     get_agent,
     list_agent_action_drafts,
     list_agent_events,
+    list_agent_memory_archives,
     list_agents,
     list_templates,
     plan_limits,
@@ -40,6 +50,28 @@ def get_agent_limits(ctx: AuthContext = Depends(get_current_user)):
 @router.get("/catalog")
 def get_agent_builder_catalog(ctx: AuthContext = Depends(get_current_user)):
     return {"ok": True, "tenant_id": ctx.tenant_id, "catalog": builder_catalog()}
+
+
+@router.get("/memories")
+def get_agent_memories(
+    limit: int = Query(default=100, ge=1, le=200),
+    ctx: AuthContext = Depends(get_current_user),
+):
+    with db_session() as conn:
+        set_tenant_context(conn, ctx.tenant_id)
+        return {"ok": True, "memories": list_agent_memory_archives(conn, ctx.tenant_id, limit=limit)}
+
+
+@router.post("/memories/{memory_id}/restore")
+def post_agent_from_memory(
+    memory_id: str,
+    payload: AgentMemoryRestoreIn = Body(default=AgentMemoryRestoreIn()),
+    ctx: AuthContext = Depends(require_role("owner", "admin", "supervisor")),
+):
+    with db_session() as conn:
+        set_tenant_context(conn, ctx.tenant_id)
+        item = create_agent_from_memory_archive(conn, ctx.tenant_id, ctx.user_id, memory_id, payload.model_dump())
+        return {"ok": True, "agent": item, "limits": plan_limits(conn, ctx.tenant_id)}
 
 
 @router.get("")
@@ -139,11 +171,23 @@ def pause_agent(agent_id: str, ctx: AuthContext = Depends(require_role("owner", 
 
 
 @router.post("/{agent_id}/archive")
-def archive_agent(agent_id: str, ctx: AuthContext = Depends(require_role("owner", "admin"))):
+def archive_agent(
+    agent_id: str,
+    payload: AgentArchiveIn = Body(default=AgentArchiveIn()),
+    ctx: AuthContext = Depends(require_role("owner", "admin")),
+):
     with db_session() as conn:
         set_tenant_context(conn, ctx.tenant_id)
-        item = set_agent_status(conn, ctx.tenant_id, ctx.user_id, agent_id, "archived")
-        return {"ok": True, "agent": item, "limits": plan_limits(conn, ctx.tenant_id)}
+        result = archive_agent_with_memory(
+            conn,
+            ctx.tenant_id,
+            ctx.user_id,
+            agent_id,
+            preserve_memory=payload.preserve_memory,
+            memory_title=payload.memory_title,
+            notes=payload.notes,
+        )
+        return {"ok": True, **result, "limits": plan_limits(conn, ctx.tenant_id)}
 
 
 @router.get("/{agent_id}/events")

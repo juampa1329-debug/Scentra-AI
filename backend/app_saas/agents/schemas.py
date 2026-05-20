@@ -48,3 +48,14 @@ class AgentActionDraftIn(BaseModel):
     impact: str = Field(default="medium", max_length=40)
     risk_level: str = Field(default="medium", max_length=40)
     payload_json: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentArchiveIn(BaseModel):
+    preserve_memory: bool = False
+    memory_title: str = Field(default="", max_length=180)
+    notes: str = Field(default="", max_length=1200)
+
+
+class AgentMemoryRestoreIn(BaseModel):
+    name: str = Field(default="", max_length=160)
+    status: str = Field(default="draft", max_length=40)
