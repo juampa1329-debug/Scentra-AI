@@ -67,14 +67,53 @@ def _load_meta_integration(conn, tenant_id: str) -> dict[str, Any]:
     return {"token": token, "version": version}
 
 
+def _meta_error_payload(raw: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(raw or "{}")
+    except Exception:
+        payload = {"error": {"message": raw[:700]}}
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if not isinstance(error, dict):
+        return {"message": raw[:700], "type": "", "code": 0, "subcode": 0, "fbtrace_id": ""}
+    return {
+        "message": _clean(error.get("message"), 700),
+        "type": _clean(error.get("type"), 120),
+        "code": int(error.get("code") or 0) if str(error.get("code") or "").isdigit() else 0,
+        "subcode": int(error.get("error_subcode") or 0) if str(error.get("error_subcode") or "").isdigit() else 0,
+        "fbtrace_id": _clean(error.get("fbtrace_id"), 120),
+    }
+
+
+def _raise_meta_media_error(raw: str, fallback_code: str) -> None:
+    meta = _meta_error_payload(raw)
+    message = str(meta.get("message") or "").lower()
+    code = int(meta.get("code") or 0)
+    status_code = 502
+    error_code = fallback_code
+    hint = "Meta rechazo la descarga del medio. Revisa token, permisos y WABA/Phone Number ID."
+    if code == 190 or "invalid oauth" in message or "access token" in message or "expired" in message:
+        status_code = 401
+        error_code = "meta_media_token_expired_or_invalid"
+        hint = "El token permanente de Meta es invalido, expiro, fue revocado o se pego incompleto."
+    elif code in {10, 200} or "permission" in message or "not have access" in message:
+        status_code = 403
+        error_code = "meta_media_insufficient_permissions"
+        hint = "El token no tiene permisos para este WABA o numero. Revisa whatsapp_business_messaging y acceso al activo."
+    elif code in {100, 803} or "does not exist" in message or "cannot be loaded" in message:
+        status_code = 404
+        error_code = "meta_media_not_found_or_not_accessible"
+        hint = "El media ID no existe, expiro, pertenece a otro WABA o el token no puede verlo."
+    raise HTTPException(status_code=status_code, detail={"code": error_code, "meta": meta, "hint": hint})
+
+
 def _graph_get_json(url: str, token: str) -> dict[str, Any]:
     request = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
     try:
         with urllib.request.urlopen(request, timeout=20) as response:
             return json.loads(response.read().decode("utf-8") or "{}")
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")[:700]
-        raise HTTPException(status_code=502, detail={"code": "meta_media_error", "meta": body})
+        body = exc.read().decode("utf-8", errors="replace")[:1200]
+        _raise_meta_media_error(body, "meta_media_error")
     except Exception as exc:
         raise HTTPException(status_code=502, detail={"code": "meta_media_unavailable", "message": str(exc)[:300]})
 
@@ -85,8 +124,8 @@ def _graph_get_bytes(url: str, token: str) -> tuple[bytes, str]:
         with urllib.request.urlopen(request, timeout=30) as response:
             return response.read(), str(response.headers.get("content-type") or "application/octet-stream")
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")[:700]
-        raise HTTPException(status_code=502, detail={"code": "meta_media_download_error", "meta": body})
+        body = exc.read().decode("utf-8", errors="replace")[:1200]
+        _raise_meta_media_error(body, "meta_media_download_error")
     except Exception as exc:
         raise HTTPException(status_code=502, detail={"code": "meta_media_download_unavailable", "message": str(exc)[:300]})
 
