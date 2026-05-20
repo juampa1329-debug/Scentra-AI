@@ -594,6 +594,33 @@ def _send_instagram_graph_text(integration: dict[str, Any], job: dict[str, Any])
     }
 
 
+def _send_facebook_graph_text(integration: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
+    config = _integration_config(integration)
+    page_access_token = decrypt_secret(str(config.get("page_access_token") or config.get("facebook_page_access_token") or "").strip())
+    if not page_access_token:
+        raise DispatchPermanentError("facebook_page_access_token_missing")
+    recipient = _normalize_social_recipient(str(job.get("recipient_external_id") or ""))
+    body_text = str(job.get("body_text") or "").strip()
+    if not body_text:
+        raise DispatchPermanentError("message_body_required")
+    base_url = str(config.get("graph_base_url") or "https://graph.facebook.com").rstrip("/")
+    version = _meta_graph_version(config)
+    timeout_sec = int(config.get("timeout_sec") or os.getenv("SCENTRA_META_TIMEOUT_SEC") or "15")
+    url = f"{base_url}/{version}/me/messages"
+    payload = {
+        "recipient": {"id": recipient},
+        "message": {"text": body_text[:2000]},
+        "messaging_type": "RESPONSE",
+    }
+    response = _post_json(url, payload, page_access_token, timeout_sec)
+    provider_message_id = str(response.get("message_id") or response.get("id") or "")
+    return {
+        "provider_message_id": provider_message_id,
+        "provider_response": response,
+        "request_type": "facebook_text",
+    }
+
+
 def _template_text_parameter(value: Any) -> dict[str, str]:
     return {"type": "text", "text": str(value or "")[:1024]}
 
@@ -730,13 +757,14 @@ def _dispatch_one(conn, job: dict[str, Any]) -> str:
 
     config = _integration_config(integration)
     mode = str(config.get("dispatch_mode") or "stub").strip().lower()
-    if str(job["channel"]).strip().lower() == "instagram" and mode in {"instagram_graph", "meta_cloud", "instagram"}:
+    job_channel = str(job["channel"]).strip().lower()
+    if job_channel in {"instagram", "facebook"} and mode in {"instagram_graph", "facebook_graph", "messenger_graph", "meta_cloud", "instagram", "facebook"}:
         try:
             payload_json = _job_payload(job)
             message_type = str(payload_json.get("message_type") or payload_json.get("type") or "text").strip().lower()
             if message_type not in {"text", ""}:
-                raise DispatchPermanentError("instagram_outbound_only_text_enabled")
-            result = _send_instagram_graph_text(integration, job)
+                raise DispatchPermanentError(f"{job_channel}_outbound_only_text_enabled")
+            result = _send_instagram_graph_text(integration, job) if job_channel == "instagram" else _send_facebook_graph_text(integration, job)
         except DispatchPermanentError as exc:
             error = str(exc)
             _mark_outbound(conn, str(job["id"]), status="failed", provider=str(integration["provider"]), error=error)
@@ -750,7 +778,7 @@ def _dispatch_one(conn, job: dict[str, Any]) -> str:
             provider=str(integration["provider"]),
             provider_response={
                 "provider_message_id": provider_message_id,
-                "request_type": result.get("request_type") or "instagram_text",
+                "request_type": result.get("request_type") or f"{job_channel}_text",
                 **(result.get("provider_response") or {}),
             },
         )

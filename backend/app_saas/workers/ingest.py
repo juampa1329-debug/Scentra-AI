@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -9,6 +12,8 @@ from sqlalchemy import text
 
 from app_saas.ai_agent.service import schedule_conversation_ai
 from app_saas.db import db_session, set_tenant_context
+from app_saas.shared.secrets import decrypt_secret
+from app_saas.social.service import normalize_social_comments, store_social_comment
 from app_saas.workers.triggers import execute_triggers_for_message
 
 
@@ -23,6 +28,7 @@ class NormalizedMessage:
     media_id: str = ""
     mime_type: str = ""
     display_name: str = ""
+    profile_json: dict[str, Any] | None = None
 
 
 @dataclass
@@ -197,26 +203,48 @@ def _normalize_instagram_payload(payload: dict[str, Any], fallback_event_id: str
                 )
             )
 
-        for change in _as_list(entry_dict.get("changes")):
-            change_dict = _as_dict(change)
-            field = _clean(change_dict.get("field"), 60).lower()
-            value = _as_dict(change_dict.get("value"))
-            if field not in {"comments", "mentions"}:
-                continue
-            sender_info = _as_dict(value.get("from"))
-            sender = _clean(sender_info.get("id") or value.get("sender_id") or value.get("user_id"), 120)
+    return out
+
+
+def _normalize_facebook_messaging_payload(payload: dict[str, Any], fallback_event_id: str) -> list[NormalizedMessage]:
+    out: list[NormalizedMessage] = []
+    for entry in _as_list(payload.get("entry")):
+        entry_dict = _as_dict(entry)
+        for event in _as_list(entry_dict.get("messaging")):
+            item = _as_dict(event)
+            sender = _clean(_as_dict(item.get("sender")).get("id"), 120)
             if not sender:
                 continue
-            text_value = _clean(value.get("text") or value.get("message") or f"[{field}]", 4000)
+            message = _as_dict(item.get("message"))
+            if bool(message.get("is_echo")):
+                continue
+            postback = _as_dict(item.get("postback"))
+            attachments = _as_list(message.get("attachments"))
+            msg_type = "text"
+            text_value = _clean(message.get("text"), 4000)
+            media_id = ""
+            mime_type = ""
+            if not text_value and postback:
+                msg_type = "postback"
+                text_value = _clean(postback.get("title") or postback.get("payload") or "[postback]", 4000)
+            if attachments:
+                first = _as_dict(attachments[0])
+                msg_type = _clean(first.get("type") or "attachment", 40).lower()
+                payload_value = _as_dict(first.get("payload"))
+                media_id = _clean(payload_value.get("url") or payload_value.get("id"), 1000)
+                mime_type = _clean(payload_value.get("mime_type"), 240)
+                text_value = text_value or f"[{msg_type}]"
             out.append(
                 NormalizedMessage(
-                    channel="instagram",
+                    channel="facebook",
                     external_contact_id=sender,
-                    external_message_id=_clean(value.get("id") or value.get("comment_id") or value.get("media_id"), 240) or fallback_event_id,
+                    external_message_id=_clean(message.get("mid") or item.get("timestamp"), 240) or fallback_event_id,
                     direction="in",
-                    msg_type=field[:-1] if field.endswith("s") else field,
-                    text=text_value,
-                    display_name=_clean(sender_info.get("username") or sender_info.get("name"), 180),
+                    msg_type=msg_type,
+                    text=text_value or "[facebook]",
+                    media_id=media_id,
+                    mime_type=mime_type,
+                    display_name="",
                 )
             )
     return out
@@ -254,6 +282,10 @@ def normalize_event(provider: str, payload: dict[str, Any], fallback_event_id: s
         messages = _normalize_instagram_payload(payload, fallback_event_id)
         if messages:
             return messages
+    if provider_clean == "facebook":
+        messages = _normalize_facebook_messaging_payload(payload, fallback_event_id)
+        if messages:
+            return messages
     messages = _normalize_whatsapp_payload(provider_clean, payload, fallback_event_id)
     if messages:
         return messages
@@ -285,7 +317,86 @@ def _period_yyyymm() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m")
 
 
+def _social_integration_config(conn, tenant_id: str, channel: str) -> dict[str, Any]:
+    row = conn.execute(
+        text(
+            """
+            SELECT config_json
+            FROM saas_integrations
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND channel = :channel
+              AND status = 'connected'
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """
+        ),
+        {"tenant_id": tenant_id, "channel": channel},
+    ).mappings().first()
+    config = dict((row or {}).get("config_json") or {})
+    return config if isinstance(config, dict) else {}
+
+
+def _social_page_token(config: dict[str, Any]) -> str:
+    for key in ("page_access_token", "facebook_page_access_token", "instagram_page_access_token", "access_token"):
+        token = decrypt_secret(str(config.get(key) or "").strip())
+        if token:
+            return token
+    return ""
+
+
+def _graph_profile_lookup(config: dict[str, Any], channel: str, external_contact_id: str) -> dict[str, Any]:
+    token = _social_page_token(config)
+    contact_id = _clean(external_contact_id, 180)
+    if not token or not contact_id:
+        return {}
+    version = _clean(config.get("graph_api_version") or "v24.0", 20)
+    fields = "first_name,last_name,name,profile_pic" if channel == "facebook" else "name,username,profile_pic"
+    url = f"https://graph.facebook.com/{version}/{urllib.parse.quote(contact_id, safe='')}?{urllib.parse.urlencode({'fields': fields, 'access_token': token})}"
+    try:
+        request = urllib.request.Request(url, headers={"Accept": "application/json", "User-Agent": "ScentraAI/1.0"})
+        with urllib.request.urlopen(request, timeout=8) as response:
+            data = json.loads(response.read().decode("utf-8") or "{}")
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, ValueError):
+        return {}
+    if not isinstance(data, dict) or data.get("error"):
+        return {}
+    display = _clean(data.get("name") or f"{data.get('first_name') or ''} {data.get('last_name') or ''}".strip() or data.get("username"), 180)
+    profile_pic = _clean(data.get("profile_pic") or data.get("profile_picture_url"), 1000)
+    return {
+        "display_name": display,
+        "profile_pic": profile_pic,
+        "profile_source": "meta_graph",
+        "profile_checked_at": datetime.now(timezone.utc).isoformat(),
+        "raw_profile": {key: data.get(key) for key in ("id", "name", "first_name", "last_name", "username") if data.get(key)},
+    }
+
+
+def _enrich_message_profile(conn, tenant_id: str, message: NormalizedMessage) -> NormalizedMessage:
+    if message.channel not in {"facebook", "instagram"}:
+        return message
+    if message.display_name and message.profile_json:
+        return message
+    profile = _graph_profile_lookup(_social_integration_config(conn, tenant_id, message.channel), message.channel, message.external_contact_id)
+    if not profile:
+        return message
+    display = message.display_name or _clean(profile.get("display_name"), 180)
+    profile_payload = {key: value for key, value in profile.items() if key != "display_name" and value}
+    return NormalizedMessage(
+        channel=message.channel,
+        external_contact_id=message.external_contact_id,
+        external_message_id=message.external_message_id,
+        direction=message.direction,
+        msg_type=message.msg_type,
+        text=message.text,
+        media_id=message.media_id,
+        mime_type=message.mime_type,
+        display_name=display,
+        profile_json={**(message.profile_json or {}), **profile_payload},
+    )
+
+
 def _upsert_message(conn, tenant_id: str, event_id: str, payload: dict[str, Any], message: NormalizedMessage) -> dict[str, Any]:
+    message = _enrich_message_profile(conn, tenant_id, message)
     conversation = conn.execute(
         text(
             """
@@ -331,6 +442,25 @@ def _upsert_message(conn, tenant_id: str, event_id: str, payload: dict[str, Any]
             "last_message_text": message.text,
         },
     ).mappings().first()
+    if message.profile_json:
+        conn.execute(
+            text(
+                """
+                UPDATE saas_conversations
+                SET profile_json = profile_json || CAST(:profile_json AS jsonb),
+                    display_name = COALESCE(NULLIF(display_name, ''), :display_name),
+                    updated_at = NOW()
+                WHERE id = CAST(:conversation_id AS uuid)
+                  AND tenant_id = CAST(:tenant_id AS uuid)
+                """
+            ),
+            {
+                "tenant_id": tenant_id,
+                "conversation_id": conversation["id"],
+                "display_name": message.display_name,
+                "profile_json": json.dumps(message.profile_json),
+            },
+        )
 
     result = conn.execute(
         text(
@@ -499,6 +629,7 @@ def process_due_webhook_events(limit: int = 25, tenant_id: str | None = None) ->
     trigger_errors = 0
     ai_replies_queued = 0
     ai_skipped = 0
+    comments_inserted = 0
 
     with db_session() as conn:
         filters = ["status = 'received'"]
@@ -530,14 +661,15 @@ def process_due_webhook_events(limit: int = 25, tenant_id: str | None = None) ->
             set_tenant_context(conn, tenant_id)
 
             try:
+                social_comments = normalize_social_comments(provider, payload, source_event_id)
                 messages = normalize_event(provider, payload, source_event_id)
                 statuses = normalize_status_events(provider, payload)
-                if not messages and not statuses:
+                if not messages and not statuses and not social_comments:
                     conn.execute(
                         text(
                             """
                             UPDATE saas_webhook_events
-                            SET status = 'ignored', processed_at = NOW(), error = 'no_messages_found'
+                            SET status = 'ignored', processed_at = NOW(), error = 'no_messages_or_comments_found'
                             WHERE id = CAST(:id AS uuid)
                             """
                         ),
@@ -547,7 +679,12 @@ def process_due_webhook_events(limit: int = 25, tenant_id: str | None = None) ->
                     continue
 
                 inserted_for_event = 0
+                comments_for_event = 0
                 updated_statuses_for_event = 0
+                for comment in social_comments:
+                    saved_comment = store_social_comment(conn, tenant_id, comment)
+                    if saved_comment.get("id"):
+                        comments_for_event += 1
                 for message in messages:
                     saved = _upsert_message(conn, tenant_id, source_event_id, payload, message)
                     if saved["inserted"]:
@@ -608,6 +745,7 @@ def process_due_webhook_events(limit: int = 25, tenant_id: str | None = None) ->
 
                 processed += 1
                 messages_inserted += inserted_for_event
+                comments_inserted += comments_for_event
                 statuses_updated += updated_statuses_for_event
             except Exception as exc:
                 conn.execute(
@@ -627,6 +765,7 @@ def process_due_webhook_events(limit: int = 25, tenant_id: str | None = None) ->
         "ignored": ignored,
         "errors": errors,
         "messages_inserted": messages_inserted,
+        "comments_inserted": comments_inserted,
         "statuses_updated": statuses_updated,
         "triggers_matched": triggers_matched,
         "trigger_errors": trigger_errors,

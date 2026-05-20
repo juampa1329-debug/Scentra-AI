@@ -19,6 +19,7 @@ from app_saas.integrations.router import _instagram_page_token, _integration_tok
 from app_saas.integrations.whatsapp_subscription import ensure_whatsapp_subscription_log_table
 from app_saas.knowledge.router import ensure_knowledge_tables
 from app_saas.shared.security import AuthContext, get_current_user, require_role
+from app_saas.social.service import ensure_social_tables
 from app_saas.workers.dispatch import process_due_outbound_messages
 from app_saas.workers.ingest import process_due_webhook_events
 
@@ -185,6 +186,74 @@ def _recent_subscription_checks(conn: Connection, tenant_id: str, limit: int = 5
     return [dict(row) for row in rows]
 
 
+def _social_meta_diagnostics(conn: Connection, tenant_id: str) -> dict[str, Any]:
+    ensure_social_tables(conn)
+    comments = _recent_rows(
+        conn,
+        """
+        SELECT c.channel, c.status, c.author_name, c.author_username, c.message, c.updated_at::text,
+               p.external_post_id, p.permalink_url
+        FROM social_comments c
+        LEFT JOIN social_posts p ON p.id = c.post_id
+        WHERE c.tenant_id = CAST(:tenant_id AS uuid)
+        ORDER BY c.updated_at DESC
+        LIMIT :limit
+        """,
+        tenant_id,
+        limit=5,
+    )
+    dms = _recent_rows(
+        conn,
+        """
+        SELECT channel, external_contact_id, display_name, last_message_text, updated_at::text
+        FROM saas_conversations
+        WHERE tenant_id = CAST(:tenant_id AS uuid)
+          AND channel IN ('facebook', 'instagram')
+        ORDER BY updated_at DESC
+        LIMIT :limit
+        """,
+        tenant_id,
+        limit=5,
+    ) if _table_exists(conn, "saas_conversations") else []
+    webhook_signal = conn.execute(
+        text(
+            """
+            SELECT
+              COUNT(*) FILTER (WHERE provider IN ('facebook','instagram') AND received_at >= NOW() - INTERVAL '24 hours')::int AS meta_events_24h,
+              COUNT(*) FILTER (WHERE provider IN ('facebook','instagram') AND payload_json::text ILIKE '%comment%' AND received_at >= NOW() - INTERVAL '24 hours')::int AS comment_events_24h,
+              COUNT(*) FILTER (WHERE provider IN ('facebook','instagram') AND payload_json::text ILIKE '%messaging%' AND received_at >= NOW() - INTERVAL '24 hours')::int AS dm_events_24h
+            FROM saas_webhook_events
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+            """
+        ),
+        {"tenant_id": tenant_id},
+    ).mappings().first() if _table_exists(conn, "saas_webhook_events") else {}
+    endpoints = _recent_rows(
+        conn,
+        """
+        SELECT provider, endpoint_key, is_active, signature_required, last_seen_at::text
+        FROM saas_webhook_endpoints
+        WHERE tenant_id = CAST(:tenant_id AS uuid)
+          AND provider IN ('facebook','instagram')
+        ORDER BY updated_at DESC
+        LIMIT :limit
+        """,
+        tenant_id,
+        limit=10,
+    ) if _table_exists(conn, "saas_webhook_endpoints") else []
+    return {
+        "webhook_signal": dict(webhook_signal or {}),
+        "endpoints": endpoints,
+        "last_comments": comments,
+        "last_dms": dms,
+        "recommendation": (
+            "Si no llegan comentarios o DMs, revisa permisos pages_messaging, pages_manage_metadata, pages_read_engagement, instagram_manage_messages y subscribed_apps de la Page."
+            if not comments and not dms
+            else ""
+        ),
+    }
+
+
 @router.get("/overview")
 def diagnostics_overview(ctx: AuthContext = Depends(get_current_user)):
     with db_session() as conn:
@@ -232,7 +301,7 @@ def diagnostics_overview(ctx: AuthContext = Depends(get_current_user)):
             config = data.get("config_json") if isinstance(data.get("config_json"), dict) else {}
             safe_config = _safe_config_for_output(config)
             channel = str(data.get("channel") or "").lower()
-            has_token = bool(_instagram_page_token(config)) if channel == "instagram" else bool(_integration_token(config))
+            has_token = bool(_instagram_page_token(config)) if channel in {"instagram", "facebook"} else bool(_integration_token(config))
             integration_rows.append(
                 {
                     "provider": data.get("provider"),
@@ -299,6 +368,7 @@ def diagnostics_overview(ctx: AuthContext = Depends(get_current_user)):
         ai_pending_counts = _status_counts(conn, "saas_ai_pending_replies", ctx.tenant_id)
         whatsapp_signal = _whatsapp_webhook_signal(conn, ctx.tenant_id)
         subscription_checks = _recent_subscription_checks(conn, ctx.tenant_id)
+        social_meta = _social_meta_diagnostics(conn, ctx.tenant_id)
     return {
         "tenant": dict(tenant or {}),
         "runtime": {
@@ -329,6 +399,7 @@ def diagnostics_overview(ctx: AuthContext = Depends(get_current_user)):
         "webhooks": {"endpoints": webhooks, "events": webhook_counts, "last_events": last_events},
         "whatsapp_symptoms": whatsapp_signal,
         "whatsapp_subscription_checks": subscription_checks,
+        "meta_social": social_meta,
         "queues": {
             "outbound": outbound_counts,
             "ai_pending": ai_pending_counts,

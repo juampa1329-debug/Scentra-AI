@@ -90,6 +90,18 @@ const defaultInstagramForm = () => ({
   app_id: "",
   graph_api_version: "v24.0",
 });
+const defaultFacebookForm = () => ({
+  provider: "meta",
+  channel: "facebook",
+  status: "connected",
+  dispatch_mode: "facebook_graph",
+  page_id: "",
+  page_name: "",
+  business_id: "",
+  business_name: "",
+  app_id: "",
+  graph_api_version: "v24.0",
+});
 
 function formatApiError(data, fallback) {
   const detail = data?.detail || data?.error;
@@ -477,6 +489,8 @@ function App() {
   const metaAppSecretRef = useRef(null);
   const instagramPageTokenRef = useRef(null);
   const instagramAppSecretRef = useRef(null);
+  const facebookPageTokenRef = useRef(null);
+  const facebookAppSecretRef = useRef(null);
   const composerFileRef = useRef(null);
   const knowledgeFileRef = useRef(null);
   const messagesPanelRef = useRef(null);
@@ -516,6 +530,7 @@ function App() {
   const [phoneSyncing, setPhoneSyncing] = useState(false);
   const [integrationForm, setIntegrationForm] = useState({ provider: "meta", channel: "whatsapp", status: "connected", dispatch_mode: "stub", phone_number_id: "", business_account_id: "", app_id: "", graph_api_version: "v24.0", access_token_env: "SCENTRA_META_ACCESS_TOKEN" });
   const [instagramForm, setInstagramForm] = useState(defaultInstagramForm);
+  const [facebookForm, setFacebookForm] = useState(defaultFacebookForm);
   const [integrationSecretModal, setIntegrationSecretModal] = useState(null);
   const [aiConfig, setAiConfig] = useState(defaultAiConfig);
   const [aiTesterOpen, setAiTesterOpen] = useState(false);
@@ -558,6 +573,12 @@ function App() {
   const [selectedConversation, setSelectedConversation] = useState(null);
   const [conversationMemory, setConversationMemory] = useState(null);
   const [messages, setMessages] = useState([]);
+  const [inboxMode, setInboxMode] = useState("dms");
+  const [socialComments, setSocialComments] = useState([]);
+  const [selectedComment, setSelectedComment] = useState(null);
+  const [commentReplyText, setCommentReplyText] = useState("");
+  const [commentAiSettings, setCommentAiSettings] = useState(null);
+  const [commentBusy, setCommentBusy] = useState("");
   const [replyText, setReplyText] = useState("");
   const [attachmentFile, setAttachmentFile] = useState(null);
   const [attachmentKind, setAttachmentKind] = useState("");
@@ -635,6 +656,7 @@ function App() {
   const availableInboxChannels = Array.from(new Set([
     ...integrations.filter((item) => item.status === "connected").map((item) => String(item.channel || "").toLowerCase()),
     ...conversations.map((item) => String(item.channel || "").toLowerCase()),
+    ...socialComments.map((item) => String(item.channel || "").toLowerCase()),
   ].filter(Boolean))).filter((channel) => !["billing"].includes(channel)).sort();
   const filteredConversations = conversations.filter((conversation) => {
     const channelOk = inboxChannelFilter === "all" || String(conversation.channel || "").toLowerCase() === inboxChannelFilter;
@@ -647,6 +669,19 @@ function App() {
       conversation.external_contact_id,
       conversation.last_message_text,
       conversation.tags,
+    ].some((value) => String(value || "").toLowerCase().includes(needle));
+  });
+  const filteredSocialComments = socialComments.filter((comment) => {
+    const channelOk = inboxChannelFilter === "all" || String(comment.channel || "").toLowerCase() === inboxChannelFilter;
+    const needle = inboxSearch.trim().toLowerCase();
+    if (!channelOk) return false;
+    if (!needle) return true;
+    return [
+      comment.author_name,
+      comment.author_username,
+      comment.author_external_id,
+      comment.message,
+      comment.post_caption,
     ].some((value) => String(value || "").toLowerCase().includes(needle));
   });
   const emojiNeedle = emojiSearch.trim().toLowerCase();
@@ -693,6 +728,11 @@ function App() {
     && String(item.channel || "").toLowerCase() === "instagram"
   ));
   const selectedInstagramConfig = selectedInstagramIntegration?.config_json || {};
+  const selectedFacebookIntegration = integrations.find((item) => (
+    String(item.provider || "").toLowerCase() === "meta"
+    && String(item.channel || "").toLowerCase() === "facebook"
+  ));
+  const selectedFacebookConfig = selectedFacebookIntegration?.config_json || {};
   const integrationToForm = (integration) => {
     const config = integration?.config_json || {};
     return {
@@ -721,6 +761,22 @@ function App() {
       business_name: config.business_name || "",
       instagram_business_account_id: config.instagram_business_account_id || config.ig_business_id || "",
       instagram_username: config.instagram_username || "",
+      app_id: config.app_id || "",
+      graph_api_version: config.graph_api_version || "v24.0",
+    };
+  };
+  const facebookIntegrationToForm = (integration) => {
+    const config = integration?.config_json || {};
+    return {
+      ...defaultFacebookForm(),
+      provider: integration?.provider || "meta",
+      channel: integration?.channel || "facebook",
+      status: integration?.status || "connected",
+      dispatch_mode: config.dispatch_mode || "facebook_graph",
+      page_id: config.page_id || config.facebook_page_id || "",
+      page_name: config.page_name || "",
+      business_id: config.business_id || "",
+      business_name: config.business_name || "",
       app_id: config.app_id || "",
       graph_api_version: config.graph_api_version || "v24.0",
     };
@@ -1026,15 +1082,35 @@ function App() {
     } catch (err) { showStatus(String(err.message || err), "error"); }
   };
 
+  const loadSocialComments = async (options = {}) => {
+    if (!accessToken) return;
+    try {
+      const [commentsData, settingsData] = await Promise.all([
+        apiCall("/saas/v1/social/comments?limit=100"),
+        apiCall("/saas/v1/social/comments/settings").catch(() => null),
+      ]);
+      const items = commentsData?.comments || [];
+      setSocialComments(items);
+      setCommentAiSettings(settingsData?.settings || null);
+      if (!options.keepSelection) setSelectedComment((prev) => prev || items[0] || null);
+      if (!items.length) setSelectedComment(null);
+    } catch (err) { showStatus(String(err.message || err), "error"); }
+  };
+
   const loadInbox = async () => {
     if (!accessToken) return;
     try {
-      const data = await apiCall("/saas/v1/conversations?limit=100");
+      const [data, commentsData] = await Promise.all([
+        apiCall("/saas/v1/conversations?limit=100"),
+        apiCall("/saas/v1/social/comments?limit=100").catch(() => ({ comments: [] })),
+      ]);
       const items = data?.conversations || [];
+      const comments = commentsData?.comments || [];
       const nextUnread = items.reduce((sum, item) => sum + Number(item.unread_count || 0), 0);
       if (lastUnreadTotalRef.current && nextUnread > lastUnreadTotalRef.current && notificationSoundEnabled) playIncomingSound();
       lastUnreadTotalRef.current = nextUnread;
       setConversations(items);
+      setSocialComments(comments);
       if (items.length && !selectedConversation) await loadMessages(items[0]);
       if (items.length && selectedConversation?.id) {
         const updatedSelected = items.find((item) => item.id === selectedConversation.id);
@@ -1109,6 +1185,12 @@ function App() {
       && !instagramForm.instagram_business_account_id
       && !instagramForm.app_id;
     if (metaInstagram && formIsEmptyInstagram) setInstagramForm(instagramIntegrationToForm(metaInstagram));
+  }, [integrations.length]);
+
+  useEffect(() => {
+    const metaFacebook = integrations.find((item) => item.provider === "meta" && item.channel === "facebook");
+    const formIsEmptyFacebook = !facebookForm.page_id && !facebookForm.app_id;
+    if (metaFacebook && formIsEmptyFacebook) setFacebookForm(facebookIntegrationToForm(metaFacebook));
   }, [integrations.length]);
 
   useEffect(() => {
@@ -1216,6 +1298,14 @@ function App() {
     showStatus("Instagram cargado para editar. Los secretos siguen ocultos y cifrados.", "ok");
   };
 
+  const editFacebookIntegration = (integration = selectedFacebookIntegration) => {
+    if (!integration) return;
+    setFacebookForm(facebookIntegrationToForm(integration));
+    if (facebookPageTokenRef.current) facebookPageTokenRef.current.value = "";
+    if (facebookAppSecretRef.current) facebookAppSecretRef.current.value = "";
+    showStatus("Facebook cargado para editar. Los secretos siguen ocultos y cifrados.", "ok");
+  };
+
   const saveInstagramManual = async (event) => {
     event.preventDefault();
     const isUpdatingExisting = Boolean(selectedInstagramIntegration);
@@ -1261,6 +1351,48 @@ function App() {
     } catch (err) { showStatus(String(err.message || err), "error"); }
   };
 
+  const saveFacebookManual = async (event) => {
+    event.preventDefault();
+    const isUpdatingExisting = Boolean(selectedFacebookIntegration);
+    const pageAccessToken = isUpdatingExisting ? "" : (facebookPageTokenRef.current?.value || "").trim();
+    const appSecret = isUpdatingExisting ? "" : (facebookAppSecretRef.current?.value || "").trim();
+    const pageId = String(facebookForm.page_id || "").trim();
+    const dispatchMode = String(facebookForm.dispatch_mode || "facebook_graph").trim();
+    if (dispatchMode !== "stub" && !pageId) return showStatus("Page ID requerido para Facebook Messenger real.", "error");
+    if (dispatchMode !== "stub" && !isUpdatingExisting && !pageAccessToken) return showStatus("Page Access Token requerido para conectar Facebook Messenger.", "error");
+    try {
+      const configJson = {
+        dispatch_mode: dispatchMode,
+        page_id: pageId,
+        page_name: String(facebookForm.page_name || "").trim(),
+        business_id: String(facebookForm.business_id || "").trim(),
+        business_name: String(facebookForm.business_name || "").trim(),
+        app_id: String(facebookForm.app_id || "").trim(),
+        graph_api_version: String(facebookForm.graph_api_version || "v24.0").trim(),
+        webhook_callback_url: `${API_BASE}/saas/v1/webhooks/facebook/{endpoint_key}`,
+        subscribed_fields: ["messages", "messaging_postbacks", "feed"],
+      };
+      if (pageAccessToken) configJson.page_access_token = pageAccessToken;
+      if (appSecret) configJson.app_secret = appSecret;
+      await apiCall("/saas/v1/integrations", {
+        method: "POST",
+        body: JSON.stringify({
+          provider: "meta",
+          channel: "facebook",
+          status: facebookForm.status || "connected",
+          secret_ref: pageAccessToken ? "tenant:meta:facebook" : (selectedFacebookIntegration?.secret_ref || "tenant:meta:facebook"),
+          config_json: configJson,
+        }),
+      });
+      if (facebookPageTokenRef.current) facebookPageTokenRef.current.value = "";
+      if (facebookAppSecretRef.current) facebookAppSecretRef.current.value = "";
+      showStatus("Facebook Messenger guardado. Crea el endpoint Facebook y suscribe messages/feed en Meta Developers.", "ok");
+      await loadIntegrations();
+      await loadBilling();
+      await loadDiagnostics(true);
+    } catch (err) { showStatus(String(err.message || err), "error"); }
+  };
+
   const createInstagramWebhookEndpoint = async () => {
     setWebhookProvider("instagram");
     try {
@@ -1271,10 +1403,21 @@ function App() {
     } catch (err) { showStatus(String(err.message || err), "error"); }
   };
 
+  const createFacebookWebhookEndpoint = async () => {
+    setWebhookProvider("facebook");
+    try {
+      const data = await apiCall("/saas/v1/webhooks/endpoints", { method: "POST", body: JSON.stringify({ provider: "facebook", signature_required: false }) });
+      setLastWebhookSecret(data);
+      showStatus("Endpoint Facebook creado. Copia Callback URL y Verify token en Meta Developers.", "ok");
+      await loadWebhooks();
+    } catch (err) { showStatus(String(err.message || err), "error"); }
+  };
+
   const openIntegrationSecretModal = (integration = selectedIntegrationForForm) => {
     if (!integration) return showStatus("Primero guarda la integracion general.", "error");
     const config = integration.config_json || {};
-    const isInstagram = String(integration.channel || "").toLowerCase() === "instagram";
+    const channel = String(integration.channel || "").toLowerCase();
+    const isSocialMeta = ["instagram", "facebook"].includes(channel);
     setIntegrationSecretModal({
       provider: integration.provider,
       channel: integration.channel,
@@ -1292,9 +1435,9 @@ function App() {
       app_id: config.app_id || "",
       graph_api_version: config.graph_api_version || "v24.0",
       access_token_env: config.access_token_env || "SCENTRA_META_ACCESS_TOKEN",
-      token_hint: isInstagram ? (config.page_access_token_hint || config.access_token_hint || "") : (config.access_token_hint || ""),
+      token_hint: isSocialMeta ? (config.page_access_token_hint || config.access_token_hint || "") : (config.access_token_hint || ""),
       app_secret_hint: config.app_secret_hint || "",
-      has_access_token: isInstagram ? Boolean(config.has_page_access_token || config.has_access_token) : Boolean(config.has_access_token),
+      has_access_token: isSocialMeta ? Boolean(config.has_page_access_token || config.has_access_token) : Boolean(config.has_access_token),
       has_app_secret: Boolean(config.has_app_secret),
       access_token: "",
       app_secret: "",
@@ -1310,19 +1453,20 @@ function App() {
     const currentPassword = String(integrationSecretModal.current_password || "").trim();
     if (!accessToken && !appSecret) return showStatus("Pega al menos un token o app secret para actualizar.", "error");
     if (!currentPassword) return showStatus("Confirma tu contrasena para actualizar secretos.", "error");
-    const isInstagram = String(integrationSecretModal.channel || "").toLowerCase() === "instagram";
-    const configJson = isInstagram ? {
-      dispatch_mode: integrationSecretModal.dispatch_mode || "instagram_graph",
+    const secretChannel = String(integrationSecretModal.channel || "").toLowerCase();
+    const isSocialMeta = ["instagram", "facebook"].includes(secretChannel);
+    const configJson = isSocialMeta ? {
+      dispatch_mode: integrationSecretModal.dispatch_mode || (secretChannel === "facebook" ? "facebook_graph" : "instagram_graph"),
       page_id: integrationSecretModal.page_id || "",
       page_name: integrationSecretModal.page_name || "",
       business_id: integrationSecretModal.business_id || "",
       business_name: integrationSecretModal.business_name || "",
-      instagram_business_account_id: integrationSecretModal.instagram_business_account_id || "",
-      instagram_username: integrationSecretModal.instagram_username || "",
+      instagram_business_account_id: secretChannel === "instagram" ? (integrationSecretModal.instagram_business_account_id || "") : "",
+      instagram_username: secretChannel === "instagram" ? (integrationSecretModal.instagram_username || "") : "",
       app_id: integrationSecretModal.app_id || "",
       graph_api_version: integrationSecretModal.graph_api_version || "v24.0",
-      webhook_callback_url: `${API_BASE}/saas/v1/webhooks/instagram/{endpoint_key}`,
-      subscribed_fields: ["messages", "messaging_postbacks", "comments", "mentions"],
+      webhook_callback_url: `${API_BASE}/saas/v1/webhooks/${secretChannel}/{endpoint_key}`,
+      subscribed_fields: secretChannel === "facebook" ? ["messages", "messaging_postbacks", "feed"] : ["messages", "messaging_postbacks", "comments", "mentions"],
     } : {
       dispatch_mode: integrationSecretModal.dispatch_mode || "stub",
       phone_number_id: integrationSecretModal.phone_number_id || "",
@@ -1332,7 +1476,7 @@ function App() {
       access_token_env: integrationSecretModal.access_token_env || "SCENTRA_META_ACCESS_TOKEN",
     };
     if (accessToken) {
-      if (isInstagram) configJson.page_access_token = accessToken;
+      if (isSocialMeta) configJson.page_access_token = accessToken;
       else configJson.access_token = accessToken;
     }
     if (appSecret) configJson.app_secret = appSecret;
@@ -1343,7 +1487,7 @@ function App() {
           provider: integrationSecretModal.provider,
           channel: integrationSecretModal.channel,
           status: integrationSecretModal.status || "connected",
-          secret_ref: accessToken ? (isInstagram ? "tenant:meta:instagram" : "tenant:meta:whatsapp") : integrationSecretModal.secret_ref,
+          secret_ref: accessToken ? (isSocialMeta ? `tenant:meta:${secretChannel}` : "tenant:meta:whatsapp") : integrationSecretModal.secret_ref,
           config_json: configJson,
           current_password: currentPassword,
         }),
@@ -1799,6 +1943,56 @@ function App() {
       showStatus(String(err.message || err), "error");
     } finally {
       setComposerSending(false);
+    }
+  };
+  const generateCommentAiReply = async (comment = selectedComment) => {
+    if (!comment?.id) return;
+    setCommentBusy(`ai-${comment.id}`);
+    try {
+      const data = await apiCall(`/saas/v1/social/comments/${encodeURIComponent(comment.id)}/generate-ai`, { method: "POST" });
+      const suggestion = data?.suggestion || "";
+      setCommentReplyText(suggestion);
+      setSelectedComment((prev) => prev?.id === comment.id ? { ...prev, ai_suggestion: suggestion, ai_status: "suggested" } : prev);
+      setSocialComments((prev) => prev.map((item) => item.id === comment.id ? { ...item, ai_suggestion: suggestion, ai_status: "suggested" } : item));
+      showStatus("Respuesta sugerida por IA", "ok");
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    } finally {
+      setCommentBusy("");
+    }
+  };
+  const sendCommentReply = async (event) => {
+    event?.preventDefault?.();
+    if (!selectedComment?.id || !commentReplyText.trim()) return;
+    setCommentBusy(`reply-${selectedComment.id}`);
+    try {
+      await apiCall(`/saas/v1/social/comments/${encodeURIComponent(selectedComment.id)}/reply`, {
+        method: "POST",
+        body: JSON.stringify({ message: commentReplyText.trim() }),
+      });
+      showStatus("Comentario respondido", "ok");
+      setCommentReplyText("");
+      await loadSocialComments({ keepSelection: true });
+      setSelectedComment((prev) => prev ? { ...prev, status: "replied", last_reply_text: commentReplyText.trim() } : prev);
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    } finally {
+      setCommentBusy("");
+    }
+  };
+  const saveCommentAiSettings = async () => {
+    setCommentBusy("settings");
+    try {
+      const data = await apiCall("/saas/v1/social/comments/settings", {
+        method: "PATCH",
+        body: JSON.stringify(commentAiSettings || {}),
+      });
+      setCommentAiSettings(data?.settings || null);
+      showStatus("Entrenamiento de comentarios guardado", "ok");
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    } finally {
+      setCommentBusy("");
     }
   };
   const changePlanDev = async (planCode) => { try { const data = await apiCall("/saas/v1/billing/dev/change-plan", { method: "POST", body: JSON.stringify({ plan_code: planCode }) }); setBillingOverview(data); showStatus(`Plan actualizado a ${planCode}`, "ok"); await loadSession(); } catch (err) { showStatus(String(err.message || err), "error"); } };
@@ -2332,7 +2526,11 @@ function App() {
         ) : activeView === "inbox" ? (
           <section className={`inbox-grid ${crmPanelOpen ? "crm-open" : "crm-closed"}`}>
             <div className="panel glass-card inbox-list">
-              <div className="panel-head inbox-list-head"><h2>Inbox</h2><span>{unreadTotal ? `${number(unreadTotal)} sin leer` : `${filteredConversations.length} chats`}</span></div>
+              <div className="panel-head inbox-list-head"><h2>Inbox</h2><span>{inboxMode === "comments" ? `${filteredSocialComments.length} comentarios` : unreadTotal ? `${number(unreadTotal)} sin leer` : `${filteredConversations.length} chats`}</span></div>
+              <div className="inbox-mode-tabs">
+                <button type="button" className={inboxMode === "dms" ? "active" : ""} onClick={() => setInboxMode("dms")}>Mensajes</button>
+                <button type="button" className={inboxMode === "comments" ? "active" : ""} onClick={() => { setInboxMode("comments"); loadSocialComments({ keepSelection: true }); }}>Comentarios</button>
+              </div>
               <div className="inbox-filters">
                 <button type="button" className={inboxChannelFilter === "all" ? "active" : ""} onClick={() => setInboxChannelFilter("all")}>Todos</button>
                 {availableInboxChannels.map((channel) => <button type="button" key={channel} className={inboxChannelFilter === channel ? "active" : ""} onClick={() => setInboxChannelFilter(channel)}>{channelLabel(channel)}</button>)}
@@ -2340,17 +2538,64 @@ function App() {
                 <button type="button" onClick={() => { setInboxSearch(""); setInboxChannelFilter("all"); }}>Limpiar</button>
               </div>
               <div className="conversation-list">
-                {filteredConversations.map((conversation) => (
+                {inboxMode === "dms" ? filteredConversations.map((conversation) => (
                   <button type="button" className={`conversation-item ${selectedConversation?.id === conversation.id ? "active" : ""}`} key={conversation.id} onClick={() => loadMessages(conversation)}>
                     <span className="conversation-title"><strong>{conversation.display_name || conversation.phone || conversation.external_contact_id}</strong>{Number(conversation.unread_count || 0) > 0 ? <em>{number(conversation.unread_count)}</em> : null}</span>
                     <span className="conversation-meta"><b>{channelLabel(conversation.channel)}</b>{Number(conversation.unread_count || 0) > 0 ? <small>Sin leer</small> : <small>Leido</small>}</span>
                     <small>{conversation.last_message_text || "-"}</small>
                   </button>
+                )) : filteredSocialComments.map((comment) => (
+                  <button type="button" className={`conversation-item comment-item ${selectedComment?.id === comment.id ? "active" : ""}`} key={comment.id} onClick={() => { setSelectedComment(comment); setCommentReplyText(comment.ai_suggestion || ""); }}>
+                    <span className="conversation-title"><strong>{comment.author_name || comment.author_username || comment.author_external_id || "Comentario"}</strong>{comment.status === "open" ? <em>1</em> : null}</span>
+                    <span className="conversation-meta"><b>{channelLabel(comment.channel)}</b><small>{comment.status === "replied" ? "Respondido" : "Pendiente"}</small></span>
+                    <small>{comment.message || "-"}</small>
+                  </button>
                 ))}
-                {filteredConversations.length === 0 ? <div className="empty">Sin conversaciones para este filtro.</div> : null}
+                {inboxMode === "dms" && filteredConversations.length === 0 ? <div className="empty">Sin conversaciones para este filtro.</div> : null}
+                {inboxMode === "comments" && filteredSocialComments.length === 0 ? <div className="empty">Sin comentarios para este filtro.</div> : null}
               </div>
             </div>
             <div className="panel glass-card inbox-thread">
+              {inboxMode === "comments" ? (
+                <>
+                  <div className="panel-head inbox-thread-head">
+                    <div className="thread-title">
+                      <span className="thread-avatar">{selectedComment ? String(selectedComment.author_name || selectedComment.author_username || "CM").slice(0, 2).toUpperCase() : "CM"}</span>
+                      <div>
+                        <h2>{selectedComment ? selectedComment.author_name || selectedComment.author_username || "Comentario" : "Comentarios"}</h2>
+                        <span>{selectedComment ? `${channelLabel(selectedComment.channel)} / ${selectedComment.status || "open"}` : "Selecciona un comentario"}</span>
+                      </div>
+                    </div>
+                    <div className="thread-actions"><button type="button" onClick={() => loadSocialComments({ keepSelection: true })}>Refrescar</button></div>
+                  </div>
+                  {selectedComment ? (
+                    <div className="comment-detail">
+                      <article className="social-post-card">
+                        {selectedComment.media_url ? <img src={selectedComment.media_url} alt="Publicacion" /> : null}
+                        <div>
+                          <span>Publicacion asociada</span>
+                          <strong>{selectedComment.post_caption || "Sin caption disponible"}</strong>
+                          {selectedComment.permalink_url ? <a href={selectedComment.permalink_url} target="_blank" rel="noreferrer">Ver publicacion</a> : null}
+                        </div>
+                      </article>
+                      <article className="social-comment-card">
+                        <span>{selectedComment.author_name || selectedComment.author_username || selectedComment.author_external_id}</span>
+                        <p>{selectedComment.message}</p>
+                        <small>{compactDateTimeLabel(selectedComment.external_created_time || selectedComment.created_at)}</small>
+                      </article>
+                      {selectedComment.ai_suggestion ? <div className="ai-suggestion-card"><strong>Sugerencia IA</strong><p>{selectedComment.ai_suggestion}</p><button type="button" onClick={() => setCommentReplyText(selectedComment.ai_suggestion)}>Usar sugerencia</button></div> : null}
+                      <form className="comment-reply-box" onSubmit={sendCommentReply}>
+                        <textarea rows={4} value={commentReplyText} onChange={(event) => setCommentReplyText(event.target.value)} placeholder="Responder comentario..." />
+                        <div className="row-actions">
+                          <button type="button" onClick={() => generateCommentAiReply(selectedComment)} disabled={Boolean(commentBusy)}>{commentBusy === `ai-${selectedComment.id}` ? "Generando..." : "Generar con IA"}</button>
+                          <button type="submit" className="primary" disabled={Boolean(commentBusy) || !commentReplyText.trim()}>{commentBusy === `reply-${selectedComment.id}` ? "Enviando..." : "Responder"}</button>
+                        </div>
+                      </form>
+                    </div>
+                  ) : <div className="empty">Selecciona un comentario para responderlo.</div>}
+                </>
+              ) : (
+              <>
               <div className="panel-head inbox-thread-head">
                 <div className="thread-title">
                   <span className="thread-avatar">{selectedConversation ? String(selectedConversation.display_name || selectedConversation.phone || selectedConversation.external_contact_id || "?").slice(0, 2).toUpperCase() : "SC"}</span>
@@ -2435,8 +2680,19 @@ function App() {
                   ) : null}
                 </form>
               ) : null}
+              </>
+              )}
             </div>
-            {crmPanelOpen ? (
+            {inboxMode === "comments" ? (
+              <aside className="panel glass-card inbox-crm comment-ai-settings">
+                <div className="panel-head"><h2>IA Comentarios</h2><button type="button" onClick={() => loadSocialComments({ keepSelection: true })}>↻</button></div>
+                <label className="check-row"><input type="checkbox" checked={Boolean(commentAiSettings?.enabled ?? true)} onChange={(event) => setCommentAiSettings((prev) => ({ ...(prev || {}), enabled: event.target.checked }))} /> Activar IA para comentarios</label>
+                <label className="check-row"><input type="checkbox" checked={Boolean(commentAiSettings?.auto_generate)} onChange={(event) => setCommentAiSettings((prev) => ({ ...(prev || {}), auto_generate: event.target.checked }))} /> Generar sugerencias automaticas</label>
+                <label>Tono<input value={commentAiSettings?.tone || ""} onChange={(event) => setCommentAiSettings((prev) => ({ ...(prev || {}), tone: event.target.value }))} placeholder="calido, breve y util" /></label>
+                <label>Entrenamiento<textarea rows={8} value={commentAiSettings?.instructions || ""} onChange={(event) => setCommentAiSettings((prev) => ({ ...(prev || {}), instructions: event.target.value }))} placeholder="Como debe responder la IA ante comentarios publicos..." /></label>
+                <button type="button" className="primary" onClick={saveCommentAiSettings} disabled={commentBusy === "settings"}>{commentBusy === "settings" ? "Guardando..." : "Guardar entrenamiento"}</button>
+              </aside>
+            ) : crmPanelOpen ? (
               <aside className="panel glass-card inbox-crm">
                 <div className="panel-head"><h2>CRM - Cliente</h2><button type="button" onClick={() => setCrmPanelOpen(false)}>×</button></div>
                 {selectedConversation ? (
@@ -2865,6 +3121,110 @@ function App() {
                   ) : null}
                 </article>
 
+                <article className="panel glass-card integration-card">
+                  <div className="panel-head">
+                    <div>
+                      <h2>Facebook Messenger</h2>
+                      <span>DMs, comentarios feed y Page webhooks</span>
+                    </div>
+                    <button type="button" onClick={() => { setSettingsTab("debug"); loadDiagnostics(); }}>Ver diagnostico</button>
+                  </div>
+                  <p className="soft-copy">Facebook Messenger usa Page ID y Page Access Token. Los DMs entran al Inbox como conversaciones y los comentarios de publicaciones entran a la pestaña Comentarios.</p>
+                  {selectedFacebookIntegration ? (
+                    <div className="current-integration-strip">
+                      <div>
+                        <strong>Facebook actual: {selectedFacebookConfig.page_name || "pagina conectada"}</strong>
+                        <span>{selectedFacebookIntegration.status} / {selectedFacebookConfig.dispatch_mode || "facebook_graph"} - Page {selectedFacebookConfig.page_id || "-"}</span>
+                      </div>
+                      <div className="row-actions">
+                        <button type="button" className="primary" onClick={() => editFacebookIntegration(selectedFacebookIntegration)}>Cargar datos para editar</button>
+                        <button type="button" onClick={() => openIntegrationSecretModal(selectedFacebookIntegration)}>Actualizar token</button>
+                      </div>
+                    </div>
+                  ) : null}
+                  <form className="meta-grid instagram-manual-grid" onSubmit={saveFacebookManual}>
+                    <label>Estado
+                      <select value={facebookForm.status} onChange={(event) => setFacebookForm((prev) => ({ ...prev, status: event.target.value }))}>
+                        <option value="connected">Connected</option>
+                        <option value="paused">Paused</option>
+                        <option value="disconnected">Disconnected</option>
+                      </select>
+                    </label>
+                    <label>Modo envio
+                      <select value={facebookForm.dispatch_mode} onChange={(event) => setFacebookForm((prev) => ({ ...prev, dispatch_mode: event.target.value }))}>
+                        <option value="facebook_graph">Facebook Graph real</option>
+                        <option value="stub">Stub local</option>
+                      </select>
+                    </label>
+                    <label>Page ID
+                      <input placeholder="Facebook Page ID" value={facebookForm.page_id} onChange={(event) => setFacebookForm((prev) => ({ ...prev, page_id: event.target.value }))} />
+                    </label>
+                    <label>Nombre pagina
+                      <input placeholder="Ej: LuminArt Makeup" value={facebookForm.page_name} onChange={(event) => setFacebookForm((prev) => ({ ...prev, page_name: event.target.value }))} />
+                    </label>
+                    <label>Business Portfolio ID
+                      <input placeholder="Opcional" value={facebookForm.business_id} onChange={(event) => setFacebookForm((prev) => ({ ...prev, business_id: event.target.value }))} />
+                    </label>
+                    <label>Meta App ID
+                      <input placeholder="ID de la app del cliente" value={facebookForm.app_id} onChange={(event) => setFacebookForm((prev) => ({ ...prev, app_id: event.target.value }))} />
+                    </label>
+                    <label>Graph API
+                      <input placeholder="v24.0" value={facebookForm.graph_api_version} onChange={(event) => setFacebookForm((prev) => ({ ...prev, graph_api_version: event.target.value }))} />
+                    </label>
+                    {!selectedFacebookIntegration ? (
+                      <>
+                        <label className="token-field">Page Access Token
+                          <input ref={facebookPageTokenRef} type="password" placeholder="Token largo/permanente de la pagina" autoComplete="off" spellCheck={false} />
+                        </label>
+                        <label className="token-field">Meta App Secret
+                          <input ref={facebookAppSecretRef} type="password" placeholder="Opcional: valida x-hub-signature-256" autoComplete="off" spellCheck={false} />
+                        </label>
+                      </>
+                    ) : (
+                      <div className="secret-summary token-field">
+                        <div>
+                          <strong>Secretos Facebook protegidos</strong>
+                          <span>Page token: {selectedFacebookConfig.has_page_access_token ? `******** ${selectedFacebookConfig.page_access_token_hint || ""}` : "sin token"} / App secret: {selectedFacebookConfig.has_app_secret ? `******** ${selectedFacebookConfig.app_secret_hint || ""}` : "sin app secret"}</span>
+                        </div>
+                        <button type="button" onClick={() => openIntegrationSecretModal(selectedFacebookIntegration)}>Actualizar secretos</button>
+                      </div>
+                    )}
+                    <button type="submit" className="primary">Guardar Facebook</button>
+                  </form>
+                  <div className="integration-cards">
+                    {selectedFacebookIntegration ? (
+                      <div className="integration-card-row instagram-row">
+                        <div>
+                          <strong>meta / facebook</strong>
+                          <span>{selectedFacebookIntegration.status} / {selectedFacebookConfig.dispatch_mode || "facebook_graph"}</span>
+                        </div>
+                        <div><span>Page ID</span><strong>{selectedFacebookConfig.page_id || "-"}</strong></div>
+                        <div><span>Meta App ID</span><strong>{selectedFacebookConfig.app_id || "-"}</strong></div>
+                        <div className="integration-marks"><mark>{selectedFacebookConfig.has_page_access_token ? `Page token ${selectedFacebookConfig.page_access_token_hint || "guardado"}` : "Sin Page token"}</mark><mark>{selectedFacebookConfig.has_app_secret ? `App secret ${selectedFacebookConfig.app_secret_hint || "guardado"}` : "Sin app secret"}</mark></div>
+                        <div className="row-actions">
+                          <button type="button" onClick={() => editFacebookIntegration(selectedFacebookIntegration)}>Editar</button>
+                          <button type="button" onClick={() => openIntegrationSecretModal(selectedFacebookIntegration)}>Actualizar token</button>
+                        </div>
+                      </div>
+                    ) : <div className="empty">Sin integracion Facebook Messenger configurada.</div>}
+                  </div>
+                  <div className="manual-mode-box">
+                    <div>
+                      <strong>Webhook Facebook para app propia</strong>
+                      <span>Crea un endpoint por tenant y copia Callback URL + Verify token en Meta Developers. Suscribe eventos: messages, messaging_postbacks y feed.</span>
+                    </div>
+                    <button type="button" onClick={createFacebookWebhookEndpoint}>Crear endpoint Facebook</button>
+                  </div>
+                  {lastWebhookSecret?.provider === "facebook" ? (
+                    <div className="secret-box">
+                      <strong>Valores Facebook visibles una sola vez</strong>
+                      <span>Callback URL</span>
+                      <div className="secret-value-row"><code>{fullWebhookUrl(lastWebhookSecret.url_path)}</code><button type="button" onClick={() => copyText(fullWebhookUrl(lastWebhookSecret.url_path), "Callback Facebook")}>Copiar URL</button></div>
+                      {lastWebhookSecret.verify_token_once ? <><span>Verify token</span><div className="secret-value-row"><code>{lastWebhookSecret.verify_token_once}</code><button type="button" onClick={() => copyText(lastWebhookSecret.verify_token_once, "Verify token Facebook")}>Copiar token</button></div></> : null}
+                    </div>
+                  ) : null}
+                </article>
+
                 <article className="panel glass-card webhook-panel">
                   <div className="panel-head">
                     <div>
@@ -3012,11 +3372,28 @@ function App() {
                 <div className="panel-head"><h2>Integraciones</h2><span>configuracion segura</span></div>
                 <div className="debug-table">{(diagnostics?.integrations || []).map((item, idx) => {
                   const isIg = String(item.channel || "").toLowerCase() === "instagram";
+                  const isFacebook = String(item.channel || "").toLowerCase() === "facebook";
                   const assetLine = isIg
                     ? `Page: ${item.page_id || "-"} / IG Business: ${item.instagram_business_account_id || "-"} / App: ${item.app_id || "-"}`
+                    : isFacebook
+                      ? `Page: ${item.page_id || "-"} / App: ${item.app_id || "-"}`
                     : `Phone: ${item.phone_number_id || "-"} / WABA: ${item.business_account_id || "-"} / App: ${item.app_id || "-"}`;
                   return <div className="debug-row" key={`${item.provider}-${item.channel}-${idx}`}><strong>{item.provider} / {item.channel}</strong><span>{item.status} / {item.dispatch_mode || "-"}</span><small>{assetLine} / Token: {item.has_token ? "guardado" : "faltante"}</small></div>;
                 })}{!diagnostics?.integrations?.length ? <div className="empty">Sin integraciones registradas.</div> : null}</div>
+              </article>
+              <article className="panel glass-card">
+                <div className="panel-head"><h2>Meta Social</h2><span>Facebook / Instagram</span></div>
+                <div className="queue-grid">
+                  <div><strong>Eventos Meta 24h</strong><span>{number(diagnostics?.meta_social?.webhook_signal?.meta_events_24h || 0)}</span></div>
+                  <div><strong>Comentarios 24h</strong><span>{number(diagnostics?.meta_social?.webhook_signal?.comment_events_24h || 0)}</span></div>
+                  <div><strong>DMs 24h</strong><span>{number(diagnostics?.meta_social?.webhook_signal?.dm_events_24h || 0)}</span></div>
+                </div>
+                {diagnostics?.meta_social?.recommendation ? <div className="debug-result warn"><strong>Revision recomendada</strong><span>{diagnostics.meta_social.recommendation}</span></div> : null}
+                <div className="debug-table">
+                  {(diagnostics?.meta_social?.last_comments || []).map((item, idx) => <div className="debug-row" key={`comment-${idx}`}><strong>{item.channel} / comentario</strong><span>{item.author_name || item.author_username || "sin nombre"}</span><small>{compactDateTimeLabel(item.updated_at)} - {item.message || "-"}</small></div>)}
+                  {(diagnostics?.meta_social?.last_dms || []).map((item, idx) => <div className="debug-row" key={`dm-${idx}`}><strong>{item.channel} / DM</strong><span>{item.display_name || item.external_contact_id || "sin nombre"}</span><small>{compactDateTimeLabel(item.updated_at)} - {item.last_message_text || "-"}</small></div>)}
+                  {!(diagnostics?.meta_social?.last_comments || []).length && !(diagnostics?.meta_social?.last_dms || []).length ? <div className="empty">Aun no hay comentarios ni DMs sociales registrados para este tenant.</div> : null}
+                </div>
               </article>
               <article className="panel glass-card">
                 <div className="panel-head"><h2>Colas y errores</h2><span>webhooks / IA / outbound</span></div>
@@ -3204,10 +3581,10 @@ function App() {
               <p className="soft-copy">El valor guardado no se puede revelar. Para corregirlo, pega uno nuevo y confirma tu contrasena. El backend reemplaza el secreto cifrado y el navegador solo recibe una pista.</p>
               <div className="secret-box muted-secret">
                 <strong>Estado actual</strong>
-                <span>{String(integrationSecretModal.channel || "").toLowerCase() === "instagram" ? "Page Access Token" : "Token Meta"}: {integrationSecretModal.has_access_token ? `******** ${integrationSecretModal.token_hint || ""}` : "sin token guardado"}</span>
+                <span>{["instagram","facebook"].includes(String(integrationSecretModal.channel || "").toLowerCase()) ? "Page Access Token" : "Token Meta"}: {integrationSecretModal.has_access_token ? `******** ${integrationSecretModal.token_hint || ""}` : "sin token guardado"}</span>
                 <span>App Secret: {integrationSecretModal.has_app_secret ? `******** ${integrationSecretModal.app_secret_hint || ""}` : "sin app secret guardado"}</span>
               </div>
-              <label>{String(integrationSecretModal.channel || "").toLowerCase() === "instagram" ? "Nuevo Page Access Token" : "Nuevo token permanente de Meta"}<input type="password" autoFocus placeholder="Pegar token completo solo si vas a reemplazarlo" autoComplete="off" spellCheck={false} value={integrationSecretModal.access_token || ""} onChange={(event) => setIntegrationSecretModal((prev) => ({ ...(prev || {}), access_token: event.target.value }))} /></label>
+              <label>{["instagram","facebook"].includes(String(integrationSecretModal.channel || "").toLowerCase()) ? "Nuevo Page Access Token" : "Nuevo token permanente de Meta"}<input type="password" autoFocus placeholder="Pegar token completo solo si vas a reemplazarlo" autoComplete="off" spellCheck={false} value={integrationSecretModal.access_token || ""} onChange={(event) => setIntegrationSecretModal((prev) => ({ ...(prev || {}), access_token: event.target.value }))} /></label>
               <label>Nuevo Meta App Secret<input type="password" placeholder="Opcional: pegar app secret nuevo" autoComplete="off" spellCheck={false} value={integrationSecretModal.app_secret || ""} onChange={(event) => setIntegrationSecretModal((prev) => ({ ...(prev || {}), app_secret: event.target.value }))} /></label>
               <label>Tu contrasena<input type="password" placeholder="Confirma tu contrasena para guardar" autoComplete="current-password" value={integrationSecretModal.current_password || ""} onChange={(event) => setIntegrationSecretModal((prev) => ({ ...(prev || {}), current_password: event.target.value }))} /></label>
               <div className="panel-actions"><button type="submit" className="primary">Guardar cifrado</button><button type="button" onClick={() => setIntegrationSecretModal(null)}>Cancelar</button></div>

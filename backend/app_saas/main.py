@@ -27,6 +27,7 @@ from app_saas.integrations.router import router as integrations_router
 from app_saas.internal.router import router as internal_router
 from app_saas.knowledge.router import router as knowledge_router
 from app_saas.media.router import router as media_router
+from app_saas.social.router import router as social_router
 from app_saas.tenants.router import router as tenants_router
 from app_saas.workers.dispatch import process_due_outbound_messages
 from app_saas.workers.ingest import process_due_webhook_events
@@ -159,5 +160,6 @@ app.include_router(knowledge_router, prefix="/saas/v1")
 app.include_router(diagnostics_router, prefix="/saas/v1")
 app.include_router(ai_agent_router, prefix="/saas/v1")
 app.include_router(media_router, prefix="/saas/v1")
+app.include_router(social_router, prefix="/saas/v1")
 app.include_router(billing_router, prefix="/saas/v1")
 app.include_router(webhooks_router, prefix="/saas/v1")
