@@ -1498,6 +1498,31 @@ function App() {
     } catch (err) { showStatus(String(err.message || err), "error"); }
   };
 
+  const deleteIntegration = async (integration) => {
+    if (!integration?.id) return;
+    const channel = String(integration.channel || "canal").toUpperCase();
+    const ok = window.confirm(`Eliminar la integracion ${channel}? Scentra dejara de usar este canal y desactivara su endpoint webhook local.`);
+    if (!ok) return;
+    try {
+      await apiCall(`/saas/v1/integrations/${encodeURIComponent(integration.id)}`, { method: "DELETE" });
+      const cleanChannel = String(integration.channel || "").toLowerCase();
+      if (cleanChannel === "whatsapp") {
+        setIntegrationForm({ provider: "meta", channel: "whatsapp", status: "connected", dispatch_mode: "stub", phone_number_id: "", business_account_id: "", app_id: "", graph_api_version: "v24.0", access_token_env: "SCENTRA_META_ACCESS_TOKEN" });
+        setWhatsappPhones([]);
+      }
+      if (cleanChannel === "instagram") {
+        setInstagramForm(defaultInstagramForm());
+        setInstagramDiagnostics(null);
+      }
+      if (cleanChannel === "facebook") setFacebookForm(defaultFacebookForm());
+      setLastWebhookSecret(null);
+      showStatus(`Integracion ${channel} eliminada`, "ok");
+      await Promise.all([loadIntegrations(), loadBilling(), loadWebhooks(), loadInbox(), loadDiagnostics(true)]);
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    }
+  };
+
   const syncWhatsappPhones = async () => {
     setPhoneSyncing(true);
     try {
@@ -2860,6 +2885,7 @@ function App() {
                       <div className="row-actions">
                         <button type="button" className="primary" onClick={() => editIntegration(selectedIntegrationForForm)}>Cargar datos para editar</button>
                         <button type="button" onClick={() => openIntegrationSecretModal(selectedIntegrationForForm)}>Actualizar token</button>
+                        <button type="button" className="danger-button" onClick={() => deleteIntegration(selectedIntegrationForForm)}>Eliminar</button>
                       </div>
                     </div>
                   ) : null}
@@ -2937,6 +2963,7 @@ function App() {
                           <div className="row-actions">
                             <button type="button" onClick={() => editIntegration(integration)}>Editar</button>
                             <button type="button" onClick={() => openIntegrationSecretModal(integration)}>Actualizar token</button>
+                            <button type="button" className="danger-button" onClick={() => deleteIntegration(integration)}>Eliminar</button>
                           </div>
                         </div>
                       );
@@ -2994,6 +3021,7 @@ function App() {
                       <div className="row-actions">
                         <button type="button" className="primary" onClick={() => editInstagramIntegration(selectedInstagramIntegration)}>Cargar datos para editar</button>
                         <button type="button" onClick={() => openIntegrationSecretModal(selectedInstagramIntegration)}>Actualizar token</button>
+                        <button type="button" className="danger-button" onClick={() => deleteIntegration(selectedInstagramIntegration)}>Eliminar</button>
                       </div>
                     </div>
                   ) : null}
@@ -3066,6 +3094,7 @@ function App() {
                         <div className="row-actions">
                           <button type="button" onClick={() => editInstagramIntegration(selectedInstagramIntegration)}>Editar</button>
                           <button type="button" onClick={() => openIntegrationSecretModal(selectedInstagramIntegration)}>Actualizar token</button>
+                          <button type="button" className="danger-button" onClick={() => deleteIntegration(selectedInstagramIntegration)}>Eliminar</button>
                         </div>
                       </div>
                     ) : <div className="empty">Sin integracion Instagram configurada.</div>}
@@ -3139,6 +3168,7 @@ function App() {
                       <div className="row-actions">
                         <button type="button" className="primary" onClick={() => editFacebookIntegration(selectedFacebookIntegration)}>Cargar datos para editar</button>
                         <button type="button" onClick={() => openIntegrationSecretModal(selectedFacebookIntegration)}>Actualizar token</button>
+                        <button type="button" className="danger-button" onClick={() => deleteIntegration(selectedFacebookIntegration)}>Eliminar</button>
                       </div>
                     </div>
                   ) : null}
@@ -3204,6 +3234,7 @@ function App() {
                         <div className="row-actions">
                           <button type="button" onClick={() => editFacebookIntegration(selectedFacebookIntegration)}>Editar</button>
                           <button type="button" onClick={() => openIntegrationSecretModal(selectedFacebookIntegration)}>Actualizar token</button>
+                          <button type="button" className="danger-button" onClick={() => deleteIntegration(selectedFacebookIntegration)}>Eliminar</button>
                         </div>
                       </div>
                     ) : <div className="empty">Sin integracion Facebook Messenger configurada.</div>}

@@ -490,6 +490,69 @@ def upsert_integration(
     return IntegrationOut(**{**row_data, "config_json": _safe_config_for_output(row_data.get("config_json"))})
 
 
+@router.delete("/{integration_id}")
+def delete_integration(
+    integration_id: str,
+    ctx: AuthContext = Depends(require_role("owner", "admin")),
+):
+    with db_session() as conn:
+        set_tenant_context(conn, ctx.tenant_id)
+        row = conn.execute(
+            text(
+                """
+                DELETE FROM saas_integrations
+                WHERE tenant_id = CAST(:tenant_id AS uuid)
+                  AND id = CAST(:integration_id AS uuid)
+                RETURNING id::text, provider, channel, status
+                """
+            ),
+            {"tenant_id": ctx.tenant_id, "integration_id": integration_id},
+        ).mappings().first()
+        if not row:
+            raise HTTPException(status_code=404, detail="integration_not_found")
+
+        webhook_provider = str(row["channel"] or "").strip().lower()
+        if webhook_provider in {"whatsapp", "instagram", "facebook"}:
+            conn.execute(
+                text(
+                    """
+                    UPDATE saas_webhook_endpoints
+                    SET is_active = FALSE, updated_at = NOW()
+                    WHERE tenant_id = CAST(:tenant_id AS uuid)
+                      AND provider = :provider
+                    """
+                ),
+                {"tenant_id": ctx.tenant_id, "provider": webhook_provider},
+            )
+
+        conn.execute(
+            text(
+                """
+                INSERT INTO saas_audit_events (
+                    tenant_id, actor_user_id, action, resource_type, resource_id, details_json
+                )
+                VALUES (
+                    CAST(:tenant_id AS uuid), CAST(:user_id AS uuid), 'integration.deleted',
+                    'integration', :resource_id, CAST(:details_json AS jsonb)
+                )
+                """
+            ),
+            {
+                "tenant_id": ctx.tenant_id,
+                "user_id": ctx.user_id,
+                "resource_id": row["id"],
+                "details_json": json.dumps(
+                    {
+                        "provider": row["provider"],
+                        "channel": row["channel"],
+                        "webhook_provider_deactivated": webhook_provider if webhook_provider in {"whatsapp", "instagram", "facebook"} else "",
+                    }
+                ),
+            },
+        )
+    return {"ok": True, "deleted_id": row["id"], "provider": row["provider"], "channel": row["channel"]}
+
+
 @router.get("/meta/whatsapp/phone-numbers")
 def list_whatsapp_phone_numbers(ctx: AuthContext = Depends(require_role("owner", "admin", "supervisor"))):
     with db_session() as conn:

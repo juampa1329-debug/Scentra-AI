@@ -322,9 +322,9 @@ def create_endpoint(
         salt=signature_salt,
     )
 
-    try:
-        with db_session() as conn:
-            set_tenant_context(conn, ctx.tenant_id)
+    with db_session() as conn:
+        set_tenant_context(conn, ctx.tenant_id)
+        try:
             row = conn.execute(
                 text(
                     """
@@ -372,8 +372,46 @@ def create_endpoint(
                     "is_active": bool(payload.is_active),
                 },
             ).mappings().first()
-    except IntegrityError:
-        raise HTTPException(status_code=409, detail="webhook_endpoint_already_exists")
+        except IntegrityError:
+            row = conn.execute(
+                text(
+                    """
+                    UPDATE saas_webhook_endpoints
+                    SET
+                        endpoint_key = :endpoint_key,
+                        verify_secret_ref = :verify_secret_ref,
+                        verify_token_hash = :verify_token_hash,
+                        signature_secret_hash = :signature_secret_hash,
+                        signature_secret_salt = :signature_secret_salt,
+                        signature_required = :signature_required,
+                        is_active = :is_active,
+                        updated_at = NOW()
+                    WHERE tenant_id = CAST(:tenant_id AS uuid)
+                      AND provider = :provider
+                    RETURNING
+                        id::text,
+                        tenant_id::text,
+                        provider,
+                        endpoint_key,
+                        is_active,
+                        signature_required,
+                        last_seen_at::text
+                    """
+                ),
+                {
+                    "tenant_id": ctx.tenant_id,
+                    "provider": provider,
+                    "endpoint_key": endpoint_key,
+                    "verify_secret_ref": f"local:{provider}:{endpoint_key}",
+                    "verify_token_hash": hash_secret(verify_token),
+                    "signature_secret_hash": hash_secret(signature_secret),
+                    "signature_secret_salt": signature_salt,
+                    "signature_required": bool(payload.signature_required),
+                    "is_active": bool(payload.is_active),
+                },
+            ).mappings().first()
+            if not row:
+                raise HTTPException(status_code=409, detail="webhook_endpoint_already_exists")
 
     return WebhookEndpointOut(
         **dict(row),

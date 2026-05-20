@@ -65,6 +65,16 @@ button.primary {
   font-weight: 900;
   box-shadow: 0 14px 34px rgba(20, 184, 166, 0.24);
 }
+button.danger-button {
+  border-color: rgba(248, 113, 113, 0.42);
+  background: rgba(248, 113, 113, 0.12);
+  color: #fecaca;
+  font-weight: 900;
+}
+button.danger-button:hover {
+  border-color: rgba(248, 113, 113, 0.72);
+  background: rgba(248, 113, 113, 0.20);
+}
 button:disabled {
   opacity: 0.52;
   cursor: not-allowed;
