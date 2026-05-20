@@ -12,12 +12,20 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import text
 
 from app_saas.billing.limits import ensure_integration_quota
+from app_saas.config import settings
 from app_saas.db import db_session, set_tenant_context
-from app_saas.integrations.instagram_graph import ensure_instagram_log_tables, ensure_instagram_page_subscription
+from app_saas.integrations.instagram_graph import (
+    classify_meta_error,
+    ensure_instagram_log_tables,
+    ensure_instagram_page_subscription,
+    meta_error,
+    request_with_retry,
+)
 from app_saas.integrations.schemas import IntegrationOut, IntegrationUpsertIn, WhatsappPhoneRegisterIn
 from app_saas.integrations.whatsapp_subscription import ensure_webhook_subscription
 from app_saas.shared.security import AuthContext, get_current_user, require_role, verify_password
 from app_saas.shared.secrets import decrypt_secret, encrypt_secret, is_masked_secret, mask_secret
+from app_saas.social.service import ensure_social_tables
 
 router = APIRouter(prefix="/integrations", tags=["saas-integrations"])
 
@@ -312,6 +320,23 @@ def _maybe_ensure_facebook_subscription(conn, *, tenant_id: str, integration_id:
     )
 
 
+def _load_meta_channel_integration(conn, tenant_id: str, channel: str) -> dict[str, Any] | None:
+    row = conn.execute(
+        text(
+            """
+            SELECT id::text, provider, channel, status, config_json, last_sync_at::text
+            FROM saas_integrations
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND provider = 'meta'
+              AND channel = :channel
+            LIMIT 1
+            """
+        ),
+        {"tenant_id": tenant_id, "channel": channel},
+    ).mappings().first()
+    return dict(row) if row else None
+
+
 @router.get("", response_model=list[IntegrationOut])
 def list_integrations(ctx: AuthContext = Depends(get_current_user)):
     with db_session() as conn:
@@ -551,6 +576,142 @@ def delete_integration(
             },
         )
     return {"ok": True, "deleted_id": row["id"], "provider": row["provider"], "channel": row["channel"]}
+
+
+@router.get("/meta/facebook/diagnostics")
+def facebook_diagnostics(ctx: AuthContext = Depends(require_role("owner", "admin", "supervisor"))):
+    with db_session() as conn:
+        set_tenant_context(conn, ctx.tenant_id)
+        ensure_instagram_log_tables(conn)
+        ensure_social_tables(conn)
+        integration = _load_meta_channel_integration(conn, ctx.tenant_id, "facebook")
+        if not integration:
+            return {"ok": False, "status": "facebook_not_connected"}
+
+        config = dict(integration.get("config_json") or {})
+        page_token = _instagram_page_token(config)
+        page_id = str(config.get("page_id") or config.get("facebook_page_id") or "").strip()
+        version = str(config.get("graph_api_version") or "v24.0").strip()
+        app_id = str(config.get("app_id") or "").strip()
+        subscription = _maybe_ensure_facebook_subscription(conn, tenant_id=ctx.tenant_id, integration_id=integration["id"], config=config) or {
+            "ok": False,
+            "status": "not_checked",
+            "error": "page_id_or_page_access_token_missing",
+        }
+
+        if page_token:
+            permissions_status, permissions_payload, _ = request_with_retry(
+                "GET",
+                "/me/permissions",
+                page_token,
+                graph_version=version,
+                retries=1,
+            )
+            permissions = {
+                "ok": permissions_status < 400 and not meta_error(permissions_payload),
+                "response": permissions_payload,
+                "error_status": classify_meta_error(permissions_status, permissions_payload) if permissions_status >= 400 or meta_error(permissions_payload) else "",
+            }
+        else:
+            permissions = {"ok": False, "response": {"error": "page_access_token_missing"}, "error_status": "missing_page_access_token"}
+
+        webhook = conn.execute(
+            text(
+                """
+                SELECT endpoint_key, is_active, signature_required, last_seen_at::text
+                FROM saas_webhook_endpoints
+                WHERE tenant_id = CAST(:tenant_id AS uuid)
+                  AND provider = 'facebook'
+                LIMIT 1
+                """
+            ),
+            {"tenant_id": ctx.tenant_id},
+        ).mappings().first()
+        last_message = conn.execute(
+            text(
+                """
+                SELECT id::text, external_contact_id, display_name, last_message_text, last_message_at::text, unread_count
+                FROM saas_conversations
+                WHERE tenant_id = CAST(:tenant_id AS uuid)
+                  AND channel = 'facebook'
+                ORDER BY last_message_at DESC NULLS LAST, updated_at DESC
+                LIMIT 1
+                """
+            ),
+            {"tenant_id": ctx.tenant_id},
+        ).mappings().first()
+        last_comment = conn.execute(
+            text(
+                """
+                SELECT c.id::text, c.author_name, c.author_username, c.message, c.status, c.updated_at::text,
+                       p.external_post_id, p.caption AS post_caption, p.permalink_url
+                FROM social_comments c
+                LEFT JOIN social_posts p ON p.id = c.post_id
+                WHERE c.tenant_id = CAST(:tenant_id AS uuid)
+                  AND c.channel = 'facebook'
+                ORDER BY c.updated_at DESC
+                LIMIT 1
+                """
+            ),
+            {"tenant_id": ctx.tenant_id},
+        ).mappings().first()
+        recent_errors = conn.execute(
+            text(
+                """
+                SELECT provider, event_id, status, error, received_at::text
+                FROM saas_webhook_events
+                WHERE tenant_id = CAST(:tenant_id AS uuid)
+                  AND provider = 'facebook'
+                  AND COALESCE(error, '') <> ''
+                ORDER BY received_at DESC
+                LIMIT 10
+                """
+            ),
+            {"tenant_id": ctx.tenant_id},
+        ).mappings().all()
+        checks = conn.execute(
+            text(
+                """
+                SELECT page_id, status, final_subscribed, auto_subscribe_attempted, http_status, meta_error_type, meta_error_message, error, created_at::text
+                FROM saas_instagram_subscription_checks
+                WHERE tenant_id = CAST(:tenant_id AS uuid)
+                  AND page_id = :page_id
+                  AND COALESCE(instagram_business_account_id, '') = ''
+                ORDER BY created_at DESC
+                LIMIT 10
+                """
+            ),
+            {"tenant_id": ctx.tenant_id, "page_id": page_id},
+        ).mappings().all()
+
+    webhook_callback_url = ""
+    if webhook and webhook.get("endpoint_key"):
+        api_public_url = str(settings.scentra_api_public_url or "https://api.scentra-ai.online").strip().rstrip("/")
+        webhook_callback_url = f"{api_public_url}/saas/v1/webhooks/facebook/{webhook['endpoint_key']}"
+    return {
+        "ok": True,
+        "status": integration["status"],
+        "page_id": page_id,
+        "page_name": config.get("page_name") or "",
+        "app_id": app_id,
+        "graph_version": version,
+        "webhook_callback_url": webhook_callback_url,
+        "webhook_status": dict(webhook or {}),
+        "subscription": subscription,
+        "permissions": permissions,
+        "last_message": dict(last_message or {}),
+        "last_comment": dict(last_comment or {}),
+        "recent_errors": [dict(row) for row in recent_errors],
+        "subscription_checks": [dict(row) for row in checks],
+        "required_permissions": [
+            "pages_manage_metadata",
+            "pages_messaging",
+            "pages_read_engagement",
+            "pages_read_user_content",
+            "pages_manage_engagement",
+        ],
+        "config": _safe_config_for_output(config),
+    }
 
 
 @router.get("/meta/whatsapp/phone-numbers")

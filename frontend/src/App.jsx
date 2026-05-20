@@ -562,7 +562,9 @@ function App() {
   const [advisorBusyActionId, setAdvisorBusyActionId] = useState("");
   const [instagramOAuth, setInstagramOAuth] = useState({ state: "", assets: [], status: "", callbackUrl: "" });
   const [instagramDiagnostics, setInstagramDiagnostics] = useState(null);
+  const [facebookDiagnostics, setFacebookDiagnostics] = useState(null);
   const [instagramBusy, setInstagramBusy] = useState(false);
+  const [facebookBusy, setFacebookBusy] = useState(false);
   const [debugInboundForm, setDebugInboundForm] = useState({ from_phone: "573001112233", message: "Hola, prueba de webhook entrante", contact_name: "Cliente Debug" });
   const [debugInboundResult, setDebugInboundResult] = useState(null);
   const [subscriptionCheck, setSubscriptionCheck] = useState(null);
@@ -733,6 +735,11 @@ function App() {
     && String(item.channel || "").toLowerCase() === "facebook"
   ));
   const selectedFacebookConfig = selectedFacebookIntegration?.config_json || {};
+  const facebookGrantedPermissions = new Set((facebookDiagnostics?.permissions?.response?.data || [])
+    .filter((item) => String(item.status || "").toLowerCase() === "granted")
+    .map((item) => item.permission));
+  const facebookMissingPermissions = (facebookDiagnostics?.required_permissions || [])
+    .filter((permission) => !facebookGrantedPermissions.has(permission));
   const integrationToForm = (integration) => {
     const config = integration?.config_json || {};
     return {
@@ -903,7 +910,7 @@ function App() {
     setIntegrations([]); setWebhooks([]); setWebhookEvents([]); setBillingOverview(null); setBillingPlans([]); setLastWebhookSecret(null);
     setApiCredentials([]); setCredentialModal(null); setCredentialModels({}); setKnowledgeSources([]); setDiagnostics(null); setAiGatewayProviders([]); setAiGatewayRuns([]);
     setAdvisorOpen(false); setAdvisorThreadId(""); setAdvisorMessages([]); setAdvisorInput(""); setAdvisorInsights([]); setAdvisorRecommendations([]); setAdvisorActions([]); setAdvisorMetrics(null); setAdvisorActivity([]); setAdvisorMemory(null); setAdvisorStreamStatus(""); setAdvisorLastSync(""); setAdvisorLoading(false);
-    setInstagramDiagnostics(null); setInstagramOAuth({ state: "", assets: [], status: "", callbackUrl: "" });
+    setInstagramDiagnostics(null); setFacebookDiagnostics(null); setInstagramOAuth({ state: "", assets: [], status: "", callbackUrl: "" });
     setInstagramForm(defaultInstagramForm());
     setDebugInboundResult(null); setSubscriptionCheck(null);
     setIntegrationSecretModal(null);
@@ -1390,6 +1397,7 @@ function App() {
       await loadIntegrations();
       await loadBilling();
       await loadDiagnostics(true);
+      await loadFacebookDiagnostics();
     } catch (err) { showStatus(String(err.message || err), "error"); }
   };
 
@@ -1410,6 +1418,7 @@ function App() {
       setLastWebhookSecret(data);
       showStatus("Endpoint Facebook creado. Copia Callback URL y Verify token en Meta Developers.", "ok");
       await loadWebhooks();
+      if (selectedFacebookIntegration) await loadFacebookDiagnostics();
     } catch (err) { showStatus(String(err.message || err), "error"); }
   };
 
@@ -1495,6 +1504,8 @@ function App() {
       setIntegrationSecretModal(null);
       showStatus("Secretos actualizados y cifrados", "ok");
       await loadIntegrations();
+      if (secretChannel === "facebook") await loadFacebookDiagnostics();
+      if (secretChannel === "instagram") await loadInstagramDiagnostics();
     } catch (err) { showStatus(String(err.message || err), "error"); }
   };
 
@@ -1514,7 +1525,10 @@ function App() {
         setInstagramForm(defaultInstagramForm());
         setInstagramDiagnostics(null);
       }
-      if (cleanChannel === "facebook") setFacebookForm(defaultFacebookForm());
+      if (cleanChannel === "facebook") {
+        setFacebookForm(defaultFacebookForm());
+        setFacebookDiagnostics(null);
+      }
       setLastWebhookSecret(null);
       showStatus(`Integracion ${channel} eliminada`, "ok");
       await Promise.all([loadIntegrations(), loadBilling(), loadWebhooks(), loadInbox(), loadDiagnostics(true)]);
@@ -1631,6 +1645,19 @@ function App() {
       showStatus(String(err.message || err), "error");
     } finally {
       setInstagramBusy(false);
+    }
+  };
+
+  const loadFacebookDiagnostics = async () => {
+    setFacebookBusy(true);
+    try {
+      const data = await apiCall("/saas/v1/integrations/meta/facebook/diagnostics");
+      setFacebookDiagnostics(data);
+      showStatus(data?.ok ? "Facebook Diagnostics actualizado." : "Facebook aun no esta conectado.", data?.ok ? "ok" : "neutral");
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    } finally {
+      setFacebookBusy(false);
     }
   };
 
@@ -3156,9 +3183,9 @@ function App() {
                       <h2>Facebook Messenger</h2>
                       <span>DMs, comentarios feed y Page webhooks</span>
                     </div>
-                    <button type="button" onClick={() => { setSettingsTab("debug"); loadDiagnostics(); }}>Ver diagnostico</button>
+                    <button type="button" disabled={facebookBusy} onClick={loadFacebookDiagnostics}>{facebookBusy ? "Revisando..." : "Diagnostics FB"}</button>
                   </div>
-                  <p className="soft-copy">Facebook Messenger usa Page ID y Page Access Token. Los DMs entran al Inbox como conversaciones y los comentarios de publicaciones entran a la pestaña Comentarios.</p>
+                  <p className="soft-copy">Facebook Messenger usa Page ID y Page Access Token. Los DMs entran al Inbox como conversaciones y los comentarios de publicaciones entran a la pestaña Comentarios. Usa un callback Facebook separado del callback Instagram para que cada tenant pueda diagnosticar mejor sus eventos.</p>
                   {selectedFacebookIntegration ? (
                     <div className="current-integration-strip">
                       <div>
@@ -3252,6 +3279,19 @@ function App() {
                       <span>Callback URL</span>
                       <div className="secret-value-row"><code>{fullWebhookUrl(lastWebhookSecret.url_path)}</code><button type="button" onClick={() => copyText(fullWebhookUrl(lastWebhookSecret.url_path), "Callback Facebook")}>Copiar URL</button></div>
                       {lastWebhookSecret.verify_token_once ? <><span>Verify token</span><div className="secret-value-row"><code>{lastWebhookSecret.verify_token_once}</code><button type="button" onClick={() => copyText(lastWebhookSecret.verify_token_once, "Verify token Facebook")}>Copiar token</button></div></> : null}
+                    </div>
+                  ) : null}
+                  {facebookDiagnostics ? (
+                    <div className={`debug-result ${facebookDiagnostics.ok && facebookDiagnostics.subscription?.final_subscribed ? "ok" : "bad"}`}>
+                      <strong>Facebook Diagnostics</strong>
+                      <span>{facebookDiagnostics.ok ? `${facebookDiagnostics.page_name || "Facebook Page"} / Page ${facebookDiagnostics.page_id || "-"}` : (facebookDiagnostics.status || "sin conexion")}</span>
+                      {facebookDiagnostics.ok ? <small>subscribed_apps: {facebookDiagnostics.subscription?.status || "-"} / auto-subscribe: {facebookDiagnostics.subscription?.auto_subscribe_attempted ? "intentado" : "no necesario"}</small> : null}
+                      {facebookDiagnostics.ok ? <small>Webhook Facebook: {facebookDiagnostics.webhook_callback_url || "-"} / Ultimo evento: {facebookDiagnostics.webhook_status?.last_seen_at || "sin eventos"}</small> : null}
+                      {facebookDiagnostics.last_message?.id ? <small>Ultimo DM: {facebookDiagnostics.last_message.display_name || facebookDiagnostics.last_message.external_contact_id} - {facebookDiagnostics.last_message.last_message_text}</small> : null}
+                      {facebookDiagnostics.last_comment?.id ? <small>Ultimo comentario: {facebookDiagnostics.last_comment.author_name || facebookDiagnostics.last_comment.author_username || "Usuario"} - {facebookDiagnostics.last_comment.message}</small> : null}
+                      {facebookMissingPermissions.length ? <small>Permisos faltantes: {facebookMissingPermissions.join(", ")}</small> : <small>Permisos Facebook requeridos: completos o no reportados como faltantes.</small>}
+                      {(facebookDiagnostics.subscription_checks || []).slice(0, 3).map((item, idx) => <small key={`${item.created_at}-${idx}`}>{compactDateTimeLabel(item.created_at)} - {item.status} {item.error || item.meta_error_message || ""}</small>)}
+                      {(facebookDiagnostics.recent_errors || []).slice(0, 3).map((item, idx) => <small key={`${item.received_at}-${idx}`}>{compactDateTimeLabel(item.received_at)} - webhook {item.status}: {item.error}</small>)}
                     </div>
                   ) : null}
                 </article>
