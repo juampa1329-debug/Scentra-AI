@@ -293,6 +293,10 @@ nav { display: grid; gap: 8px; width: 100%; }
   border: 1px solid var(--line);
   background: rgba(255,255,255,0.052);
 }
+.template-agent-card.locked {
+  opacity: 0.64;
+  background: rgba(255,255,255,0.032);
+}
 .agent-card-head, .agent-detail-title, .agent-policy, .agent-mini-metrics {
   display: flex;
   justify-content: space-between;

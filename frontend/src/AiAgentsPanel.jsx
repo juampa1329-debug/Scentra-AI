@@ -18,6 +18,7 @@ const FALLBACK_ROUTES = [
   { code: "sales", label: "Ventas" },
   { code: "support", label: "Soporte" },
   { code: "ops", label: "Operaciones" },
+  { code: "vertical_ops", label: "Verticales" },
 ];
 
 const FALLBACK_ACTION_PRESETS = [
@@ -67,6 +68,22 @@ const typeLabel = (type) => ({
   executive_summary: "Resumen ejecutivo",
   knowledge: "Knowledge",
   workflow_architect: "Workflow Architect",
+  restaurant_reservations: "Restaurante Reservas",
+  restaurant_menu: "Menu Restaurante",
+  hotel_concierge: "Hotel Concierge",
+  hotel_booking: "Reservas Hotel",
+  appointment_scheduler: "Agenda / Citas",
+  real_estate_leads: "Inmobiliaria",
+  education_admissions: "Admisiones",
+  automotive_service: "Automotriz",
+  beauty_booking: "Belleza",
+  logistics_tracking: "Logistica",
+  collections_agent: "Cartera",
+  reputation_manager: "Reputacion",
+  medical_appointment: "Citas Medicas",
+  tourism_itinerary: "Turismo",
+  hr_recruiting: "Reclutamiento",
+  multi_location_ops: "Multi-sede",
 }[String(type || "").toLowerCase()] || type);
 
 function asList(value) {
@@ -157,6 +174,7 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
   const totalAgents = agents.filter((agent) => agent.status !== "archived").length;
   const remainingTotal = Number(limits?.remaining?.total ?? 0);
   const remainingActive = Number(limits?.remaining?.active ?? 0);
+  const allowedAgentTypes = new Set(asList(limits?.allowed_agent_types).map((item) => String(item || "").toLowerCase()));
   const channelCatalog = asList(catalog.channels).length ? catalog.channels : FALLBACK_CHANNELS;
   const toolCatalog = asList(catalog.tools);
   const providerCatalog = asList(catalog.providers).length ? catalog.providers : FALLBACK_PROVIDERS;
@@ -267,8 +285,8 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
       showStatus("Agente creado desde plantilla", "ok");
       onMilestone?.(`agent:${agentType}:${data?.agent?.id || "nuevo"}`, {
         eyebrow: "Nuevo agente",
-        title: `${typeLabel(agentType)} quedó creado`,
-        body: "Ya puedes ajustar sus herramientas, canales, memoria y reglas de aprobación. El Advisor queda disponible para ayudarte a operarlo.",
+        title: `${typeLabel(agentType)} quedo creado`,
+        body: "Ya puedes ajustar sus herramientas, canales, memoria y reglas de aprobacion. El Advisor queda disponible para ayudarte a operarlo.",
         cta: "Abrir Advisor",
         actionType: "advisor",
       });
@@ -730,9 +748,10 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
           <div className="template-agent-grid">
             {templates.map((template) => {
               const alreadyExists = agents.some((agent) => agent.agent_type === template.agent_type && agent.status !== "archived");
-              const disabled = alreadyExists || remainingTotal <= 0 || !limits?.builder_enabled || busyKey === `create:${template.agent_type}`;
+              const allowedByPlan = !allowedAgentTypes.size || allowedAgentTypes.has(String(template.agent_type || "").toLowerCase());
+              const disabled = alreadyExists || !allowedByPlan || remainingTotal <= 0 || !limits?.builder_enabled || busyKey === `create:${template.agent_type}`;
               return (
-                <article className="template-agent-card" key={template.agent_type}>
+                <article className={`template-agent-card ${allowedByPlan ? "" : "locked"}`} key={template.agent_type}>
                   <div className="agent-card-head">
                     <span>{template.category}</span>
                     <em>{typeLabel(template.agent_type)}</em>
@@ -742,8 +761,8 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
                   <div className="agent-chip-row">
                     {asList(template.channels).slice(0, 3).map((item) => <span key={item}>{item}</span>)}
                   </div>
-                  <button type="button" className={alreadyExists ? "" : "primary"} disabled={disabled} onClick={() => createFromTemplate(template.agent_type)}>
-                    {alreadyExists ? "Ya creado" : remainingTotal <= 0 ? "Limite del plan" : "Crear agente"}
+                  <button type="button" className={alreadyExists || !allowedByPlan ? "" : "primary"} disabled={disabled} onClick={() => createFromTemplate(template.agent_type)}>
+                    {alreadyExists ? "Ya creado" : !allowedByPlan ? "Plan requerido" : remainingTotal <= 0 ? "Limite del plan" : "Crear agente"}
                   </button>
                 </article>
               );

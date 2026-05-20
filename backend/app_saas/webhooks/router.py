@@ -614,7 +614,7 @@ def verify_endpoint_setup(
                 SELECT id::text, status, updated_at::text
                 FROM saas_integrations
                 WHERE tenant_id = CAST(:tenant_id AS uuid)
-                  AND channel = :provider
+                  AND (channel = :provider OR provider = :provider)
                 ORDER BY updated_at DESC
                 LIMIT 1
                 """
