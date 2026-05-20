@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from datetime import date, datetime
+from decimal import Decimal
 from typing import Any
 
 from fastapi import HTTPException
@@ -312,7 +314,19 @@ def _clean(value: Any, limit: int = 500) -> str:
 
 
 def _json(value: Any) -> str:
-    return json.dumps(value if value is not None else {}, ensure_ascii=False)
+    return json.dumps(_jsonable(value if value is not None else {}), ensure_ascii=False, default=str)
+
+
+def _jsonable(value: Any) -> Any:
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_jsonable(item) for item in value]
+    return value
 
 
 def _json_value(value: Any, fallback: Any) -> Any:
@@ -1318,6 +1332,16 @@ def get_agent(conn: Connection, tenant_id: str, agent_id: str) -> dict[str, Any]
 def _hydrate_metrics(conn: Connection, item: dict[str, Any]) -> dict[str, Any]:
     metrics = dict(item.get("metrics_json") or {})
     if item.get("agent_type") == "advisor":
+        # /agents can be the first AI screen a demo tenant opens. Ensure the
+        # Advisor metric tables exist so the registry never fails with 500.
+        try:
+            from app_saas.advisor.service import ensure_advisor_tables
+
+            ensure_advisor_tables(conn)
+        except Exception:
+            metrics.update({"metrics_warning": "advisor_tables_unavailable"})
+            item["metrics_json"] = metrics
+            return item
         row = conn.execute(
             text(
                 """

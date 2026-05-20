@@ -119,29 +119,80 @@ function advisorDisplayContent(value) {
   if (!["{", "["].includes(unfenced.charAt(0))) return raw;
   try {
     const parsed = JSON.parse(unfenced);
-    const toHuman = (item) => {
+    const labelFor = (key) => ({
+      insights: "Insights",
+      hallazgos: "Hallazgos",
+      recomendaciones: "Recomendaciones",
+      recommendations: "Recomendaciones",
+      acciones: "Acciones sugeridas",
+      actions: "Acciones sugeridas",
+      siguientes_pasos: "Siguientes pasos",
+      next_steps: "Siguientes pasos",
+      propuestas: "Propuestas",
+      oportunidades: "Oportunidades",
+      opportunities: "Oportunidades",
+      riesgos: "Riesgos",
+      risks: "Riesgos",
+      prioridades: "Prioridades",
+      priorities: "Prioridades",
+    }[String(key || "").toLowerCase()] || String(key || "").replace(/_/g, " ").replace(/^\w/, (letter) => letter.toUpperCase()));
+    const shortItem = (item) => {
       if (!item || typeof item !== "object" || Array.isArray(item)) return String(item || "");
-      const title = item.titulo || item.title || item.name || "";
-      const description = item.descripcion || item.description || item.resumen || item.summary || "";
-      const impact = item.impacto || item.impact || "";
-      const steps = item.siguientes_pasos || item.next_steps || item.acciones || item.actions || [];
-      const lines = [];
-      if (title) lines.push(String(title));
-      if (description) lines.push(String(description));
-      if (impact) lines.push(`Impacto: ${impact}`);
-      if (Array.isArray(steps) && steps.length) {
-        lines.push("Siguientes pasos:");
-        steps.slice(0, 3).forEach((step) => {
-          if (typeof step === "object") lines.push(`- ${step.title || step.titulo || step.description || step.descripcion || JSON.stringify(step)}`);
-          else lines.push(`- ${step}`);
-        });
+      const keys = ["titulo", "title", "name", "nombre", "resumen", "summary", "descripcion", "description", "mensaje", "message", "texto", "text"];
+      for (const key of keys) {
+        if (item[key]) return String(item[key]);
       }
-      return lines.join("\n");
+      return Object.entries(item)
+        .filter(([, entry]) => entry && typeof entry !== "object")
+        .slice(0, 2)
+        .map(([key, entry]) => `${labelFor(key)}: ${entry}`)
+        .join(" - ");
     };
-    if (Array.isArray(parsed)) {
-      return ["Esto es lo mas importante que encontre:", ...parsed.slice(0, 5).map((item) => `- ${toHuman(item).replace(/\n/g, " - ")}`)].join("\n");
-    }
-    return toHuman(parsed) || raw;
+    const toHumanLines = (item, topLevel = false) => {
+      if (Array.isArray(item)) {
+        const lines = topLevel ? ["Esto es lo mas importante que encontre:"] : [];
+        item.slice(0, 6).forEach((entry) => {
+          const summary = shortItem(entry) || (typeof entry === "object" ? toHumanLines(entry).slice(0, 2).join(" - ") : "");
+          if (summary) lines.push(`- ${summary}`);
+        });
+        return lines;
+      }
+      if (!item || typeof item !== "object") return [String(item || "")].filter(Boolean);
+      const title = item.titulo || item.title || item.name || item.nombre || "";
+      const description = item.respuesta || item.answer || item.mensaje || item.message || item.content || item.texto || item.text || item.descripcion || item.description || item.resumen || item.summary || "";
+      const lines = [];
+      const used = new Set(["titulo", "title", "name", "nombre", "respuesta", "answer", "mensaje", "message", "content", "texto", "text", "descripcion", "description", "resumen", "summary"]);
+      const meta = [["prioridad", "Prioridad"], ["priority", "Prioridad"], ["impacto", "Impacto"], ["impact", "Impacto"], ["riesgo", "Riesgo"], ["risk", "Riesgo"], ["risk_level", "Riesgo"], ["confianza", "Confianza"], ["confidence", "Confianza"]];
+      const sections = ["insights", "hallazgos", "recomendaciones", "recommendations", "acciones", "actions", "siguientes_pasos", "next_steps", "propuestas", "oportunidades", "opportunities", "riesgos", "risks", "prioridades", "priorities"];
+      if (title) lines.push(String(title));
+      if (description && description !== title) lines.push(String(description));
+      meta.forEach(([key, label]) => {
+        used.add(key);
+        if (item[key]) lines.push(`${label}: ${item[key]}`);
+      });
+      sections.forEach((key) => {
+        used.add(key);
+        if (!item[key]) return;
+        const sectionLines = toHumanLines(item[key]);
+        if (sectionLines.length) {
+          lines.push(`${labelFor(key)}:`);
+          lines.push(...sectionLines.slice(0, 7));
+        }
+      });
+      Object.entries(item).forEach(([key, entry]) => {
+        if (used.has(key) || ["id", "type", "tipo", "status", "estado", "raw", "schema"].includes(key) || lines.length >= 14) return;
+        if (entry && typeof entry === "object") {
+          const nested = toHumanLines(entry);
+          if (nested.length) lines.push(`${labelFor(key)}:`, ...nested.slice(0, 5));
+        } else if (entry) {
+          lines.push(`${labelFor(key)}: ${entry}`);
+        }
+      });
+      return lines;
+    };
+    const lines = toHumanLines(parsed, true);
+    const human = lines.filter(Boolean).join("\n").trim();
+    return human || raw;
   } catch {
     return raw;
   }

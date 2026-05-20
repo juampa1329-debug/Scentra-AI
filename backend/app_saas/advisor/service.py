@@ -782,6 +782,137 @@ def _strip_json_fence(value: str) -> str:
     return text_value
 
 
+def _friendly_key(value: str) -> str:
+    labels = {
+        "insights": "Insights",
+        "hallazgos": "Hallazgos",
+        "recomendaciones": "Recomendaciones",
+        "recommendations": "Recomendaciones",
+        "acciones": "Acciones sugeridas",
+        "actions": "Acciones sugeridas",
+        "siguientes_pasos": "Siguientes pasos",
+        "next_steps": "Siguientes pasos",
+        "propuestas": "Propuestas",
+        "opportunities": "Oportunidades",
+        "oportunidades": "Oportunidades",
+        "riesgos": "Riesgos",
+        "risks": "Riesgos",
+        "prioridades": "Prioridades",
+        "priorities": "Prioridades",
+    }
+    clean = _clean(value, 80).lower()
+    return labels.get(clean, clean.replace("_", " ").strip().capitalize())
+
+
+def _short_structured_item(value: Any) -> str:
+    if isinstance(value, dict):
+        for key in ("titulo", "title", "name", "nombre", "resumen", "summary", "descripcion", "description", "mensaje", "message", "texto", "text"):
+            text_value = _clean(value.get(key), 500)
+            if text_value:
+                return text_value
+        parts = []
+        for key, item in value.items():
+            if isinstance(item, (dict, list)):
+                continue
+            text_item = _clean(item, 160)
+            if text_item:
+                parts.append(f"{_friendly_key(str(key))}: {text_item}")
+            if len(parts) >= 2:
+                break
+        return " - ".join(parts)
+    return _clean(value, 500)
+
+
+def _structured_lines(value: Any, *, top_level: bool = False) -> list[str]:
+    if isinstance(value, list):
+        lines = ["Esto es lo mas importante que encontre:"] if top_level else []
+        for item in value[:6]:
+            summary = _short_structured_item(item)
+            if not summary and isinstance(item, dict):
+                summary = " - ".join(_structured_lines(item)[:2])
+            if summary:
+                lines.append(f"- {summary}")
+        return lines
+
+    if not isinstance(value, dict):
+        text_value = _clean(value, 2000)
+        return [text_value] if text_value else []
+
+    title = _clean(value.get("titulo") or value.get("title") or value.get("name") or value.get("nombre"), 260)
+    summary = _clean(
+        value.get("respuesta")
+        or value.get("answer")
+        or value.get("mensaje")
+        or value.get("message")
+        or value.get("content")
+        or value.get("texto")
+        or value.get("text")
+        or value.get("resumen")
+        or value.get("summary")
+        or value.get("descripcion")
+        or value.get("description"),
+        1800,
+    )
+    lines: list[str] = []
+    if title:
+        lines.append(title)
+    if summary and summary != title:
+        lines.append(summary)
+
+    metadata_keys = [
+        ("prioridad", "Prioridad"),
+        ("priority", "Prioridad"),
+        ("impacto", "Impacto"),
+        ("impact", "Impacto"),
+        ("riesgo", "Riesgo"),
+        ("risk", "Riesgo"),
+        ("risk_level", "Riesgo"),
+        ("confianza", "Confianza"),
+        ("confidence", "Confianza"),
+    ]
+    used = {
+        "titulo", "title", "name", "nombre", "respuesta", "answer", "mensaje", "message",
+        "content", "texto", "text", "resumen", "summary", "descripcion", "description",
+    }
+    for key, label in metadata_keys:
+        item = _clean(value.get(key), 260)
+        used.add(key)
+        if item:
+            lines.append(f"{label}: {item}")
+
+    section_keys = [
+        "insights", "hallazgos", "recomendaciones", "recommendations", "acciones", "actions",
+        "siguientes_pasos", "next_steps", "propuestas", "opportunities", "oportunidades",
+        "riesgos", "risks", "prioridades", "priorities",
+    ]
+    for key in section_keys:
+        section = value.get(key)
+        used.add(key)
+        if not section:
+            continue
+        section_lines = _structured_lines(section, top_level=False)
+        if section_lines:
+            lines.append(f"{_friendly_key(key)}:")
+            lines.extend(section_lines[:7])
+
+    for key, item in value.items():
+        if key in used or key in {"id", "type", "tipo", "status", "estado", "raw", "schema"}:
+            continue
+        if isinstance(item, (dict, list)):
+            nested_lines = _structured_lines(item, top_level=False)
+            if nested_lines:
+                lines.append(f"{_friendly_key(str(key))}:")
+                lines.extend(nested_lines[:5])
+        else:
+            text_item = _clean(item, 500)
+            if text_item:
+                lines.append(f"{_friendly_key(str(key))}: {text_item}")
+        if len(lines) >= 14:
+            break
+
+    return lines
+
+
 def _humanize_json_answer(raw: Any) -> str:
     text_value = _strip_json_fence(_clean(raw, 20000))
     if not text_value or text_value[0] not in "[{":
@@ -791,47 +922,10 @@ def _humanize_json_answer(raw: Any) -> str:
     except (TypeError, json.JSONDecodeError):
         return _clean(raw, 20000)
 
-    def text_from_dict(item: dict[str, Any]) -> str:
-        title = _clean(item.get("titulo") or item.get("title") or item.get("name"), 220)
-        summary = _clean(item.get("resumen") or item.get("summary") or item.get("descripcion") or item.get("description"), 1200)
-        impact = _clean(item.get("impacto") or item.get("impact"), 500)
-        risk = _clean(item.get("riesgo") or item.get("risk") or item.get("risk_level"), 200)
-        steps = item.get("siguientes_pasos") or item.get("next_steps") or item.get("acciones") or item.get("actions") or []
-        if isinstance(steps, dict):
-            steps = list(steps.values())
-        lines: list[str] = []
-        if title:
-            lines.append(title)
-        if summary:
-            lines.append(summary)
-        if impact:
-            lines.append(f"Impacto: {impact}")
-        if risk:
-            lines.append(f"Riesgo: {risk}")
-        if isinstance(steps, list) and steps:
-            lines.append("Siguientes pasos:")
-            for step in steps[:3]:
-                if isinstance(step, dict):
-                    step_text = _clean(step.get("title") or step.get("titulo") or step.get("description") or step.get("descripcion") or step, 300)
-                else:
-                    step_text = _clean(step, 300)
-                if step_text:
-                    lines.append(f"- {step_text}")
-        return "\n".join(lines).strip()
-
-    if isinstance(parsed, dict):
-        human = text_from_dict(parsed)
-        return human or "Preparé un análisis estructurado. Revísalo como propuesta antes de ejecutar cualquier acción."
-    if isinstance(parsed, list):
-        lines = ["Esto es lo más importante que encontré:"]
-        for item in parsed[:5]:
-            if isinstance(item, dict):
-                summary = text_from_dict(item).replace("\n", " - ")
-            else:
-                summary = _clean(item, 300)
-            if summary:
-                lines.append(f"- {summary}")
-        return "\n".join(lines).strip()
+    lines = _structured_lines(parsed, top_level=True)
+    human = "\n".join(line for line in lines if _clean(line)).strip()
+    if human:
+        return human
     return _clean(raw, 20000)
 
 
