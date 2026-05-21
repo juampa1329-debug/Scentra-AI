@@ -84,6 +84,16 @@ const typeLabel = (type) => ({
   tourism_itinerary: "Turismo",
   hr_recruiting: "Reclutamiento",
   multi_location_ops: "Multi-sede",
+  legal_intake: "Legal Intake",
+  insurance_claims: "Seguros",
+  financial_services: "Finanzas",
+  dental_booking: "Dental",
+  fitness_membership: "Fitness",
+  event_planner: "Eventos",
+  nonprofit_donor: "ONG / Donantes",
+  public_sector_services: "Sector publico",
+  saas_onboarding: "SaaS Onboarding",
+  field_service_dispatch: "Servicio tecnico",
 }[String(type || "").toLowerCase()] || type);
 
 const categoryLabel = (category) => ({
@@ -111,6 +121,12 @@ const categoryLabel = (category) => ({
   vertical_travel: "Turismo",
   vertical_hr: "RRHH",
   vertical_operations: "Multi-sede",
+  vertical_legal: "Legal",
+  vertical_insurance: "Seguros",
+  vertical_events: "Eventos",
+  vertical_nonprofit: "ONG",
+  vertical_public_sector: "Sector publico",
+  vertical_b2b: "B2B / SaaS",
 }[String(category || "").toLowerCase()] || category || "General");
 
 function asList(value) {
@@ -206,6 +222,12 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
   const totalAgents = agents.filter((agent) => agent.status !== "archived").length;
   const remainingTotal = Number(limits?.remaining?.total ?? 0);
   const remainingActive = Number(limits?.remaining?.active ?? 0);
+  const usedMemoryArchives = Number(limits?.usage?.memory_archives ?? memories.length);
+  const maxMemoryArchives = Number(limits?.max_memory_archives ?? 0);
+  const remainingMemoryArchives = Number(
+    limits?.remaining?.memory_archives ?? Math.max(0, maxMemoryArchives - usedMemoryArchives),
+  );
+  const memoryVaultFull = maxMemoryArchives > 0 && usedMemoryArchives >= maxMemoryArchives;
   const allowedAgentTypes = new Set(asList(limits?.allowed_agent_types).map((item) => String(item || "").toLowerCase()));
   const channelCatalog = asList(catalog.channels).length ? catalog.channels : FALLBACK_CHANNELS;
   const toolCatalog = asList(catalog.tools);
@@ -425,7 +447,7 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
     }
     setArchiveDraft({
       agent,
-      preserveMemory: true,
+      preserveMemory: !memoryVaultFull,
       memoryTitle: `Memoria de ${agent.name}`,
       notes: "",
     });
@@ -439,7 +461,7 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
       const data = await apiCall(`/saas/v1/agents/${encodeURIComponent(draft.agent.id)}/archive`, {
         method: "POST",
         body: JSON.stringify({
-          preserve_memory: Boolean(draft.preserveMemory),
+          preserve_memory: Boolean(draft.preserveMemory) && !memoryVaultFull,
           memory_title: draft.memoryTitle,
           notes: draft.notes,
         }),
@@ -468,6 +490,24 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
       if (data?.agent?.id) setSelectedAgentId(data.agent.id);
       setAgentView("agents");
       showStatus("Agente restaurado desde memoria", "ok");
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    } finally {
+      setBusyKey("");
+    }
+  };
+
+  const deleteMemory = async (memory) => {
+    if (!memory?.id) return;
+    const label = memory.title || memory.source_agent_name || "esta memoria";
+    const confirmed = window.confirm(`Borrar la memoria "${label}" de la boveda? Esta accion no elimina agentes activos.`);
+    if (!confirmed) return;
+    setBusyKey(`delete-memory:${memory.id}`);
+    try {
+      const data = await apiCall(`/saas/v1/agents/memories/${encodeURIComponent(memory.id)}`, { method: "DELETE" });
+      setMemories((prev) => prev.filter((item) => item.id !== memory.id));
+      if (data?.limits) setLimits(data.limits);
+      showStatus("Memoria eliminada de la boveda", "ok");
     } catch (err) {
       showStatus(String(err.message || err), "error");
     } finally {
@@ -572,13 +612,14 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
         <article className="metric-card blue"><span>Activos</span><strong>{number(activeAgents)} / {number(limits?.max_active_ai_agents || 0)}</strong><small>{number(remainingActive)} activaciones disponibles</small></article>
         <article className="metric-card amber"><span>Builder</span><strong>{limits?.builder_enabled ? "ON" : "OFF"}</strong><small>{limits?.notes || "Limites por plan aplicados"}</small></article>
         <article className="metric-card violet"><span>Catalogo</span><strong>{number(toolCatalog.length)}</strong><small>tools disponibles para conectar</small></article>
+        <article className="metric-card"><span>Boveda memorias</span><strong>{number(usedMemoryArchives)} / {number(maxMemoryArchives)}</strong><small>{number(remainingMemoryArchives)} espacios disponibles</small></article>
         <article className="metric-card rose"><span>Runtime seleccionado</span><strong>{runtimeHealth.label || "Sin datos"}</strong><small>{number(runtimeMetrics.runs_7d || 0)} runs / {number(runtimeMetrics.tokens_7d || 0)} tokens 7d</small></article>
       </section>
 
       <nav className="agent-tabs glass-card" aria-label="Secciones de AI Agents">
         <button type="button" className={agentView === "agents" ? "active" : ""} onClick={() => setAgentView("agents")}>Mis agentes</button>
         <button type="button" className={agentView === "catalog" ? "active" : ""} onClick={() => setAgentView("catalog")}>Catalogo</button>
-        <button type="button" className={agentView === "memories" ? "active" : ""} onClick={() => setAgentView("memories")}>Memorias guardadas <span>{number(memories.length)}</span></button>
+        <button type="button" className={agentView === "memories" ? "active" : ""} onClick={() => setAgentView("memories")}>Memorias guardadas <span>{number(usedMemoryArchives)} / {number(maxMemoryArchives)}</span></button>
       </nav>
 
       {agentView === "agents" ? (
@@ -951,7 +992,7 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
       {agentView === "memories" ? (
         <section className="panel glass-card agent-memory-panel">
           <div className="panel-head">
-            <div><h2>Memorias guardadas</h2><span>snapshots de agentes eliminados para reutilizar despues</span></div>
+            <div><h2>Memorias guardadas</h2><span>Boveda del plan: {number(usedMemoryArchives)} / {number(maxMemoryArchives)} memorias</span></div>
             <button type="button" onClick={() => loadAgents(false)}>Refrescar</button>
           </div>
           <div className="agent-memory-grid">
@@ -968,9 +1009,14 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
                   {asList(memory.summary?.tools).slice(0, 3).map((item) => <span key={item}>{item}</span>)}
                 </div>
                 <small>{memory.created_at}</small>
-                <button type="button" className="primary" disabled={remainingTotal <= 0 || busyKey === `restore:${memory.id}`} onClick={() => restoreMemory(memory)}>
-                  {remainingTotal <= 0 ? "Sin cupo del plan" : busyKey === `restore:${memory.id}` ? "Restaurando..." : "Crear agente desde memoria"}
-                </button>
+                <div className="agent-memory-actions">
+                  <button type="button" className="primary" disabled={remainingTotal <= 0 || busyKey === `restore:${memory.id}`} onClick={() => restoreMemory(memory)}>
+                    {remainingTotal <= 0 ? "Sin cupo del plan" : busyKey === `restore:${memory.id}` ? "Restaurando..." : "Crear agente desde memoria"}
+                  </button>
+                  <button type="button" className="danger-button" disabled={busyKey === `delete-memory:${memory.id}`} onClick={() => deleteMemory(memory)}>
+                    {busyKey === `delete-memory:${memory.id}` ? "Borrando..." : "Borrar memoria"}
+                  </button>
+                </div>
               </article>
             ))}
             {!memories.length ? <div className="empty">Aun no hay memorias guardadas. Cuando elimines un agente, puedes conservar su memoria aqui.</div> : null}
@@ -986,11 +1032,22 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
               <button type="button" onClick={() => setArchiveDraft(null)}>Cerrar</button>
             </div>
             <p>El agente se quitara de la operacion. Puedes conservar su memoria para crear otro agente despues sin perder configuracion, reglas, objetivos y contexto reciente.</p>
+            {memoryVaultFull ? (
+              <div className="agent-vault-warning">
+                <strong>Boveda de memorias llena</strong>
+                <span>Este plan ya usa {number(usedMemoryArchives)} de {number(maxMemoryArchives)} memorias. Si eliminas el agente ahora, su memoria se perdera porque no hay espacio para guardarla.</span>
+              </div>
+            ) : null}
             <label className="check-row">
-              <input type="checkbox" checked={Boolean(archiveDraft.preserveMemory)} onChange={(event) => setArchiveDraft((prev) => ({ ...prev, preserveMemory: event.target.checked }))} />
-              <span><b>Conservar memoria del agente</b><small>Guarda un snapshot reutilizable en la subpestaña Memorias guardadas.</small></span>
+              <input
+                type="checkbox"
+                checked={Boolean(archiveDraft.preserveMemory) && !memoryVaultFull}
+                disabled={memoryVaultFull}
+                onChange={(event) => setArchiveDraft((prev) => ({ ...prev, preserveMemory: memoryVaultFull ? false : event.target.checked }))}
+              />
+              <span><b>Conservar memoria del agente</b><small>Guarda un snapshot reutilizable en la subpestana Memorias guardadas.</small></span>
             </label>
-            {archiveDraft.preserveMemory ? (
+            {archiveDraft.preserveMemory && !memoryVaultFull ? (
               <>
                 <label>Titulo de la memoria
                   <input value={archiveDraft.memoryTitle} onChange={(event) => setArchiveDraft((prev) => ({ ...prev, memoryTitle: event.target.value }))} />
@@ -1003,7 +1060,7 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
             <div className="panel-actions">
               <button type="button" onClick={() => setArchiveDraft(null)}>Cancelar</button>
               <button type="button" className="danger-button" disabled={busyKey === `archive:${archiveDraft.agent?.id}`} onClick={archiveSelectedAgent}>
-                {busyKey === `archive:${archiveDraft.agent?.id}` ? "Eliminando..." : "Eliminar agente"}
+                {busyKey === `archive:${archiveDraft.agent?.id}` ? "Eliminando..." : memoryVaultFull ? "Eliminar sin guardar memoria" : "Eliminar agente"}
               </button>
             </div>
           </section>

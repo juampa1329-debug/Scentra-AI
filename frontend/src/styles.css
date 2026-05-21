@@ -368,6 +368,14 @@ nav { display: grid; gap: 8px; width: 100%; }
 .agent-memory-card small {
   color: var(--muted);
 }
+.agent-memory-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.agent-memory-actions button {
+  flex: 1 1 180px;
+}
 .agent-archive-modal {
   display: grid;
   gap: 14px;
@@ -377,6 +385,23 @@ nav { display: grid; gap: 8px; width: 100%; }
   margin: 0;
   color: var(--soft);
   line-height: 1.5;
+}
+.agent-vault-warning {
+  display: grid;
+  gap: 5px;
+  border: 1px solid rgba(251,191,36,0.34);
+  border-radius: 18px;
+  background: linear-gradient(135deg, rgba(251,191,36,0.13), rgba(20,184,166,0.06));
+  color: var(--soft);
+  padding: 12px 14px;
+}
+.agent-vault-warning strong {
+  color: var(--amber);
+}
+.agent-vault-warning span {
+  color: var(--soft);
+  font-size: 13px;
+  line-height: 1.45;
 }
 .agent-card-head, .agent-detail-title, .agent-policy, .agent-mini-metrics {
   display: flex;
@@ -960,6 +985,7 @@ nav { display: grid; gap: 8px; width: 100%; }
 .row-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .panel-head .row-actions { align-items: center; }
 .panel-head .row-actions em { font-style: normal; }
+.compact-actions { justify-content: flex-start; gap: 8px; margin-top: 8px; }
 .row-actions button { min-height: 32px; border-radius: 11px; font-size: 12px; }
 .secret-box { display: grid; gap: 7px; border: 1px solid rgba(52,211,153,0.34); background: rgba(20,184,166,0.10); border-radius: 18px; padding: 12px; margin: 12px 0; }
 .secret-box code, .code-block, .code-list code { overflow-wrap: anywhere; }

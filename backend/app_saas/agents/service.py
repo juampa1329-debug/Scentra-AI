@@ -40,6 +40,16 @@ ALL_AGENT_TYPES = [
     "tourism_itinerary",
     "hr_recruiting",
     "multi_location_ops",
+    "legal_intake",
+    "insurance_claims",
+    "financial_services",
+    "dental_booking",
+    "fitness_membership",
+    "event_planner",
+    "nonprofit_donor",
+    "public_sector_services",
+    "saas_onboarding",
+    "field_service_dispatch",
 ]
 
 CORE_AGENT_TYPES = ALL_AGENT_TYPES[:10]
@@ -91,6 +101,17 @@ TOOL_CATALOG: list[dict[str, str]] = [
     {"code": "recruiting.qualify", "group": "Verticales", "label": "Reclutamiento", "description": "Precalificar candidatos y coordinar entrevistas."},
     {"code": "locations.compare", "group": "Verticales", "label": "Multi-sede", "description": "Comparar sedes, sucursales y desempeno operacional."},
     {"code": "itinerary.plan", "group": "Verticales", "label": "Itinerarios", "description": "Crear planes de viaje, tours y recomendaciones."},
+    {"code": "legal.intake", "group": "Verticales", "label": "Intake legal", "description": "Recolectar datos iniciales sin dar asesoria legal automatica."},
+    {"code": "claims.intake", "group": "Verticales", "label": "Siniestros y reclamos", "description": "Clasificar reclamos, documentos y estado de caso."},
+    {"code": "documents.request", "group": "Verticales", "label": "Solicitud de documentos", "description": "Pedir archivos faltantes y registrar evidencias sin exponer datos sensibles."},
+    {"code": "finance.qualify", "group": "Verticales", "label": "Servicios financieros", "description": "Calificar necesidades financieras con reglas de cumplimiento."},
+    {"code": "membership.renewal", "group": "Verticales", "label": "Membresias", "description": "Gestionar renovaciones, asistencia y retencion de miembros."},
+    {"code": "events.plan", "group": "Verticales", "label": "Eventos", "description": "Recolectar fecha, invitados, presupuesto y requerimientos del evento."},
+    {"code": "donations.followup", "group": "Verticales", "label": "Donantes", "description": "Segmentar donantes, agradecer y sugerir seguimiento."},
+    {"code": "case.status", "group": "Verticales", "label": "Estado de tramite", "description": "Consultar solicitudes, radicados y proximos pasos."},
+    {"code": "saas.onboarding", "group": "Verticales", "label": "Onboarding SaaS", "description": "Guiar activacion, setup y expansion de cuentas B2B."},
+    {"code": "dispatch.schedule", "group": "Verticales", "label": "Despacho tecnico", "description": "Coordinar visitas, tecnicos, rutas y SLA."},
+    {"code": "compliance.check", "group": "Gobierno", "label": "Check de cumplimiento", "description": "Detectar temas regulados y bloquear respuestas de riesgo."},
 ]
 
 ACTION_DRAFT_PRESETS: list[dict[str, str]] = [
@@ -176,6 +197,7 @@ MEMORY_FLAG_CATALOG: list[dict[str, str]] = [
     {"code": "incident_history", "label": "Historial de incidentes", "description": "Considera errores y reparaciones anteriores."},
     {"code": "workflow_history", "label": "Historial de workflows", "description": "Aprende de automatizaciones existentes."},
     {"code": "vertical_context", "label": "Contexto vertical", "description": "Usa reglas, catalogos, horarios y politicas de la industria."},
+    {"code": "compliance_context", "label": "Contexto regulado", "description": "Recuerda limites, aprobaciones y disclaimers para sectores sensibles."},
 ]
 
 APPROVAL_FLAG_CATALOG: list[dict[str, str]] = [
@@ -435,7 +457,7 @@ AGENT_TEMPLATES: dict[str, dict[str, Any]] = {
         "name": "Education Admissions Agent",
         "category": "vertical_education",
         "headline": "Admisiones, programas y seguimiento de aspirantes.",
-        "description": "Orienta aspirantes, califica interes y prepara seguimiento para matrículas o admisiones.",
+        "description": "Orienta aspirantes, califica interes y prepara seguimiento para matriculas o admisiones.",
         "channels": ["whatsapp", "instagram", "facebook", "web"],
         "tools": ["admissions.qualify", "knowledge.search", "crm.update", "conversation.reply"],
         "goals": ["Identificar programa de interes", "Resolver requisitos frecuentes", "Agendar asesor o enviar siguiente paso"],
@@ -580,6 +602,156 @@ AGENT_TEMPLATES: dict[str, dict[str, Any]] = {
         "approval_policy": {"requires_human_approval": True, "can_execute_safe_actions": True},
         "risk_level": "medium",
     },
+    "legal_intake": {
+        "agent_type": "legal_intake",
+        "name": "Legal Intake Agent",
+        "category": "vertical_legal",
+        "headline": "Intake, documentos y escalacion legal segura.",
+        "description": "Recolecta hechos iniciales, documentos y prioridad sin dar asesoria legal automatica.",
+        "channels": ["whatsapp", "facebook", "web"],
+        "tools": ["legal.intake", "documents.request", "crm.update", "compliance.check"],
+        "goals": ["Recolectar datos del caso", "Detectar urgencia y jurisdiccion", "Escalar a humano antes de asesorar"],
+        "personality": {"tone": "formal, cuidadoso y claro", "risk_posture": "conservador"},
+        "provider_policy": {"route": "support", "preferred": "kimi", "fallback": "openrouter"},
+        "memory_policy": {"short_term": True, "semantic": True, "compliance_context": True, "vertical_context": True},
+        "approval_policy": {"requires_human_approval": True, "can_send_messages": False, "can_update_crm": True},
+        "risk_level": "high",
+    },
+    "insurance_claims": {
+        "agent_type": "insurance_claims",
+        "name": "Insurance Claims Agent",
+        "category": "vertical_insurance",
+        "headline": "Siniestros, documentos, estado y seguimiento.",
+        "description": "Clasifica reclamos, recopila evidencias y sugiere proximos pasos con aprobacion humana.",
+        "channels": ["whatsapp", "facebook", "web"],
+        "tools": ["claims.intake", "documents.request", "case.status", "crm.update"],
+        "goals": ["Capturar poliza y tipo de siniestro", "Solicitar documentos faltantes", "Priorizar reclamos sensibles"],
+        "personality": {"tone": "tranquilo, preciso y orientado a solucion", "risk_posture": "conservador"},
+        "provider_policy": {"route": "support", "preferred": "google", "fallback": "openrouter"},
+        "memory_policy": {"short_term": True, "semantic": True, "customer_profile": True, "compliance_context": True},
+        "approval_policy": {"requires_human_approval": True, "can_send_messages": True, "can_update_crm": True},
+        "risk_level": "high",
+    },
+    "financial_services": {
+        "agent_type": "financial_services",
+        "name": "Financial Services Agent",
+        "category": "vertical_finance",
+        "headline": "Calificacion financiera, solicitudes y cumplimiento.",
+        "description": "Recolecta necesidades, presupuesto y perfil sin entregar asesoria financiera personalizada.",
+        "channels": ["whatsapp", "facebook", "web"],
+        "tools": ["finance.qualify", "compliance.check", "crm.update", "reports.create"],
+        "goals": ["Identificar necesidad financiera", "Calificar lead con criterios seguros", "Escalar productos regulados"],
+        "personality": {"tone": "profesional, prudente y transparente", "risk_posture": "conservador"},
+        "provider_policy": {"route": "classification", "preferred": "mistral", "fallback": "openrouter"},
+        "memory_policy": {"short_term": True, "semantic": True, "customer_profile": True, "compliance_context": True},
+        "approval_policy": {"requires_human_approval": True, "can_send_messages": False, "can_update_crm": True},
+        "risk_level": "high",
+    },
+    "dental_booking": {
+        "agent_type": "dental_booking",
+        "name": "Dental Booking Agent",
+        "category": "vertical_health",
+        "headline": "Citas odontologicas e intake administrativo.",
+        "description": "Agenda valoraciones, recopila motivo administrativo y escala urgencias sin diagnosticar.",
+        "channels": ["whatsapp", "instagram", "facebook", "web"],
+        "tools": ["appointments.schedule", "service.intake", "crm.update", "conversation.reply"],
+        "goals": ["Agendar valoraciones", "Identificar urgencias odontologicas para humano", "Reducir no-shows"],
+        "personality": {"tone": "tranquilizador, claro y profesional", "risk_posture": "conservador"},
+        "provider_policy": {"route": "vertical_ops", "preferred": "google", "fallback": "mistral"},
+        "memory_policy": {"short_term": True, "semantic": True, "customer_profile": True, "compliance_context": True},
+        "approval_policy": {"requires_human_approval": True, "can_send_messages": True, "can_update_crm": True},
+        "risk_level": "high",
+    },
+    "fitness_membership": {
+        "agent_type": "fitness_membership",
+        "name": "Fitness Membership Agent",
+        "category": "vertical_services",
+        "headline": "Membresias, clases, retencion y upsell.",
+        "description": "Atiende leads de gimnasio, agenda clases de prueba y detecta riesgo de abandono.",
+        "channels": ["whatsapp", "instagram", "facebook", "web"],
+        "tools": ["membership.renewal", "appointments.schedule", "crm.update", "remarketing.suggest"],
+        "goals": ["Convertir clases de prueba", "Recuperar miembros inactivos", "Sugerir planes y renovaciones"],
+        "personality": {"tone": "motivador, directo y cercano", "risk_posture": "moderado"},
+        "provider_policy": {"route": "sales", "preferred": "google", "fallback": "openrouter"},
+        "memory_policy": {"short_term": True, "semantic": True, "customer_profile": True, "vertical_context": True},
+        "approval_policy": {"requires_human_approval": True, "can_send_messages": True, "can_update_crm": True},
+        "risk_level": "medium",
+    },
+    "event_planner": {
+        "agent_type": "event_planner",
+        "name": "Event Planner Agent",
+        "category": "vertical_events",
+        "headline": "Eventos, presupuestos, invitados y propuestas.",
+        "description": "Califica eventos, captura requerimientos y prepara propuestas para revision comercial.",
+        "channels": ["whatsapp", "instagram", "facebook", "web"],
+        "tools": ["events.plan", "catalog.search", "crm.update", "conversation.reply"],
+        "goals": ["Recolectar fecha y cantidad de invitados", "Calificar presupuesto", "Preparar propuesta o cita"],
+        "personality": {"tone": "organizado, creativo y comercial", "risk_posture": "moderado"},
+        "provider_policy": {"route": "sales", "preferred": "kimi", "fallback": "openrouter"},
+        "memory_policy": {"short_term": True, "semantic": True, "customer_profile": True, "vertical_context": True},
+        "approval_policy": {"requires_human_approval": True, "can_send_messages": True, "can_update_crm": True},
+        "risk_level": "medium",
+    },
+    "nonprofit_donor": {
+        "agent_type": "nonprofit_donor",
+        "name": "Nonprofit Donor Agent",
+        "category": "vertical_nonprofit",
+        "headline": "Donantes, voluntarios, impacto y seguimiento.",
+        "description": "Segmenta donantes, prepara agradecimientos y sugiere acciones de fidelizacion.",
+        "channels": ["whatsapp", "instagram", "facebook", "web"],
+        "tools": ["donations.followup", "crm.update", "reports.create", "campaigns.create_draft"],
+        "goals": ["Agradecer donaciones", "Detectar donantes recurrentes", "Sugerir campanas de impacto"],
+        "personality": {"tone": "humano, agradecido y transparente", "risk_posture": "conservador"},
+        "provider_policy": {"route": "campaigns", "preferred": "google", "fallback": "openrouter"},
+        "memory_policy": {"short_term": True, "semantic": True, "customer_profile": True, "business_summary": True},
+        "approval_policy": {"requires_human_approval": True, "can_send_messages": True, "can_execute_safe_actions": True},
+        "risk_level": "medium",
+    },
+    "public_sector_services": {
+        "agent_type": "public_sector_services",
+        "name": "Public Services Agent",
+        "category": "vertical_public_sector",
+        "headline": "Tramites, casos, citas y orientacion ciudadana.",
+        "description": "Orienta sobre tramites, estados y requisitos usando knowledge base validada.",
+        "channels": ["whatsapp", "facebook", "web"],
+        "tools": ["case.status", "knowledge.search", "appointments.schedule", "compliance.check"],
+        "goals": ["Explicar requisitos", "Consultar o registrar estado de caso", "Escalar situaciones sensibles"],
+        "personality": {"tone": "institucional, claro y accesible", "risk_posture": "conservador"},
+        "provider_policy": {"route": "rag", "preferred": "google", "fallback": "mistral"},
+        "memory_policy": {"short_term": True, "semantic": True, "knowledge_grounded": True, "compliance_context": True},
+        "approval_policy": {"requires_human_approval": True, "can_send_messages": False, "can_execute_safe_actions": True},
+        "risk_level": "high",
+    },
+    "saas_onboarding": {
+        "agent_type": "saas_onboarding",
+        "name": "SaaS Onboarding Agent",
+        "category": "vertical_b2b",
+        "headline": "Activacion, adopcion y expansion de cuentas B2B.",
+        "description": "Guia usuarios por setup, detecta bloqueos y sugiere expansion o soporte.",
+        "channels": ["whatsapp", "instagram", "facebook", "web"],
+        "tools": ["saas.onboarding", "knowledge.search", "crm.update", "advisor.actions"],
+        "goals": ["Acelerar activacion", "Detectar cuentas bloqueadas", "Sugerir expansion y capacitacion"],
+        "personality": {"tone": "consultivo, tecnico y paciente", "risk_posture": "moderado"},
+        "provider_policy": {"route": "support", "preferred": "kimi", "fallback": "openrouter"},
+        "memory_policy": {"short_term": True, "semantic": True, "customer_profile": True, "workflow_history": True},
+        "approval_policy": {"requires_human_approval": True, "can_send_messages": True, "can_update_crm": True},
+        "risk_level": "medium",
+    },
+    "field_service_dispatch": {
+        "agent_type": "field_service_dispatch",
+        "name": "Field Service Dispatch Agent",
+        "category": "vertical_operations",
+        "headline": "Tecnicos, rutas, visitas y SLA.",
+        "description": "Coordina solicitudes de servicio en campo, prioridad, direccion, disponibilidad y seguimiento.",
+        "channels": ["whatsapp", "facebook", "web"],
+        "tools": ["dispatch.schedule", "service.intake", "crm.update", "tickets.create"],
+        "goals": ["Recolectar direccion y disponibilidad", "Priorizar urgencias", "Coordinar visita o ticket"],
+        "personality": {"tone": "operativo, claro y confiable", "risk_posture": "conservador"},
+        "provider_policy": {"route": "vertical_ops", "preferred": "mistral", "fallback": "openrouter"},
+        "memory_policy": {"short_term": True, "semantic": True, "customer_profile": True, "incident_history": True},
+        "approval_policy": {"requires_human_approval": True, "can_send_messages": True, "can_update_crm": True},
+        "risk_level": "medium",
+    },
 }
 
 
@@ -648,6 +820,7 @@ def _ensure_tables(conn: Connection) -> None:
                 plan_code TEXT PRIMARY KEY,
                 max_ai_agents INTEGER NOT NULL DEFAULT 1,
                 max_active_ai_agents INTEGER NOT NULL DEFAULT 1,
+                max_memory_archives INTEGER NOT NULL DEFAULT 1,
                 allowed_agent_types_json JSONB NOT NULL DEFAULT '[]'::jsonb,
                 builder_enabled BOOLEAN NOT NULL DEFAULT TRUE,
                 notes TEXT NOT NULL DEFAULT '',
@@ -663,6 +836,7 @@ def _ensure_tables(conn: Connection) -> None:
             ALTER TABLE saas_ai_agent_plan_limits
               ADD COLUMN IF NOT EXISTS max_ai_agents INTEGER NOT NULL DEFAULT 1,
               ADD COLUMN IF NOT EXISTS max_active_ai_agents INTEGER NOT NULL DEFAULT 1,
+              ADD COLUMN IF NOT EXISTS max_memory_archives INTEGER NOT NULL DEFAULT 1,
               ADD COLUMN IF NOT EXISTS allowed_agent_types_json JSONB NOT NULL DEFAULT '[]'::jsonb,
               ADD COLUMN IF NOT EXISTS builder_enabled BOOLEAN NOT NULL DEFAULT TRUE,
               ADD COLUMN IF NOT EXISTS notes TEXT NOT NULL DEFAULT '',
@@ -746,20 +920,6 @@ def _ensure_tables(conn: Connection) -> None:
     conn.execute(
         text(
             """
-            ALTER TABLE saas_ai_agent_events
-              ADD COLUMN IF NOT EXISTS tenant_id UUID NULL,
-              ADD COLUMN IF NOT EXISTS agent_id UUID NULL,
-              ADD COLUMN IF NOT EXISTS actor_user_id UUID NULL,
-              ADD COLUMN IF NOT EXISTS event_type TEXT NOT NULL DEFAULT 'agent.event',
-              ADD COLUMN IF NOT EXISTS summary TEXT NOT NULL DEFAULT '',
-              ADD COLUMN IF NOT EXISTS details_json JSONB NOT NULL DEFAULT '{}'::jsonb,
-              ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW()
-            """
-        )
-    )
-    conn.execute(
-        text(
-            """
             CREATE TABLE IF NOT EXISTS saas_ai_agent_events (
                 id UUID PRIMARY KEY,
                 tenant_id UUID NOT NULL REFERENCES saas_tenants(id) ON DELETE CASCADE,
@@ -770,6 +930,20 @@ def _ensure_tables(conn: Connection) -> None:
                 details_json JSONB NOT NULL DEFAULT '{}'::jsonb,
                 created_at TIMESTAMP NOT NULL DEFAULT NOW()
             )
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
+            ALTER TABLE saas_ai_agent_events
+              ADD COLUMN IF NOT EXISTS tenant_id UUID NULL,
+              ADD COLUMN IF NOT EXISTS agent_id UUID NULL,
+              ADD COLUMN IF NOT EXISTS actor_user_id UUID NULL,
+              ADD COLUMN IF NOT EXISTS event_type TEXT NOT NULL DEFAULT 'agent.event',
+              ADD COLUMN IF NOT EXISTS summary TEXT NOT NULL DEFAULT '',
+              ADD COLUMN IF NOT EXISTS details_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+              ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW()
             """
         )
     )
@@ -814,32 +988,36 @@ def _ensure_tables(conn: Connection) -> None:
 def _seed_plan_limits(conn: Connection) -> None:
     all_types = ALL_AGENT_TYPES
     rows = [
-        ("demo", 2, 1, all_types, True, "Demo de 30 dias: explora AI Agents con ejecucion controlada."),
-        ("starter", 1, 1, all_types, True, "Plan starter: un agente AI activo."),
-        ("basic", 1, 1, all_types, True, "Plan basico: un agente AI activo."),
-        ("growth", 3, 3, all_types, True, "Growth: equipo pequeno con varios agentes AI."),
-        ("pro", 6, 6, all_types, True, "Pro: suite de agentes AI para operacion comercial."),
-        ("enterprise", 50, 50, all_types, True, "Enterprise: limites negociables y gobierno avanzado."),
+        ("demo", 2, 1, 2, all_types, True, "Demo de 30 dias: explora AI Agents con ejecucion controlada."),
+        ("starter", 1, 1, 1, all_types, True, "Plan starter: un agente AI activo."),
+        ("basic", 1, 1, 1, all_types, True, "Plan basico: un agente AI activo."),
+        ("growth", 3, 3, 5, all_types, True, "Growth: equipo pequeno con varios agentes AI."),
+        ("pro", 6, 6, 15, all_types, True, "Pro: suite de agentes AI para operacion comercial."),
+        ("enterprise", 50, 50, 200, all_types, True, "Enterprise: limites negociables y gobierno avanzado."),
     ]
-    for plan_code, max_agents, max_active, allowed, builder_enabled, notes in rows:
+    for plan_code, max_agents, max_active, max_memory, allowed, builder_enabled, notes in rows:
         conn.execute(
             text(
                 """
                 INSERT INTO saas_ai_agent_plan_limits (
-                    plan_code, max_ai_agents, max_active_ai_agents, allowed_agent_types_json,
+                    plan_code, max_ai_agents, max_active_ai_agents, max_memory_archives, allowed_agent_types_json,
                     builder_enabled, notes, updated_at
                 )
                 VALUES (
-                    :plan_code, :max_agents, :max_active, CAST(:allowed AS jsonb),
+                    :plan_code, :max_agents, :max_active, :max_memory, CAST(:allowed AS jsonb),
                     :builder_enabled, :notes, NOW()
                 )
-                ON CONFLICT (plan_code) DO NOTHING
+                ON CONFLICT (plan_code) DO UPDATE SET
+                    max_memory_archives = GREATEST(saas_ai_agent_plan_limits.max_memory_archives, EXCLUDED.max_memory_archives),
+                    updated_at = NOW()
+                WHERE saas_ai_agent_plan_limits.max_memory_archives < EXCLUDED.max_memory_archives
                 """
             ),
             {
                 "plan_code": plan_code,
                 "max_agents": max_agents,
                 "max_active": max_active,
+                "max_memory": max_memory,
                 "allowed": _json(allowed),
                 "builder_enabled": builder_enabled,
                 "notes": notes,
@@ -874,7 +1052,7 @@ def plan_limits(conn: Connection, tenant_id: str) -> dict[str, Any]:
     row = conn.execute(
         text(
             """
-            SELECT plan_code, max_ai_agents, max_active_ai_agents, allowed_agent_types_json,
+            SELECT plan_code, max_ai_agents, max_active_ai_agents, max_memory_archives, allowed_agent_types_json,
                    builder_enabled, notes, updated_at::text
             FROM saas_ai_agent_plan_limits
             WHERE plan_code = :plan_code
@@ -887,7 +1065,7 @@ def plan_limits(conn: Connection, tenant_id: str) -> dict[str, Any]:
         row = conn.execute(
             text(
                 """
-                SELECT plan_code, max_ai_agents, max_active_ai_agents, allowed_agent_types_json,
+                SELECT plan_code, max_ai_agents, max_active_ai_agents, max_memory_archives, allowed_agent_types_json,
                        builder_enabled, notes, updated_at::text
                 FROM saas_ai_agent_plan_limits
                 WHERE plan_code = 'starter'
@@ -911,6 +1089,7 @@ def plan_limits(conn: Connection, tenant_id: str) -> dict[str, Any]:
         "plan_code": data.get("plan_code") or effective_plan_code,
         "max_ai_agents": int(data.get("max_ai_agents") or 0),
         "max_active_ai_agents": int(data.get("max_active_ai_agents") or 0),
+        "max_memory_archives": int(data.get("max_memory_archives") or 0),
         "allowed_agent_types": [str(item) for item in allowed if str(item) in AGENT_TEMPLATES],
         "builder_enabled": bool(data.get("builder_enabled")),
         "notes": data.get("notes") or "",
@@ -918,6 +1097,7 @@ def plan_limits(conn: Connection, tenant_id: str) -> dict[str, Any]:
         "remaining": {
             "total": max(0, int(data.get("max_ai_agents") or 0) - counts["total"]),
             "active": max(0, int(data.get("max_active_ai_agents") or 0) - counts["active"]),
+            "memory_archives": max(0, int(data.get("max_memory_archives") or 0) - counts["memory_archives"]),
         },
         "updated_at": str(data.get("updated_at") or ""),
     }
@@ -932,7 +1112,12 @@ def agent_counts(conn: Connection, tenant_id: str) -> dict[str, int]:
                 COUNT(*) FILTER (WHERE status <> 'archived')::int AS total,
                 COUNT(*) FILTER (WHERE status = 'active')::int AS active,
                 COUNT(*) FILTER (WHERE status = 'paused')::int AS paused,
-                COUNT(*) FILTER (WHERE status = 'draft')::int AS draft
+                COUNT(*) FILTER (WHERE status = 'draft')::int AS draft,
+                (
+                    SELECT COUNT(*)::int
+                    FROM saas_ai_agent_memory_archives
+                    WHERE tenant_id = CAST(:tenant_id AS uuid)
+                ) AS memory_archives
             FROM saas_ai_agents
             WHERE tenant_id = CAST(:tenant_id AS uuid)
             """
@@ -940,7 +1125,7 @@ def agent_counts(conn: Connection, tenant_id: str) -> dict[str, int]:
         {"tenant_id": tenant_id},
     ).mappings().first()
     data = dict(row or {})
-    return {key: int(data.get(key) or 0) for key in ("total", "active", "paused", "draft")}
+    return {key: int(data.get(key) or 0) for key in ("total", "active", "paused", "draft", "memory_archives")}
 
 
 def list_templates() -> list[dict[str, Any]]:
@@ -1866,6 +2051,24 @@ def _agent_archive_payload(agent: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _assert_memory_archive_allowed(conn: Connection, tenant_id: str) -> dict[str, Any]:
+    limits = plan_limits(conn, tenant_id)
+    used = int(limits.get("usage", {}).get("memory_archives") or 0)
+    max_archives = int(limits.get("max_memory_archives") or 0)
+    if max_archives <= 0 or used >= max_archives:
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "code": "agent_memory_vault_full",
+                "metric": "agent_memory_archives",
+                "limit": max_archives,
+                "used": used,
+                "message": "La boveda de memorias esta llena para este plan.",
+            },
+        )
+    return limits
+
+
 def create_agent_memory_archive(
     conn: Connection,
     tenant_id: str,
@@ -1879,6 +2082,7 @@ def create_agent_memory_archive(
     agent = get_agent(conn, tenant_id, agent_id)
     if agent.get("agent_type") == "advisor":
         raise HTTPException(status_code=400, detail={"code": "advisor_memory_archive_blocked"})
+    _assert_memory_archive_allowed(conn, tenant_id)
     recent_events = list_agent_events(conn, tenant_id, agent_id, limit=20)
     archive_title = _clean(title, 180) or f"Memoria de {agent['name']}"
     snapshot = {
@@ -1993,6 +2197,36 @@ def list_agent_memory_archives(conn: Connection, tenant_id: str, limit: int = 10
         {"tenant_id": tenant_id, "limit": max(1, min(int(limit or 100), 200))},
     ).mappings().all()
     return [_memory_archive_row_to_dict(dict(row)) for row in rows]
+
+
+def delete_agent_memory_archive(conn: Connection, tenant_id: str, user_id: str, memory_id: str) -> dict[str, Any]:
+    _ensure_tables(conn)
+    row = conn.execute(
+        text(
+            """
+            DELETE FROM saas_ai_agent_memory_archives
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND id = CAST(:memory_id AS uuid)
+            RETURNING id::text, tenant_id::text, source_agent_id::text, source_agent_type,
+                      source_agent_name, title, notes, snapshot_json, reusable_payload_json,
+                      created_by_user_id::text, created_at::text
+            """
+        ),
+        {"tenant_id": tenant_id, "memory_id": memory_id},
+    ).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="agent_memory_not_found")
+    memory = _memory_archive_row_to_dict(dict(row))
+    _audit(
+        conn,
+        tenant_id=tenant_id,
+        agent_id=None,
+        actor_user_id=user_id,
+        event_type="agent.memory_deleted",
+        summary=f"Memoria eliminada de la boveda: {memory['title'] or memory['source_agent_name']}.",
+        details={"memory_archive_id": memory["id"], "source_agent_type": memory["source_agent_type"]},
+    )
+    return memory
 
 
 def create_agent_from_memory_archive(

@@ -19,6 +19,7 @@ from app_saas.agents.service import (
     create_agent,
     create_agent_from_memory_archive,
     create_from_template,
+    delete_agent_memory_archive,
     get_agent,
     list_agent_action_drafts,
     list_agent_events,
@@ -72,6 +73,17 @@ def post_agent_from_memory(
         set_tenant_context(conn, ctx.tenant_id)
         item = create_agent_from_memory_archive(conn, ctx.tenant_id, ctx.user_id, memory_id, payload.model_dump())
         return {"ok": True, "agent": item, "limits": plan_limits(conn, ctx.tenant_id)}
+
+
+@router.delete("/memories/{memory_id}")
+def delete_agent_memory(
+    memory_id: str,
+    ctx: AuthContext = Depends(require_role("owner", "admin", "supervisor")),
+):
+    with db_session() as conn:
+        set_tenant_context(conn, ctx.tenant_id)
+        memory = delete_agent_memory_archive(conn, ctx.tenant_id, ctx.user_id, memory_id)
+        return {"ok": True, "memory": memory, "limits": plan_limits(conn, ctx.tenant_id)}
 
 
 @router.get("")
