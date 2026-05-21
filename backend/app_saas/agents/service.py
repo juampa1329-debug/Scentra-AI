@@ -207,6 +207,88 @@ APPROVAL_FLAG_CATALOG: list[dict[str, str]] = [
     {"code": "can_update_crm", "label": "Puede actualizar CRM", "description": "Permite modificar fichas de cliente con auditoria."},
 ]
 
+BUDGET_DEFAULTS: dict[str, Any] = {
+    "monthly_token_limit": 250000,
+    "monthly_cost_limit_usd": 20,
+    "alert_threshold_percent": 80,
+    "hard_stop": False,
+}
+
+INDUSTRY_POLICY_PRESETS: list[dict[str, Any]] = [
+    {
+        "code": "restaurant",
+        "label": "Restaurante",
+        "category": "vertical_restaurant",
+        "risk_posture": "moderado",
+        "memory": {"vertical_context": True, "customer_profile": True, "short_term": True},
+        "approval": {"requires_human_approval": True, "can_send_messages": True, "can_update_crm": True},
+        "rules": ["Confirmar horarios, disponibilidad y restricciones antes de prometer una reserva."],
+    },
+    {
+        "code": "hotel",
+        "label": "Hoteleria",
+        "category": "vertical_hospitality",
+        "risk_posture": "conservador",
+        "memory": {"vertical_context": True, "customer_profile": True, "semantic": True},
+        "approval": {"requires_human_approval": True, "can_send_messages": True, "can_update_crm": True},
+        "rules": ["No confirmar tarifas, upgrades o disponibilidad sin fuente actualizada."],
+    },
+    {
+        "code": "real_estate",
+        "label": "Inmobiliaria",
+        "category": "vertical_real_estate",
+        "risk_posture": "moderado",
+        "memory": {"vertical_context": True, "customer_profile": True, "semantic": True},
+        "approval": {"requires_human_approval": True, "can_send_messages": True, "can_update_crm": True},
+        "rules": ["Calificar presupuesto, ubicacion y urgencia antes de sugerir visitas."],
+    },
+    {
+        "code": "health",
+        "label": "Clinica / salud",
+        "category": "vertical_health",
+        "risk_posture": "conservador",
+        "memory": {"compliance_context": True, "vertical_context": True, "customer_profile": True},
+        "approval": {"requires_human_approval": True, "can_send_messages": True, "can_update_crm": True},
+        "rules": ["No diagnosticar ni prometer tratamientos; escalar sintomas urgentes a humano."],
+    },
+    {
+        "code": "education",
+        "label": "Academia",
+        "category": "vertical_education",
+        "risk_posture": "moderado",
+        "memory": {"knowledge_grounded": True, "vertical_context": True, "customer_profile": True},
+        "approval": {"requires_human_approval": True, "can_send_messages": True, "can_update_crm": True},
+        "rules": ["Responder requisitos de admision solo si estan en knowledge base o CRM."],
+    },
+    {
+        "code": "beauty",
+        "label": "Estetica / belleza",
+        "category": "vertical_beauty",
+        "risk_posture": "moderado",
+        "memory": {"vertical_context": True, "customer_profile": True, "short_term": True},
+        "approval": {"requires_human_approval": True, "can_send_messages": True, "can_update_crm": True},
+        "rules": ["Confirmar agenda, contraindicaciones basicas y politicas antes de agendar."],
+    },
+    {
+        "code": "legal",
+        "label": "Legal",
+        "category": "vertical_legal",
+        "risk_posture": "conservador",
+        "memory": {"compliance_context": True, "vertical_context": True, "semantic": True},
+        "approval": {"requires_human_approval": True, "can_send_messages": False, "can_update_crm": True},
+        "rules": ["Recolectar hechos iniciales sin entregar asesoria legal automatizada."],
+    },
+    {
+        "code": "insurance",
+        "label": "Seguros",
+        "category": "vertical_insurance",
+        "risk_posture": "conservador",
+        "memory": {"compliance_context": True, "customer_profile": True, "semantic": True},
+        "approval": {"requires_human_approval": True, "can_send_messages": True, "can_update_crm": True},
+        "rules": ["No aprobar ni negar reclamaciones; solo registrar datos y documentos."],
+    },
+]
+
 AGENT_TEMPLATES: dict[str, dict[str, Any]] = {
     "advisor": {
         "agent_type": "advisor",
@@ -1141,6 +1223,8 @@ def builder_catalog() -> dict[str, Any]:
         "memory_flags": MEMORY_FLAG_CATALOG,
         "approval_flags": APPROVAL_FLAG_CATALOG,
         "action_draft_presets": ACTION_DRAFT_PRESETS,
+        "industry_policy_presets": INDUSTRY_POLICY_PRESETS,
+        "budget_defaults": BUDGET_DEFAULTS,
     }
 
 
@@ -1517,6 +1601,59 @@ def _runtime_health(item: dict[str, Any], metrics: dict[str, Any]) -> dict[str, 
     return {"status": status, "label": labels.get(status, status), "issues": issues}
 
 
+def _budget_policy(item: dict[str, Any]) -> dict[str, Any]:
+    provider_policy = _json_value(item.get("provider_policy_json"), {})
+    budget = provider_policy.get("budget") if isinstance(provider_policy, dict) else {}
+    if not isinstance(budget, dict):
+        budget = {}
+    return {
+        "monthly_token_limit": int(budget.get("monthly_token_limit") or BUDGET_DEFAULTS["monthly_token_limit"]),
+        "monthly_cost_limit_usd": float(budget.get("monthly_cost_limit_usd") or BUDGET_DEFAULTS["monthly_cost_limit_usd"]),
+        "alert_threshold_percent": int(budget.get("alert_threshold_percent") or BUDGET_DEFAULTS["alert_threshold_percent"]),
+        "hard_stop": bool(budget.get("hard_stop", BUDGET_DEFAULTS["hard_stop"])),
+    }
+
+
+def _estimate_ai_cost_usd(tokens: int, provider_code: str = "") -> float:
+    # Conservative blended estimates for dashboard governance. Exact billing
+    # should come from provider invoices once metering is connected.
+    price_per_1k = {
+        "mistral": 0.0008,
+        "google": 0.0012,
+        "kimi": 0.0015,
+        "openrouter": 0.0020,
+    }.get(str(provider_code or "").lower(), 0.0015)
+    return round(max(0, int(tokens or 0)) / 1000 * price_per_1k, 4)
+
+
+def _agent_health_score(item: dict[str, Any], metrics: dict[str, Any]) -> int:
+    score = 100
+    runs = int(metrics.get("runs_7d") or 0)
+    failed = int(metrics.get("failed_runs_7d") or 0) + int(metrics.get("skipped_runs_7d") or 0) + int(metrics.get("failed_events_7d") or 0)
+    fallback = int(metrics.get("fallback_runs_7d") or 0)
+    pending = int(metrics.get("pending_action_drafts") or 0)
+    budget = _budget_policy(item)
+    tokens_30d = int(metrics.get("tokens_30d") or metrics.get("tokens_7d") or 0)
+    token_limit = max(1, int(budget.get("monthly_token_limit") or 1))
+    usage_percent = min(200, (tokens_30d / token_limit) * 100)
+    if item.get("status") != "active":
+        score -= 12
+    if runs:
+        score -= min(35, int((failed / max(1, runs)) * 55))
+        score -= min(12, int((fallback / max(1, runs)) * 18))
+    else:
+        score -= 8
+    if pending > 5:
+        score -= min(12, pending - 5)
+    if usage_percent >= 100:
+        score -= 18
+    elif usage_percent >= int(budget.get("alert_threshold_percent") or 80):
+        score -= 8
+    if _runtime_health(item, metrics).get("status") == "critical":
+        score -= 18
+    return max(0, min(100, score))
+
+
 def _runtime_metrics(conn: Connection, item: dict[str, Any]) -> dict[str, Any]:
     tenant_id = str(item.get("tenant_id") or "")
     agent_id = str(item.get("id") or "")
@@ -1552,6 +1689,7 @@ def _runtime_metrics(conn: Connection, item: dict[str, Any]) -> dict[str, Any]:
                 COUNT(*) FILTER (WHERE status = 'skipped' AND created_at >= NOW() - INTERVAL '7 days')::int AS skipped_runs_7d,
                 COUNT(*) FILTER (WHERE fallback_used AND created_at >= NOW() - INTERVAL '7 days')::int AS fallback_runs_7d,
                 COALESCE(SUM(total_tokens) FILTER (WHERE created_at >= NOW() - INTERVAL '7 days'), 0)::int AS tokens_7d,
+                COALESCE(SUM(total_tokens) FILTER (WHERE created_at >= NOW() - INTERVAL '30 days'), 0)::int AS tokens_30d,
                 COALESCE(ROUND(AVG(latency_ms) FILTER (WHERE created_at >= NOW() - INTERVAL '7 days')), 0)::int AS avg_latency_ms_7d,
                 COALESCE(MAX(created_at)::text, '') AS last_ai_run_at
             FROM saas_ai_runs
@@ -1574,21 +1712,29 @@ def _runtime_metrics(conn: Connection, item: dict[str, Any]) -> dict[str, Any]:
         ),
         {"tenant_id": tenant_id, "agent_id": agent_id},
     ).mappings().first()
-    metrics = {key: (int(value or 0) if str(key).endswith("_7d") or key in {"tokens_7d", "avg_latency_ms_7d"} else value) for key, value in dict(event_row or {}).items()}
+    int_metric_keys = {"tokens_7d", "tokens_30d", "avg_latency_ms_7d"}
+    metrics = {key: (int(value or 0) if str(key).endswith("_7d") or key in int_metric_keys else value) for key, value in dict(event_row or {}).items()}
     for key, value in dict(run_row or {}).items():
-        metrics[key] = int(value or 0) if str(key).endswith("_7d") or key in {"tokens_7d", "avg_latency_ms_7d"} else value
+        metrics[key] = int(value or 0) if str(key).endswith("_7d") or key in int_metric_keys else value
     metrics.update(_agent_action_metrics(conn, tenant_id, agent_id))
+    budget = _budget_policy(item)
+    last_provider = ""
     if last_run:
+        last_provider = str(last_run.get("provider_code") or "")
         metrics.update(
             {
-                "last_provider": str(last_run.get("provider_code") or ""),
+                "last_provider": last_provider,
                 "last_model": str(last_run.get("model") or ""),
                 "last_run_status": str(last_run.get("status") or ""),
                 "last_error_code": str(last_run.get("error_code") or ""),
                 "last_error_message": str(last_run.get("error_message") or ""),
             }
         )
+    metrics["budget_policy"] = budget
+    metrics["estimated_cost_30d_usd"] = _estimate_ai_cost_usd(int(metrics.get("tokens_30d") or 0), last_provider)
+    metrics["budget_usage_percent"] = round((int(metrics.get("tokens_30d") or 0) / max(1, int(budget.get("monthly_token_limit") or 1))) * 100, 2)
     metrics["runtime_health"] = _runtime_health(item, metrics)
+    metrics["health_score"] = _agent_health_score(item, metrics)
     return metrics
 
 
@@ -1602,6 +1748,59 @@ def agent_runtime_summary(conn: Connection, tenant_id: str, agent_id: str) -> di
         "events": _runtime_events(conn, tenant_id, agent_id, limit=12),
         "actions": list_agent_action_drafts(conn, tenant_id, agent_id, limit=12),
         "health": metrics.get("runtime_health") or _runtime_health(item, metrics),
+    }
+
+
+def preflight_agent(conn: Connection, tenant_id: str, agent_id: str) -> dict[str, Any]:
+    item = get_agent(conn, tenant_id, agent_id)
+    metrics = _runtime_metrics(conn, item)
+    provider_policy = _json_value(item.get("provider_policy_json"), {})
+    approval = _json_value(item.get("approval_policy_json"), {})
+    memory = _json_value(item.get("memory_policy_json"), {})
+    channels = [str(value or "").strip().lower() for value in _json_value(item.get("channels_json"), []) if str(value or "").strip()]
+    tools = [str(value or "").strip().lower() for value in _json_value(item.get("tools_json"), []) if str(value or "").strip()]
+    goals = [str(value or "").strip() for value in _json_value(item.get("goals_json"), []) if str(value or "").strip()]
+    budget = _budget_policy(item)
+    checks: list[dict[str, Any]] = []
+
+    def add(code: str, label: str, ok: bool, severity: str = "medium", hint: str = "") -> None:
+        checks.append({"code": code, "label": label, "ok": bool(ok), "severity": severity, "hint": hint})
+
+    add("name", "Nombre y descripcion", bool(item.get("name") and item.get("description")), "medium", "Completa nombre y descripcion operativa.")
+    add("goals", "Objetivos definidos", len(goals) >= 2, "medium", "Define al menos dos objetivos medibles.")
+    add("channels", "Canales asignados", bool(channels), "high", "Asigna al menos un canal o Global.")
+    add("tools", "Herramientas asignadas", bool(tools), "high", "Conecta al menos una herramienta segura.")
+    conversational = str(item.get("agent_type") or "") in {"sales", "support"} or any(channel in {"whatsapp", "instagram", "facebook", "web"} for channel in channels)
+    if conversational:
+        add("conversation_tool", "Tool de respuesta conversacional", "conversation.reply" in tools, "high", "Agrega conversation.reply si el agente respondera clientes.")
+        add("send_policy", "Permiso de envio controlado", approval.get("can_send_messages") is not False, "high", "Activa envio o deja el agente como asistente interno.")
+    add("model_route", "Ruta y proveedor AI", bool(provider_policy.get("route") and provider_policy.get("preferred")), "medium", "Define ruta, proveedor preferido y fallback.")
+    add("fallback", "Fallback configurado", bool(provider_policy.get("fallback")), "medium", "Configura OpenRouter u otro fallback para resiliencia.")
+    add("memory", "Memoria o contexto", any(bool(value) for value in memory.values()), "low", "Activa memoria corta, semantica o knowledge segun el caso.")
+    add("budget_tokens", "Presupuesto mensual de tokens", int(budget.get("monthly_token_limit") or 0) > 0, "medium", "Define limite mensual de tokens.")
+    add("budget_cost", "Presupuesto mensual de costo", float(budget.get("monthly_cost_limit_usd") or 0) > 0, "medium", "Define limite mensual estimado en USD.")
+    add("human_approval", "Capa de aprobacion humana", bool(approval.get("requires_human_approval", True)), "medium", "Mantiene aprobacion humana para acciones sensibles.")
+
+    failed_high = sum(1 for check in checks if not check["ok"] and check["severity"] == "high")
+    failed_medium = sum(1 for check in checks if not check["ok"] and check["severity"] == "medium")
+    score = max(0, 100 - failed_high * 22 - failed_medium * 11 - sum(1 for check in checks if not check["ok"] and check["severity"] == "low") * 5)
+    ready = failed_high == 0 and score >= 70
+    _audit(
+        conn,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        actor_user_id=None,
+        event_type="agent.preflight_checked",
+        summary=f"Preflight de {item['name']}: {'listo' if ready else 'requiere ajustes'}.",
+        details={"score": score, "ready": ready, "failed_high": failed_high, "failed_medium": failed_medium},
+    )
+    return {
+        "ready": ready,
+        "score": score,
+        "checks": checks,
+        "health_score": metrics.get("health_score", 0),
+        "budget": budget,
+        "recommendation": "Puedes activar el agente." if ready else "Ajusta los checks marcados antes de activar.",
     }
 
 
@@ -2227,6 +2426,77 @@ def delete_agent_memory_archive(conn: Connection, tenant_id: str, user_id: str, 
         details={"memory_archive_id": memory["id"], "source_agent_type": memory["source_agent_type"]},
     )
     return memory
+
+
+def export_agent_memory_archive(conn: Connection, tenant_id: str, memory_id: str) -> dict[str, Any]:
+    _ensure_tables(conn)
+    rows = list_agent_memory_archives(conn, tenant_id, limit=200)
+    memory = next((item for item in rows if item["id"] == memory_id), None)
+    if not memory:
+        raise HTTPException(status_code=404, detail="agent_memory_not_found")
+    return {
+        "schema": "scentra.agent_memory.v1",
+        "exported_at": datetime.utcnow().isoformat(),
+        "memory": memory,
+    }
+
+
+def import_agent_memory_archive(conn: Connection, tenant_id: str, user_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    _ensure_tables(conn)
+    _assert_memory_archive_allowed(conn, tenant_id)
+    raw = payload.get("payload_json") if isinstance(payload, dict) else {}
+    if not isinstance(raw, dict):
+        raise HTTPException(status_code=400, detail={"code": "agent_memory_import_invalid"})
+    memory = raw.get("memory") if isinstance(raw.get("memory"), dict) else raw
+    reusable = memory.get("reusable_payload_json") if isinstance(memory, dict) else {}
+    snapshot = memory.get("snapshot_json") if isinstance(memory, dict) else {}
+    if not isinstance(reusable, dict) or not reusable.get("agent_type"):
+        raise HTTPException(status_code=400, detail={"code": "agent_memory_import_missing_reusable_payload"})
+    source_type = _normalize_agent_type(str(memory.get("source_agent_type") or reusable.get("agent_type") or "advisor"))
+    title = _clean(payload.get("title") or memory.get("title") or f"Memoria importada {AGENT_TEMPLATES[source_type]['name']}", 180)
+    notes = _clean(payload.get("notes") or memory.get("notes") or "Importada desde archivo JSON.", 1200)
+    source_name = _clean(memory.get("source_agent_name") or reusable.get("name") or AGENT_TEMPLATES[source_type]["name"], 160)
+    row = conn.execute(
+        text(
+            """
+            INSERT INTO saas_ai_agent_memory_archives (
+                id, tenant_id, source_agent_id, source_agent_type, source_agent_name,
+                title, notes, snapshot_json, reusable_payload_json, created_by_user_id
+            )
+            VALUES (
+                CAST(:id AS uuid), CAST(:tenant_id AS uuid), NULL,
+                :source_agent_type, :source_agent_name, :title, :notes,
+                CAST(:snapshot AS jsonb), CAST(:reusable AS jsonb),
+                CASE WHEN :user_id = '' THEN NULL ELSE CAST(:user_id AS uuid) END
+            )
+            RETURNING id::text, tenant_id::text, source_agent_id::text, source_agent_type,
+                      source_agent_name, title, notes, snapshot_json, reusable_payload_json,
+                      created_by_user_id::text, created_at::text
+            """
+        ),
+        {
+            "id": _uuid(),
+            "tenant_id": tenant_id,
+            "source_agent_type": source_type,
+            "source_agent_name": source_name,
+            "title": title,
+            "notes": notes,
+            "snapshot": _json(snapshot if isinstance(snapshot, dict) else {}),
+            "reusable": _json(reusable),
+            "user_id": user_id or "",
+        },
+    ).mappings().first()
+    imported = _memory_archive_row_to_dict(dict(row))
+    _audit(
+        conn,
+        tenant_id=tenant_id,
+        agent_id=None,
+        actor_user_id=user_id,
+        event_type="agent.memory_imported",
+        summary=f"Memoria importada en la boveda: {imported['title']}.",
+        details={"memory_archive_id": imported["id"], "source_agent_type": imported["source_agent_type"]},
+    )
+    return imported
 
 
 def create_agent_from_memory_archive(

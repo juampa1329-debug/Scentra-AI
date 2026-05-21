@@ -6,6 +6,7 @@ from app_saas.agents.schemas import (
     AgentActionDraftIn,
     AgentArchiveIn,
     AgentEventIn,
+    AgentMemoryImportIn,
     AgentMemoryRestoreIn,
     AiAgentCreateIn,
     AiAgentPatchIn,
@@ -20,13 +21,16 @@ from app_saas.agents.service import (
     create_agent_from_memory_archive,
     create_from_template,
     delete_agent_memory_archive,
+    export_agent_memory_archive,
     get_agent,
+    import_agent_memory_archive,
     list_agent_action_drafts,
     list_agent_events,
     list_agent_memory_archives,
     list_agents,
     list_templates,
     plan_limits,
+    preflight_agent,
     set_agent_status,
     update_agent,
 )
@@ -86,6 +90,27 @@ def delete_agent_memory(
         return {"ok": True, "memory": memory, "limits": plan_limits(conn, ctx.tenant_id)}
 
 
+@router.get("/memories/{memory_id}/export")
+def export_agent_memory(
+    memory_id: str,
+    ctx: AuthContext = Depends(require_role("owner", "admin", "supervisor")),
+):
+    with db_session() as conn:
+        set_tenant_context(conn, ctx.tenant_id)
+        return {"ok": True, "export": export_agent_memory_archive(conn, ctx.tenant_id, memory_id)}
+
+
+@router.post("/memories/import")
+def import_agent_memory(
+    payload: AgentMemoryImportIn,
+    ctx: AuthContext = Depends(require_role("owner", "admin", "supervisor")),
+):
+    with db_session() as conn:
+        set_tenant_context(conn, ctx.tenant_id)
+        memory = import_agent_memory_archive(conn, ctx.tenant_id, ctx.user_id, payload.model_dump())
+        return {"ok": True, "memory": memory, "limits": plan_limits(conn, ctx.tenant_id)}
+
+
 @router.get("")
 def get_agents(
     include_archived: bool = Query(default=False),
@@ -127,6 +152,13 @@ def get_agent_runtime(agent_id: str, ctx: AuthContext = Depends(get_current_user
         set_tenant_context(conn, ctx.tenant_id)
         summary = agent_runtime_summary(conn, ctx.tenant_id, agent_id)
         return {"ok": True, "tenant_id": ctx.tenant_id, **summary}
+
+
+@router.get("/{agent_id}/preflight")
+def get_agent_preflight(agent_id: str, ctx: AuthContext = Depends(require_role("owner", "admin", "supervisor"))):
+    with db_session() as conn:
+        set_tenant_context(conn, ctx.tenant_id)
+        return {"ok": True, "tenant_id": ctx.tenant_id, "preflight": preflight_agent(conn, ctx.tenant_id, agent_id)}
 
 
 @router.get("/{agent_id}/action-drafts")

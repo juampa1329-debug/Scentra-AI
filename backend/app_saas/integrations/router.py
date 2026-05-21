@@ -180,7 +180,30 @@ def _graph_request(method: str, url: str, token: str, payload: dict[str, Any] | 
             detail = json.loads(raw)
         except Exception:
             detail = raw[:500]
-        raise HTTPException(status_code=502, detail={"code": "meta_graph_error", "meta": detail})
+        http_status = int(getattr(exc, "code", 0) or 0)
+        response_payload = detail if isinstance(detail, dict) else {}
+        error_status = classify_meta_error(http_status, response_payload)
+        meta_detail = meta_error(response_payload)
+        message = str(
+            (meta_detail or {}).get("message")
+            or (response_payload.get("error") or {}).get("message")
+            or detail
+            or "Meta Graph rechazo la solicitud."
+        )[:600]
+        lower_message = message.lower()
+        if "pin" in lower_message or "verification" in lower_message:
+            error_status = "phone_pin_or_verification_failed"
+        raise HTTPException(
+            status_code=_meta_error_http_status(error_status),
+            detail={
+                "code": "meta_graph_error",
+                "error_status": error_status,
+                "message": message,
+                "hint": _whatsapp_phone_register_hint(error_status, message),
+                "http_status": http_status,
+                "meta": meta_detail or detail,
+            },
+        )
     except Exception as exc:
         raise HTTPException(status_code=502, detail={"code": "meta_graph_unavailable", "message": str(exc)[:300]})
 
@@ -194,6 +217,10 @@ def _meta_error_http_status(error_status: str) -> int:
         return 404
     if error_status == "rate_limited":
         return 429
+    if error_status == "phone_pin_or_verification_failed":
+        return 400
+    if error_status == "meta_oauthexception":
+        return 400
     return 502
 
 
@@ -207,6 +234,25 @@ def _whatsapp_phone_sync_hint(error_status: str) -> str:
     if error_status == "rate_limited":
         return "Meta limito temporalmente la solicitud. Espera unos minutos y vuelve a sincronizar."
     return "Meta Graph rechazo la sincronizacion. Revisa token, WABA ID, App ID y permisos del System User."
+
+
+def _whatsapp_phone_register_hint(error_status: str, meta_message: str = "") -> str:
+    message = str(meta_message or "").lower()
+    if error_status == "token_expired_or_invalid":
+        return "El token permanente de Meta no se puede usar. Reemplazalo por un token valido del System User con permisos de WhatsApp."
+    if error_status == "insufficient_permissions":
+        return "El token no tiene permiso para registrar este Phone Number ID. Revisa acceso del System User al WABA y permisos whatsapp_business_management / whatsapp_business_messaging."
+    if error_status == "phone_pin_or_verification_failed" or "pin" in message or "verification" in message:
+        return "Meta rechazo el PIN. Debe ser el PIN de verificacion de dos pasos configurado en WhatsApp Manager para este numero."
+    if error_status in {"asset_not_found_or_not_accessible", "waba_not_found_or_not_accessible"}:
+        return "El Phone Number ID no pertenece al WABA sincronizado o el token pertenece a otro portafolio. Sincroniza numeros y selecciona el ID listado por Meta."
+    if error_status == "rate_limited":
+        return "Meta limito temporalmente el registro. Espera unos minutos antes de volver a intentar."
+    if "expired" in message:
+        return "Meta marca el numero como vencido/expirado. Revisa el estado del numero en WhatsApp Manager y vuelve a iniciar el alta si corresponde."
+    if "already" in message and ("register" in message or "registered" in message):
+        return "Meta indica que el numero ya estaba registrado. Sincroniza numeros y prueba envio/recepcion antes de repetir el registro."
+    return "Meta rechazo el registro. Verifica que no hayas intercambiado Phone Number ID con WABA ID, que el numero este activo y que el token pertenezca al mismo Business Portfolio."
 
 
 def _load_whatsapp_integration(conn, tenant_id: str) -> dict[str, Any]:
@@ -1106,7 +1152,7 @@ def list_whatsapp_phone_numbers(ctx: AuthContext = Depends(require_role("owner",
         integration = _load_whatsapp_integration(conn, ctx.tenant_id)
         config = integration["config"]
         token = _integration_token(config)
-        waba_id = str(config.get("business_account_id") or config.get("waba_id") or "").strip()
+        waba_id = _waba_id_from_config(config)
         version = str(config.get("graph_api_version") or "v24.0").strip()
         if not token:
             raise HTTPException(status_code=400, detail="meta_access_token_required")
@@ -1200,18 +1246,69 @@ def register_whatsapp_phone(
         config = integration["config"]
         token = _integration_token(config)
         version = str(config.get("graph_api_version") or "v24.0").strip()
+        waba_id = _waba_id_from_config(config)
         if not token:
             raise HTTPException(status_code=400, detail="meta_access_token_required")
+        if waba_id and phone_number_id == waba_id:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "phone_number_id_looks_like_waba_id",
+                    "message": "El valor seleccionado parece ser el WABA ID, no el Phone Number ID.",
+                    "hint": "Primero pulsa Sincronizar numeros y selecciona el ID que aparece debajo del telefono. El WABA ID va en la integracion, pero no en el registro del numero.",
+                    "waba_id": waba_id,
+                    "phone_number_id": phone_number_id,
+                },
+            )
+        synced_numbers = config.get("phone_numbers") if isinstance(config.get("phone_numbers"), list) else []
+        synced_ids = {str(item.get("id") or "").strip() for item in synced_numbers if isinstance(item, dict) and str(item.get("id") or "").strip()}
+        selected_phone = next((item for item in synced_numbers if isinstance(item, dict) and str(item.get("id") or "").strip() == phone_number_id), {})
+        if synced_ids and phone_number_id not in synced_ids:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "phone_number_not_in_synced_waba",
+                    "message": "El Phone Number ID no aparece entre los numeros sincronizados para este WABA.",
+                    "hint": "Vuelve a pulsar Sincronizar numeros y selecciona un numero de la lista. Si el numero no aparece, el token no tiene acceso a ese WABA o los IDs estan cruzados.",
+                    "waba_id": waba_id,
+                    "phone_number_id": phone_number_id,
+                    "synced_phone_number_ids": sorted(synced_ids),
+                },
+            )
 
-        result = _graph_request(
-            "POST",
-            f"https://graph.facebook.com/{version}/{phone_number_id}/register",
-            token,
-            {"messaging_product": "whatsapp", "pin": payload.pin},
-        )
+        try:
+            result = _graph_request(
+                "POST",
+                f"https://graph.facebook.com/{version}/{phone_number_id}/register",
+                token,
+                {"messaging_product": "whatsapp", "pin": payload.pin},
+            )
+        except HTTPException as exc:
+            detail = exc.detail if isinstance(exc.detail, dict) else {"message": str(exc.detail)}
+            config["phone_registration_status"] = detail.get("error_status") or "failed"
+            config["last_phone_register_error"] = {
+                **detail,
+                "phone_number_id": phone_number_id,
+                "waba_id": waba_id,
+                "selected_phone": selected_phone,
+                "graph_version": version,
+                "checked_at": datetime.now(timezone.utc).isoformat(),
+            }
+            conn.execute(
+                text(
+                    """
+                    UPDATE saas_integrations
+                    SET config_json = CAST(:config_json AS jsonb), last_sync_at = NOW(), updated_at = NOW()
+                    WHERE id = CAST(:integration_id AS uuid)
+                    """
+                ),
+                {"integration_id": integration["id"], "config_json": json.dumps(config)},
+            )
+            raise
         config["phone_number_id"] = phone_number_id
         config["phone_registration_status"] = "registered" if result.get("success") else "unknown"
         config["last_phone_register_response"] = result
+        config.pop("last_phone_register_error", None)
         conn.execute(
             text(
                 """

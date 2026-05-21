@@ -59,3 +59,9 @@ class AgentArchiveIn(BaseModel):
 class AgentMemoryRestoreIn(BaseModel):
     name: str = Field(default="", max_length=160)
     status: str = Field(default="draft", max_length=40)
+
+
+class AgentMemoryImportIn(BaseModel):
+    title: str = Field(default="", max_length=180)
+    notes: str = Field(default="", max_length=1200)
+    payload_json: dict[str, Any] = Field(default_factory=dict)

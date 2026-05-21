@@ -376,6 +376,33 @@ nav { display: grid; gap: 8px; width: 100%; }
 .agent-memory-actions button {
   flex: 1 1 180px;
 }
+.agent-import-box {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.6fr) minmax(260px, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+  border: 1px solid rgba(183,231,224,0.12);
+  border-radius: 22px;
+  padding: 14px;
+  background: linear-gradient(135deg, rgba(20,184,166,0.10), rgba(96,165,250,0.08));
+}
+.agent-import-box strong,
+.agent-preflight-box strong {
+  display: block;
+  color: var(--ink);
+}
+.agent-import-box span,
+.agent-preflight-box span {
+  display: block;
+  color: var(--soft);
+  font-size: 12px;
+  line-height: 1.45;
+  margin-top: 4px;
+}
+.agent-import-box textarea {
+  min-height: 92px;
+  resize: vertical;
+}
 .agent-archive-modal {
   display: grid;
   gap: 14px;
@@ -642,6 +669,27 @@ nav { display: grid; gap: 8px; width: 100%; }
   font-size: 12px;
   font-weight: 800;
 }
+.agent-budget-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+.agent-budget-summary span {
+  display: grid;
+  gap: 3px;
+  border: 1px solid rgba(183,231,224,0.12);
+  border-radius: 18px;
+  padding: 11px 12px;
+  background: rgba(0,0,0,0.14);
+}
+.agent-budget-summary b {
+  color: var(--ink);
+  font-size: 18px;
+}
+.agent-budget-summary small {
+  color: var(--muted);
+  font-size: 11px;
+}
 .agent-health-pill {
   border-color: rgba(183,231,224,0.16) !important;
 }
@@ -681,6 +729,84 @@ nav { display: grid; gap: 8px; width: 100%; }
   color: var(--amber);
   font-size: 11px;
   font-weight: 900;
+}
+.agent-preflight-box {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  border: 1px solid rgba(52,211,153,0.18);
+  border-radius: 20px;
+  padding: 14px;
+  background: rgba(20,184,166,0.08);
+}
+.agent-preflight-result {
+  display: grid;
+  gap: 12px;
+  border: 1px solid rgba(183,231,224,0.12);
+  border-radius: 20px;
+  padding: 14px;
+  background: rgba(0,0,0,0.13);
+}
+.agent-preflight-result.ready {
+  border-color: rgba(52,211,153,0.28);
+  background: rgba(20,184,166,0.10);
+}
+.agent-preflight-result.blocked {
+  border-color: rgba(251,191,36,0.25);
+  background: rgba(251,191,36,0.06);
+}
+.agent-preflight-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.agent-preflight-head strong {
+  color: var(--ink);
+}
+.agent-preflight-head span {
+  border: 1px solid rgba(183,231,224,0.14);
+  border-radius: 999px;
+  padding: 6px 10px;
+  color: var(--soft);
+  font-size: 12px;
+  font-weight: 900;
+}
+.agent-preflight-list {
+  display: grid;
+  gap: 8px;
+}
+.agent-preflight-row {
+  display: grid;
+  grid-template-columns: 84px minmax(150px, 0.45fr) minmax(220px, 1fr);
+  gap: 10px;
+  align-items: center;
+  border: 1px solid rgba(183,231,224,0.10);
+  border-radius: 16px;
+  padding: 10px;
+  background: rgba(255,255,255,0.035);
+}
+.agent-preflight-row b {
+  color: var(--ok);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.agent-preflight-row.warn b {
+  color: var(--amber);
+}
+.agent-preflight-row span {
+  color: var(--ink);
+  font-weight: 900;
+}
+.agent-preflight-row small,
+.agent-preflight-result p {
+  color: var(--soft);
+  line-height: 1.45;
+}
+.agent-preflight-result p {
+  margin: 0;
 }
 .agent-runtime-test {
   display: grid;
@@ -1900,7 +2026,8 @@ nav { display: grid; gap: 8px; width: 100%; }
   .milestone-card { border-radius: 24px; padding: 18px; }
   .agents-hero-actions { display: grid; }
   .agent-card-grid, .template-agent-grid { grid-template-columns: 1fr; }
-  .agent-editor-grid, .agent-editor-grid.three, .agent-builder-section.two, .agent-note-form, .agent-runtime-test, .agent-health-grid, .agent-run-row, .agent-action-form, .agent-action-row { grid-template-columns: 1fr; }
+  .agent-editor-grid, .agent-editor-grid.three, .agent-builder-section.two, .agent-note-form, .agent-runtime-test, .agent-health-grid, .agent-run-row, .agent-action-form, .agent-action-row,
+  .agent-budget-summary, .agent-preflight-box, .agent-preflight-row, .agent-import-box { grid-template-columns: 1fr; }
   .agent-action-form .wide { grid-column: auto; }
   .agent-section-label { align-items: flex-start; flex-direction: column; }
   .agent-section-label span { text-align: left; }

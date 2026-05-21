@@ -159,6 +159,8 @@ function normalizeProvider(value) {
 function makeEditor(agent) {
   const personality = asObject(agent?.personality_json);
   const providerPolicy = asObject(agent?.provider_policy_json);
+  const budget = asObject(providerPolicy.budget);
+  const experiment = asObject(providerPolicy.experiment);
   return {
     name: String(agent?.name || ""),
     description: String(agent?.description || ""),
@@ -173,6 +175,18 @@ function makeEditor(agent) {
     providerRoute: String(providerPolicy.route || "advisor"),
     preferredProvider: normalizeProvider(providerPolicy.preferred || "google"),
     fallbackProvider: normalizeProvider(providerPolicy.fallback || "openrouter"),
+    budget: {
+      monthlyTokenLimit: String(budget.monthly_token_limit ?? ""),
+      monthlyCostLimitUsd: String(budget.monthly_cost_limit_usd ?? ""),
+      alertThresholdPercent: String(budget.alert_threshold_percent ?? "80"),
+      hardStop: Boolean(budget.hard_stop),
+    },
+    experiment: {
+      enabled: Boolean(experiment.enabled),
+      variantKey: String(experiment.variant_key || "A"),
+      compareAgainst: String(experiment.compare_against || ""),
+      trafficPercent: String(experiment.traffic_percent ?? "50"),
+    },
     memory: { ...asObject(agent?.memory_policy_json) },
     approval: { ...asObject(agent?.approval_policy_json) },
   };
@@ -199,6 +213,8 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
   const [eventNote, setEventNote] = useState("");
   const [runtimeTest, setRuntimeTest] = useState({ message: "Hola, quiero saber que opciones tienen disponibles.", result: null });
   const [runtimeSummary, setRuntimeSummary] = useState(null);
+  const [preflightResult, setPreflightResult] = useState(null);
+  const [memoryImportPayload, setMemoryImportPayload] = useState("");
   const [actionDraft, setActionDraft] = useState({
     preset: "advisor.actions",
     title: "",
@@ -234,6 +250,8 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
   const providerCatalog = asList(catalog.providers).length ? catalog.providers : FALLBACK_PROVIDERS;
   const routeCatalog = asList(catalog.provider_routes).length ? catalog.provider_routes : FALLBACK_ROUTES;
   const actionPresetCatalog = asList(catalog.action_draft_presets).length ? catalog.action_draft_presets : FALLBACK_ACTION_PRESETS;
+  const industryPolicyPresets = asList(catalog.industry_policy_presets);
+  const budgetDefaults = asObject(catalog.budget_defaults);
   const memoryFlags = asList(catalog.memory_flags);
   const approvalFlags = asList(catalog.approval_flags);
   const groupedTools = groupBy(toolCatalog, "group");
@@ -317,6 +335,7 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
     if (!selectedAgent?.id) return;
     setEditor(makeEditor(selectedAgent));
     setDirty(false);
+    setPreflightResult(null);
     const allowed = uniqueList(selectedAgent.tools_json);
     const firstAllowedPreset = actionPresetCatalog.find((preset) => allowed.includes(preset.tool_code)) || actionPresetCatalog[0];
     setActionDraft({
@@ -351,6 +370,21 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
       [section]: { ...asObject(prev?.[section]), [key]: !Boolean(prev?.[section]?.[key]) },
     }));
     setDirty(true);
+  };
+
+  const applyIndustryPolicy = (preset) => {
+    if (!preset || !editor) return;
+    const nextRules = uniqueList([
+      ...splitLines(editor.rulesText),
+      ...asList(preset.rules),
+    ]);
+    patchEditor({
+      riskPosture: preset.risk_posture || editor.riskPosture,
+      handoffPolicy: editor.handoffPolicy || "Escalar casos sensibles, pagos, quejas o datos regulados antes de ejecutar acciones.",
+      memory: { ...asObject(editor.memory), ...asObject(preset.memory) },
+      approval: { ...asObject(editor.approval), ...asObject(preset.approval) },
+      rulesText: nextRules.join("\n"),
+    });
   };
 
   const createFromTemplate = async (agentType) => {
@@ -397,6 +431,18 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
           route: editor.providerRoute,
           preferred: editor.preferredProvider,
           fallback: editor.fallbackProvider,
+          budget: {
+            monthly_token_limit: Number(editor.budget?.monthlyTokenLimit || budgetDefaults.monthly_token_limit || 0),
+            monthly_cost_limit_usd: Number(editor.budget?.monthlyCostLimitUsd || budgetDefaults.monthly_cost_limit_usd || 0),
+            alert_threshold_percent: Number(editor.budget?.alertThresholdPercent || budgetDefaults.alert_threshold_percent || 80),
+            hard_stop: Boolean(editor.budget?.hardStop),
+          },
+          experiment: {
+            enabled: Boolean(editor.experiment?.enabled),
+            variant_key: editor.experiment?.variantKey || "A",
+            compare_against: editor.experiment?.compareAgainst || "",
+            traffic_percent: Number(editor.experiment?.trafficPercent || 50),
+          },
         },
         memory_policy_json: asObject(editor.memory),
         approval_policy_json: asObject(editor.approval),
@@ -559,6 +605,64 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
     }
   };
 
+  const runPreflight = async () => {
+    if (!selectedAgent?.id) return;
+    setBusyKey(`preflight:${selectedAgent.id}`);
+    try {
+      const data = await apiCall(`/saas/v1/agents/${encodeURIComponent(selectedAgent.id)}/preflight`);
+      setPreflightResult(data?.preflight || null);
+      showStatus(data?.preflight?.ready ? "Preflight aprobado: el agente puede activarse." : "Preflight completado: revisa ajustes antes de activar.", data?.preflight?.ready ? "ok" : "neutral");
+      await loadEvents(selectedAgent.id);
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    } finally {
+      setBusyKey("");
+    }
+  };
+
+  const exportMemory = async (memory) => {
+    if (!memory?.id) return;
+    setBusyKey(`export-memory:${memory.id}`);
+    try {
+      const data = await apiCall(`/saas/v1/agents/memories/${encodeURIComponent(memory.id)}/export`);
+      const blob = new Blob([JSON.stringify(data?.export || data, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `scentra-agent-memory-${memory.id}.json`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+      showStatus("Memoria exportada como JSON", "ok");
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    } finally {
+      setBusyKey("");
+    }
+  };
+
+  const importMemory = async () => {
+    const raw = memoryImportPayload.trim();
+    if (!raw) return showStatus("Pega un JSON de memoria exportada.", "error");
+    try {
+      const payload = JSON.parse(raw);
+      setBusyKey("import-memory");
+      const data = await apiCall("/saas/v1/agents/memories/import", {
+        method: "POST",
+        body: JSON.stringify({ payload_json: payload, title: "", notes: "Importada desde la boveda AI Agents." }),
+      });
+      if (data?.memory) setMemories((prev) => [data.memory, ...prev]);
+      if (data?.limits) setLimits(data.limits);
+      setMemoryImportPayload("");
+      showStatus("Memoria importada a la boveda", "ok");
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    } finally {
+      setBusyKey("");
+    }
+  };
+
   const createActionDraft = async () => {
     if (!selectedAgent?.id) return;
     const preset = actionPresetCatalog.find((item) => item.tool_code === actionDraft.preset) || actionPresetCatalog[0] || {};
@@ -613,7 +717,7 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
         <article className="metric-card amber"><span>Builder</span><strong>{limits?.builder_enabled ? "ON" : "OFF"}</strong><small>{limits?.notes || "Limites por plan aplicados"}</small></article>
         <article className="metric-card violet"><span>Catalogo</span><strong>{number(toolCatalog.length)}</strong><small>tools disponibles para conectar</small></article>
         <article className="metric-card"><span>Boveda memorias</span><strong>{number(usedMemoryArchives)} / {number(maxMemoryArchives)}</strong><small>{number(remainingMemoryArchives)} espacios disponibles</small></article>
-        <article className="metric-card rose"><span>Runtime seleccionado</span><strong>{runtimeHealth.label || "Sin datos"}</strong><small>{number(runtimeMetrics.runs_7d || 0)} runs / {number(runtimeMetrics.tokens_7d || 0)} tokens 7d</small></article>
+        <article className="metric-card rose"><span>Score agente</span><strong>{number(runtimeMetrics.health_score || 0)} / 100</strong><small>{runtimeHealth.label || "Sin datos"} / {number(runtimeMetrics.tokens_7d || 0)} tokens 7d</small></article>
       </section>
 
       <nav className="agent-tabs glass-card" aria-label="Secciones de AI Agents">
@@ -735,6 +839,82 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
                 </div>
               </section>
 
+              <section className="agent-builder-section">
+                <div className="agent-section-label"><strong>Presupuesto y A/B testing</strong><span>Gobierna consumo, costos y experimentos antes de escalar.</span></div>
+                <div className="agent-editor-grid three">
+                  <label>Tokens mensuales
+                    <input
+                      type="number"
+                      min="0"
+                      value={editor.budget.monthlyTokenLimit}
+                      placeholder={String(budgetDefaults.monthly_token_limit || 250000)}
+                      onChange={(event) => patchEditor({ budget: { ...editor.budget, monthlyTokenLimit: event.target.value } })}
+                    />
+                  </label>
+                  <label>Presupuesto USD/mes
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={editor.budget.monthlyCostLimitUsd}
+                      placeholder={String(budgetDefaults.monthly_cost_limit_usd || 20)}
+                      onChange={(event) => patchEditor({ budget: { ...editor.budget, monthlyCostLimitUsd: event.target.value } })}
+                    />
+                  </label>
+                  <label>Alerta de uso %
+                    <input
+                      type="number"
+                      min="1"
+                      max="100"
+                      value={editor.budget.alertThresholdPercent}
+                      onChange={(event) => patchEditor({ budget: { ...editor.budget, alertThresholdPercent: event.target.value } })}
+                    />
+                  </label>
+                </div>
+                <label className="check-row">
+                  <input type="checkbox" checked={Boolean(editor.budget.hardStop)} onChange={() => patchEditor({ budget: { ...editor.budget, hardStop: !editor.budget.hardStop } })} />
+                  <span><b>Hard stop al superar presupuesto</b><small>Recomendado en demos o clientes con costos sensibles.</small></span>
+                </label>
+                <div className="agent-editor-grid three">
+                  <label className="check-row">
+                    <input type="checkbox" checked={Boolean(editor.experiment.enabled)} onChange={() => patchEditor({ experiment: { ...editor.experiment, enabled: !editor.experiment.enabled } })} />
+                    <span><b>Activar experimento A/B</b><small>Compara este agente contra otra variante.</small></span>
+                  </label>
+                  <label>Variante
+                    <input value={editor.experiment.variantKey} onChange={(event) => patchEditor({ experiment: { ...editor.experiment, variantKey: event.target.value } })} />
+                  </label>
+                  <label>Comparar contra
+                    <input value={editor.experiment.compareAgainst} onChange={(event) => patchEditor({ experiment: { ...editor.experiment, compareAgainst: event.target.value } })} placeholder="Ej: Sales Agent v2" />
+                  </label>
+                  <label>Porcentaje trafico variante
+                    <input
+                      type="number"
+                      min="1"
+                      max="100"
+                      value={editor.experiment.trafficPercent}
+                      onChange={(event) => patchEditor({ experiment: { ...editor.experiment, trafficPercent: event.target.value } })}
+                    />
+                  </label>
+                </div>
+                <div className="agent-budget-summary">
+                  <span><b>{number(runtimeMetrics.tokens_30d || 0)}</b><small>tokens 30d</small></span>
+                  <span><b>US$ {Number(runtimeMetrics.estimated_cost_30d_usd || 0).toFixed(4)}</b><small>costo estimado 30d</small></span>
+                  <span><b>{Number(runtimeMetrics.budget_usage_percent || 0).toFixed(1)}%</b><small>uso del presupuesto</small></span>
+                </div>
+              </section>
+
+              <section className="agent-builder-section">
+                <div className="agent-section-label"><strong>Politicas por industria</strong><span>Aplica compliance base para restaurante, hotel, clinica, legal, seguros y mas.</span></div>
+                <div className="agent-filter-pills">
+                  {industryPolicyPresets.map((preset) => (
+                    <button type="button" key={preset.code} onClick={() => applyIndustryPolicy(preset)}>
+                      {preset.label}
+                    </button>
+                  ))}
+                  {!industryPolicyPresets.length ? <span className="soft-copy">Catalogo de politicas no cargado.</span> : null}
+                </div>
+              </section>
+
               <section className="agent-builder-section runtime">
                 <div className="agent-section-label">
                   <strong>Runtime y observabilidad fase 4</strong>
@@ -752,9 +932,39 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
                   <div><span>Fallback</span><strong>{number(runtimeMetrics.fallback_runs_7d || 0)}</strong><small>{runtimeMetrics.last_provider || "sin proveedor"}</small></div>
                   <div><span>Latencia</span><strong>{number(runtimeMetrics.avg_latency_ms_7d || 0)}ms</strong><small>{runtimeMetrics.last_model || "sin modelo"}</small></div>
                   <div><span>Acciones</span><strong>{number(runtimeMetrics.pending_action_drafts || 0)}</strong><small>{number(runtimeMetrics.action_drafts_7d || 0)} creadas 7d</small></div>
+                  <div><span>Score salud</span><strong>{number(runtimeMetrics.health_score || 0)}</strong><small>precision, fallos, costo</small></div>
+                  <div><span>Tokens 30d</span><strong>{number(runtimeMetrics.tokens_30d || 0)}</strong><small>{Number(runtimeMetrics.budget_usage_percent || 0).toFixed(1)}% presupuesto</small></div>
+                  <div><span>Costo 30d</span><strong>US$ {Number(runtimeMetrics.estimated_cost_30d_usd || 0).toFixed(3)}</strong><small>estimado por tokens</small></div>
                 </div>
                 {asList(runtimeHealth.issues).length ? (
                   <div className="agent-issues">{asList(runtimeHealth.issues).map((issue) => <span key={issue}>{issue}</span>)}</div>
+                ) : null}
+                <div className="agent-preflight-box">
+                  <div>
+                    <strong>Test antes de activar</strong>
+                    <span>Valida tono, canales, permisos, memoria, presupuesto y herramientas antes de ponerlo en produccion.</span>
+                  </div>
+                  <button type="button" className="primary" disabled={busyKey === `preflight:${selectedAgent.id}`} onClick={runPreflight}>
+                    {busyKey === `preflight:${selectedAgent.id}` ? "Validando..." : "Ejecutar preflight"}
+                  </button>
+                </div>
+                {preflightResult ? (
+                  <div className={`agent-preflight-result ${preflightResult.ready ? "ready" : "blocked"}`}>
+                    <div className="agent-preflight-head">
+                      <strong>{preflightResult.ready ? "Listo para activar" : "Requiere ajustes"}</strong>
+                      <span>Score {number(preflightResult.score || 0)} / 100</span>
+                    </div>
+                    <div className="agent-preflight-list">
+                      {asList(preflightResult.checks).map((check) => (
+                        <div className={`agent-preflight-row ${check.ok ? "ok" : "warn"}`} key={check.code}>
+                          <b>{check.ok ? "OK" : "Revisar"}</b>
+                          <span>{check.label}</span>
+                          <small>{check.detail || check.hint}</small>
+                        </div>
+                      ))}
+                    </div>
+                    {preflightResult.recommendation ? <p>{preflightResult.recommendation}</p> : null}
+                  </div>
                 ) : null}
                 {runtimeEnabledForSelected ? (
                   <div className="agent-runtime-test">
@@ -995,6 +1205,21 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
             <div><h2>Memorias guardadas</h2><span>Boveda del plan: {number(usedMemoryArchives)} / {number(maxMemoryArchives)} memorias</span></div>
             <button type="button" onClick={() => loadAgents(false)}>Refrescar</button>
           </div>
+          <div className="agent-import-box">
+            <div>
+              <strong>Importar memoria</strong>
+              <span>Pega un archivo JSON exportado desde Scentra para mover contexto entre agentes o tenants enterprise.</span>
+            </div>
+            <textarea
+              rows={4}
+              value={memoryImportPayload}
+              onChange={(event) => setMemoryImportPayload(event.target.value)}
+              placeholder='{"schema":"scentra.agent_memory.v1","memory":{...}}'
+            />
+            <button type="button" className="primary" disabled={busyKey === "import-memory" || memoryVaultFull} onClick={importMemory}>
+              {memoryVaultFull ? "Boveda llena" : busyKey === "import-memory" ? "Importando..." : "Importar JSON"}
+            </button>
+          </div>
           <div className="agent-memory-grid">
             {memories.map((memory) => (
               <article className="agent-memory-card" key={memory.id}>
@@ -1012,6 +1237,9 @@ export default function AiAgentsPanel({ apiCall, showStatus, onOpenAdvisor, onOp
                 <div className="agent-memory-actions">
                   <button type="button" className="primary" disabled={remainingTotal <= 0 || busyKey === `restore:${memory.id}`} onClick={() => restoreMemory(memory)}>
                     {remainingTotal <= 0 ? "Sin cupo del plan" : busyKey === `restore:${memory.id}` ? "Restaurando..." : "Crear agente desde memoria"}
+                  </button>
+                  <button type="button" disabled={busyKey === `export-memory:${memory.id}`} onClick={() => exportMemory(memory)}>
+                    {busyKey === `export-memory:${memory.id}` ? "Exportando..." : "Exportar JSON"}
                   </button>
                   <button type="button" className="danger-button" disabled={busyKey === `delete-memory:${memory.id}`} onClick={() => deleteMemory(memory)}>
                     {busyKey === `delete-memory:${memory.id}` ? "Borrando..." : "Borrar memoria"}
