@@ -143,6 +143,42 @@ def ensure_multimodal_memory_tables(conn: Connection) -> None:
             """
         )
     )
+    conn.execute(
+        text(
+            """
+            ALTER TABLE saas_multimodal_memory_events
+              ADD COLUMN IF NOT EXISTS tenant_id UUID NULL REFERENCES saas_tenants(id) ON DELETE CASCADE,
+              ADD COLUMN IF NOT EXISTS conversation_id UUID NULL REFERENCES saas_conversations(id) ON DELETE SET NULL,
+              ADD COLUMN IF NOT EXISTS message_id UUID NULL REFERENCES saas_messages(id) ON DELETE SET NULL,
+              ADD COLUMN IF NOT EXISTS agent_id UUID NULL REFERENCES saas_ai_agents(id) ON DELETE SET NULL,
+              ADD COLUMN IF NOT EXISTS source_kind TEXT NOT NULL DEFAULT '',
+              ADD COLUMN IF NOT EXISTS source_id TEXT NOT NULL DEFAULT '',
+              ADD COLUMN IF NOT EXISTS event_type TEXT NOT NULL DEFAULT '',
+              ADD COLUMN IF NOT EXISTS channel TEXT NOT NULL DEFAULT '',
+              ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'ready',
+              ADD COLUMN IF NOT EXISTS privacy_level TEXT NOT NULL DEFAULT 'tenant_private',
+              ADD COLUMN IF NOT EXISTS approval_status TEXT NOT NULL DEFAULT 'not_required',
+              ADD COLUMN IF NOT EXISTS eligible_for_training BOOLEAN NOT NULL DEFAULT TRUE,
+              ADD COLUMN IF NOT EXISTS eligible_for_rag BOOLEAN NOT NULL DEFAULT FALSE,
+              ADD COLUMN IF NOT EXISTS eligible_for_agent_memory BOOLEAN NOT NULL DEFAULT TRUE,
+              ADD COLUMN IF NOT EXISTS memory_text TEXT NOT NULL DEFAULT '',
+              ADD COLUMN IF NOT EXISTS rag_text TEXT NOT NULL DEFAULT '',
+              ADD COLUMN IF NOT EXISTS training_features_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+              ADD COLUMN IF NOT EXISTS training_labels_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+              ADD COLUMN IF NOT EXISTS source_payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+              ADD COLUMN IF NOT EXISTS safety_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+              ADD COLUMN IF NOT EXISTS intelligence_event_id UUID NULL REFERENCES saas_intelligence_events(id) ON DELETE SET NULL,
+              ADD COLUMN IF NOT EXISTS knowledge_source_id UUID NULL REFERENCES saas_knowledge_sources(id) ON DELETE SET NULL,
+              ADD COLUMN IF NOT EXISTS collective_memory_id UUID NULL REFERENCES saas_ai_agent_collective_memory(id) ON DELETE SET NULL,
+              ADD COLUMN IF NOT EXISTS created_by_user_id UUID NULL REFERENCES saas_users(id) ON DELETE SET NULL,
+              ADD COLUMN IF NOT EXISTS materialized_by_user_id UUID NULL REFERENCES saas_users(id) ON DELETE SET NULL,
+              ADD COLUMN IF NOT EXISTS materialized_at TIMESTAMP NULL,
+              ADD COLUMN IF NOT EXISTS replay_key TEXT NOT NULL DEFAULT '',
+              ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+              ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+            """
+        )
+    )
     conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_saas_multimodal_memory_events_replay ON saas_multimodal_memory_events (tenant_id, replay_key) WHERE replay_key <> ''"))
     conn.execute(text("CREATE INDEX IF NOT EXISTS idx_saas_multimodal_memory_events_tenant_created ON saas_multimodal_memory_events (tenant_id, created_at DESC)"))
     conn.execute(text("CREATE INDEX IF NOT EXISTS idx_saas_multimodal_memory_events_conversation ON saas_multimodal_memory_events (tenant_id, conversation_id, updated_at DESC) WHERE conversation_id IS NOT NULL"))

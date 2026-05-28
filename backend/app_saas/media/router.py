@@ -249,6 +249,36 @@ def _ensure_voice_intelligence_tables(conn) -> None:
             """
         )
     )
+    conn.execute(
+        text(
+            """
+            ALTER TABLE saas_voice_intelligence_analyses
+              ADD COLUMN IF NOT EXISTS tenant_id UUID NULL REFERENCES saas_tenants(id) ON DELETE CASCADE,
+              ADD COLUMN IF NOT EXISTS conversation_id UUID NULL REFERENCES saas_conversations(id) ON DELETE CASCADE,
+              ADD COLUMN IF NOT EXISTS message_id UUID NULL REFERENCES saas_messages(id) ON DELETE CASCADE,
+              ADD COLUMN IF NOT EXISTS created_by_user_id UUID NULL REFERENCES saas_users(id) ON DELETE SET NULL,
+              ADD COLUMN IF NOT EXISTS media_id TEXT NOT NULL DEFAULT '',
+              ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'inbox_audio',
+              ADD COLUMN IF NOT EXISTS provider_code TEXT NOT NULL DEFAULT '',
+              ADD COLUMN IF NOT EXISTS model TEXT NOT NULL DEFAULT '',
+              ADD COLUMN IF NOT EXISTS ai_gateway_run_id UUID NULL REFERENCES saas_ai_runs(id) ON DELETE SET NULL,
+              ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'completed',
+              ADD COLUMN IF NOT EXISTS transcript TEXT NOT NULL DEFAULT '',
+              ADD COLUMN IF NOT EXISTS summary TEXT NOT NULL DEFAULT '',
+              ADD COLUMN IF NOT EXISTS sentiment TEXT NOT NULL DEFAULT 'neutral',
+              ADD COLUMN IF NOT EXISTS sentiment_score NUMERIC(6,4) NOT NULL DEFAULT 0,
+              ADD COLUMN IF NOT EXISTS intent TEXT NOT NULL DEFAULT 'other',
+              ADD COLUMN IF NOT EXISTS intent_label TEXT NOT NULL DEFAULT '',
+              ADD COLUMN IF NOT EXISTS urgency TEXT NOT NULL DEFAULT 'low',
+              ADD COLUMN IF NOT EXISTS language TEXT NOT NULL DEFAULT '',
+              ADD COLUMN IF NOT EXISTS confidence NUMERIC(6,4) NOT NULL DEFAULT 0,
+              ADD COLUMN IF NOT EXISTS analysis_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+              ADD COLUMN IF NOT EXISTS metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+              ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+              ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+            """
+        )
+    )
     conn.execute(text("CREATE INDEX IF NOT EXISTS idx_saas_voice_intel_tenant_created ON saas_voice_intelligence_analyses (tenant_id, created_at DESC)"))
     conn.execute(text("CREATE INDEX IF NOT EXISTS idx_saas_voice_intel_conversation ON saas_voice_intelligence_analyses (tenant_id, conversation_id, updated_at DESC)"))
 
@@ -295,6 +325,43 @@ def _ensure_vision_intelligence_tables(conn) -> None:
             """
         )
     )
+    conn.execute(
+        text(
+            """
+            ALTER TABLE saas_vision_intelligence_analyses
+              ADD COLUMN IF NOT EXISTS tenant_id UUID NULL REFERENCES saas_tenants(id) ON DELETE CASCADE,
+              ADD COLUMN IF NOT EXISTS conversation_id UUID NULL REFERENCES saas_conversations(id) ON DELETE CASCADE,
+              ADD COLUMN IF NOT EXISTS message_id UUID NULL REFERENCES saas_messages(id) ON DELETE CASCADE,
+              ADD COLUMN IF NOT EXISTS created_by_user_id UUID NULL REFERENCES saas_users(id) ON DELETE SET NULL,
+              ADD COLUMN IF NOT EXISTS media_id TEXT NOT NULL DEFAULT '',
+              ADD COLUMN IF NOT EXISTS media_kind TEXT NOT NULL DEFAULT 'image',
+              ADD COLUMN IF NOT EXISTS source TEXT NOT NULL DEFAULT 'inbox_media',
+              ADD COLUMN IF NOT EXISTS provider_code TEXT NOT NULL DEFAULT '',
+              ADD COLUMN IF NOT EXISTS model TEXT NOT NULL DEFAULT '',
+              ADD COLUMN IF NOT EXISTS ai_gateway_run_id UUID NULL REFERENCES saas_ai_runs(id) ON DELETE SET NULL,
+              ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'completed',
+              ADD COLUMN IF NOT EXISTS visual_description TEXT NOT NULL DEFAULT '',
+              ADD COLUMN IF NOT EXISTS extracted_text TEXT NOT NULL DEFAULT '',
+              ADD COLUMN IF NOT EXISTS summary TEXT NOT NULL DEFAULT '',
+              ADD COLUMN IF NOT EXISTS document_type TEXT NOT NULL DEFAULT 'unknown',
+              ADD COLUMN IF NOT EXISTS sentiment TEXT NOT NULL DEFAULT 'neutral',
+              ADD COLUMN IF NOT EXISTS sentiment_score NUMERIC(6,4) NOT NULL DEFAULT 0,
+              ADD COLUMN IF NOT EXISTS intent TEXT NOT NULL DEFAULT 'other',
+              ADD COLUMN IF NOT EXISTS intent_label TEXT NOT NULL DEFAULT '',
+              ADD COLUMN IF NOT EXISTS urgency TEXT NOT NULL DEFAULT 'low',
+              ADD COLUMN IF NOT EXISTS language TEXT NOT NULL DEFAULT '',
+              ADD COLUMN IF NOT EXISTS confidence NUMERIC(6,4) NOT NULL DEFAULT 0,
+              ADD COLUMN IF NOT EXISTS entities_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+              ADD COLUMN IF NOT EXISTS topics_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+              ADD COLUMN IF NOT EXISTS product_hints_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+              ADD COLUMN IF NOT EXISTS moderation_flags_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+              ADD COLUMN IF NOT EXISTS analysis_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+              ADD COLUMN IF NOT EXISTS metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+              ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+              ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+            """
+        )
+    )
     conn.execute(text("CREATE INDEX IF NOT EXISTS idx_saas_vision_intel_tenant_created ON saas_vision_intelligence_analyses (tenant_id, created_at DESC)"))
     conn.execute(text("CREATE INDEX IF NOT EXISTS idx_saas_vision_intel_conversation ON saas_vision_intelligence_analyses (tenant_id, conversation_id, updated_at DESC)"))
     conn.execute(text("CREATE INDEX IF NOT EXISTS idx_saas_vision_intel_doc_type ON saas_vision_intelligence_analyses (tenant_id, document_type, urgency, updated_at DESC)"))
@@ -329,6 +396,29 @@ def _ensure_web_image_search_tables(conn) -> None:
     conn.execute(
         text(
             """
+            ALTER TABLE saas_web_search_intelligence_runs
+              ADD COLUMN IF NOT EXISTS tenant_id UUID NULL REFERENCES saas_tenants(id) ON DELETE CASCADE,
+              ADD COLUMN IF NOT EXISTS conversation_id UUID NULL REFERENCES saas_conversations(id) ON DELETE SET NULL,
+              ADD COLUMN IF NOT EXISTS message_id UUID NULL REFERENCES saas_messages(id) ON DELETE SET NULL,
+              ADD COLUMN IF NOT EXISTS created_by_user_id UUID NULL REFERENCES saas_users(id) ON DELETE SET NULL,
+              ADD COLUMN IF NOT EXISTS query TEXT NOT NULL DEFAULT '',
+              ADD COLUMN IF NOT EXISTS search_type TEXT NOT NULL DEFAULT 'mixed',
+              ADD COLUMN IF NOT EXISTS provider_code TEXT NOT NULL DEFAULT '',
+              ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'completed',
+              ADD COLUMN IF NOT EXISTS access_mode TEXT NOT NULL DEFAULT 'demo',
+              ADD COLUMN IF NOT EXISTS result_count INTEGER NOT NULL DEFAULT 0,
+              ADD COLUMN IF NOT EXISTS approved_count INTEGER NOT NULL DEFAULT 0,
+              ADD COLUMN IF NOT EXISTS blocked_count INTEGER NOT NULL DEFAULT 0,
+              ADD COLUMN IF NOT EXISTS summary TEXT NOT NULL DEFAULT '',
+              ADD COLUMN IF NOT EXISTS metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+              ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+              ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
             CREATE TABLE IF NOT EXISTS saas_web_search_intelligence_results (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 tenant_id UUID NOT NULL REFERENCES saas_tenants(id) ON DELETE CASCADE,
@@ -355,6 +445,36 @@ def _ensure_web_image_search_tables(conn) -> None:
                 created_at TIMESTAMP NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMP NOT NULL DEFAULT NOW()
             )
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
+            ALTER TABLE saas_web_search_intelligence_results
+              ADD COLUMN IF NOT EXISTS tenant_id UUID NULL REFERENCES saas_tenants(id) ON DELETE CASCADE,
+              ADD COLUMN IF NOT EXISTS run_id UUID NULL REFERENCES saas_web_search_intelligence_runs(id) ON DELETE CASCADE,
+              ADD COLUMN IF NOT EXISTS result_type TEXT NOT NULL DEFAULT 'web',
+              ADD COLUMN IF NOT EXISTS title TEXT NOT NULL DEFAULT '',
+              ADD COLUMN IF NOT EXISTS url TEXT NOT NULL DEFAULT '',
+              ADD COLUMN IF NOT EXISTS display_url TEXT NOT NULL DEFAULT '',
+              ADD COLUMN IF NOT EXISTS snippet TEXT NOT NULL DEFAULT '',
+              ADD COLUMN IF NOT EXISTS source_name TEXT NOT NULL DEFAULT '',
+              ADD COLUMN IF NOT EXISTS image_url TEXT NOT NULL DEFAULT '',
+              ADD COLUMN IF NOT EXISTS thumbnail_url TEXT NOT NULL DEFAULT '',
+              ADD COLUMN IF NOT EXISTS license_label TEXT NOT NULL DEFAULT '',
+              ADD COLUMN IF NOT EXISTS license_details_url TEXT NOT NULL DEFAULT '',
+              ADD COLUMN IF NOT EXISTS width INTEGER NOT NULL DEFAULT 0,
+              ADD COLUMN IF NOT EXISTS height INTEGER NOT NULL DEFAULT 0,
+              ADD COLUMN IF NOT EXISTS rank INTEGER NOT NULL DEFAULT 0,
+              ADD COLUMN IF NOT EXISTS safety_status TEXT NOT NULL DEFAULT 'pending_review',
+              ADD COLUMN IF NOT EXISTS approval_status TEXT NOT NULL DEFAULT 'pending',
+              ADD COLUMN IF NOT EXISTS approved_by_user_id UUID NULL REFERENCES saas_users(id) ON DELETE SET NULL,
+              ADD COLUMN IF NOT EXISTS approved_at TIMESTAMP NULL,
+              ADD COLUMN IF NOT EXISTS rejected_reason TEXT NOT NULL DEFAULT '',
+              ADD COLUMN IF NOT EXISTS metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+              ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+              ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW()
             """
         )
     )
@@ -914,6 +1034,20 @@ def _resolve_any_search_access(conn, tenant_id: str) -> dict[str, Any]:
         except HTTPException as exc:
             last_detail = exc.detail
     raise HTTPException(status_code=403, detail={"code": "web_image_search_not_enabled", "features": [EXTERNAL_SOURCE_FEATURE, WEB_SEARCH_FEATURE, IMAGE_SEARCH_FEATURE, "ai_premium"], "last_error": last_detail})
+
+
+def _disabled_search_access_from_error(exc: HTTPException) -> dict[str, Any] | None:
+    detail = exc.detail if isinstance(exc.detail, dict) else {}
+    last_error = detail.get("last_error") if isinstance(detail.get("last_error"), dict) else {}
+    last_code = str(last_error.get("code") or "")
+    if exc.status_code == 403 and str(detail.get("code") or "") == "web_image_search_not_enabled" and last_code == "intelligence_feature_not_enabled":
+        return {
+            "enabled": False,
+            "mode": "disabled",
+            "resolved_feature_key": "",
+            "reason": "feature_not_enabled",
+        }
+    return None
 
 
 def _search_provider_order(settings: dict[str, Any], requested_provider: str = "") -> list[str]:
@@ -2269,11 +2403,17 @@ def list_web_image_search_runs(
     with db_session() as conn:
         set_tenant_context(conn, ctx.tenant_id)
         _ensure_web_image_search_tables(conn)
-        _resolve_any_search_access(conn, ctx.tenant_id)
+        try:
+            access = _resolve_any_search_access(conn, ctx.tenant_id)
+        except HTTPException as exc:
+            disabled_access = _disabled_search_access_from_error(exc)
+            if not disabled_access:
+                raise
+            return {"ok": True, "tenant_id": ctx.tenant_id, "access": disabled_access, "runs": []}
         if conversation_id:
             _validate_search_context(conn, ctx.tenant_id, conversation_id, "")
         runs = _load_search_runs(conn, ctx.tenant_id, conversation_id, limit)
-    return {"ok": True, "tenant_id": ctx.tenant_id, "runs": runs}
+    return {"ok": True, "tenant_id": ctx.tenant_id, "access": access, "runs": runs}
 
 
 @router.post("/search/results/{result_id}/approval")
