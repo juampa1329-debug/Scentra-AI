@@ -4270,33 +4270,6 @@ function App() {
           <section className={`inbox-grid ${crmPanelOpen ? "crm-open" : "crm-closed"}`}>
             <div className="panel glass-card inbox-list">
               <div className="panel-head inbox-list-head"><h2>Inbox</h2><span>{inboxMode === "comments" ? `${filteredSocialComments.length} comentarios` : unreadTotal ? `${number(unreadTotal)} sin leer` : `${filteredConversations.length} chats`}</span></div>
-              <div className="inbox-mode-tabs">
-                <button type="button" className={inboxMode === "dms" ? "active" : ""} onClick={() => setInboxMode("dms")}>Mensajes</button>
-                <button type="button" className={inboxMode === "comments" ? "active" : ""} onClick={() => { setInboxMode("comments"); loadSocialComments({ keepSelection: true }); }}>Comentarios</button>
-              </div>
-              <div className={`inbox-sync ${inboxRefreshing ? "active" : ""} ${inboxSyncError ? "error" : ""}`}>
-                <span>{inboxRefreshing ? "Sincronizando" : inboxLastSyncAt ? `Actualizado ${compactDateTimeLabel(inboxLastSyncAt)}` : "Sincronizacion pendiente"}</span>
-                {inboxSyncError ? <small>{inboxSyncError}</small> : <small>Polling visible con pausa en segundo plano</small>}
-              </div>
-              <div className="inbox-filters">
-                <button type="button" className={inboxChannelFilter === "all" ? "active" : ""} onClick={() => setInboxChannelFilter("all")}>Todos</button>
-                {availableInboxChannels.map((channel) => <button type="button" key={channel} className={inboxChannelFilter === channel ? "active" : ""} onClick={() => setInboxChannelFilter(channel)}>{channelLabel(channel)}</button>)}
-                <input value={inboxSearch} onChange={(event) => setInboxSearch(event.target.value)} placeholder="Buscar telefono, nombre o preview..." />
-                <button type="button" onClick={() => { setInboxSearch(""); setInboxChannelFilter("all"); setInboxQueueFilter("all"); setInboxAgentFilter("all"); }}>Limpiar</button>
-              </div>
-              <div className="inbox-agent-filter">
-                <label>Agente IA
-                  <select value={inboxAgentFilter} onChange={(event) => setInboxAgentFilter(event.target.value)}>
-                    <option value="all">Todos los agentes</option>
-                    {activeInboxAiAgents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name || agentTypeLabel(agent.agent_type)}</option>)}
-                  </select>
-                </label>
-              </div>
-              <div className="inbox-smart-filters">
-                {[["all","Todos"],["unread","Sin leer"],["mine","Mios"],["unassigned","Sin asignar"],["sla","SLA"],["hot","Hot"],["churn","Churn"],["human","Humano"],["ai","IA"]].map(([key, label]) => (
-                  <button key={key} type="button" className={inboxQueueFilter === key ? "active" : ""} onClick={() => setInboxQueueFilter(key)}>{label}</button>
-                ))}
-              </div>
               <div className="conversation-list">
                 {inboxMode === "dms" ? filteredConversations.map((conversation) => (
                   <button type="button" className={`conversation-item ${selectedConversation?.id === conversation.id ? "active" : ""}`} key={conversation.id} onClick={() => loadMessages(conversation)}>
@@ -4324,6 +4297,35 @@ function App() {
               </div>
             </div>
             <div className="panel glass-card inbox-thread">
+              <div className="inbox-top-filters">
+                <div className="inbox-mode-tabs">
+                  <button type="button" className={inboxMode === "dms" ? "active" : ""} onClick={() => setInboxMode("dms")}>Mensajes</button>
+                  <button type="button" className={inboxMode === "comments" ? "active" : ""} onClick={() => { setInboxMode("comments"); loadSocialComments({ keepSelection: true }); }}>Comentarios</button>
+                </div>
+                <div className={`inbox-sync ${inboxRefreshing ? "active" : ""} ${inboxSyncError ? "error" : ""}`}>
+                  <span>{inboxRefreshing ? "Sincronizando" : inboxLastSyncAt ? `Actualizado ${compactDateTimeLabel(inboxLastSyncAt)}` : "Sincronizacion pendiente"}</span>
+                  {inboxSyncError ? <small>{inboxSyncError}</small> : <small>Polling visible con pausa en segundo plano</small>}
+                </div>
+                <div className="inbox-filters">
+                  <button type="button" className={inboxChannelFilter === "all" ? "active" : ""} onClick={() => setInboxChannelFilter("all")}>Todos</button>
+                  {availableInboxChannels.map((channel) => <button type="button" key={channel} className={inboxChannelFilter === channel ? "active" : ""} onClick={() => setInboxChannelFilter(channel)}>{channelLabel(channel)}</button>)}
+                  <input value={inboxSearch} onChange={(event) => setInboxSearch(event.target.value)} placeholder="Buscar telefono, nombre o preview..." />
+                  <button type="button" onClick={() => { setInboxSearch(""); setInboxChannelFilter("all"); setInboxQueueFilter("all"); setInboxAgentFilter("all"); }}>Limpiar</button>
+                </div>
+                <div className="inbox-agent-filter">
+                  <label>Agente IA
+                    <select value={inboxAgentFilter} onChange={(event) => setInboxAgentFilter(event.target.value)}>
+                      <option value="all">Todos los agentes</option>
+                      {activeInboxAiAgents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name || agentTypeLabel(agent.agent_type)}</option>)}
+                    </select>
+                  </label>
+                </div>
+                <div className="inbox-smart-filters">
+                  {[["all","Todos"],["unread","Sin leer"],["mine","Mios"],["unassigned","Sin asignar"],["sla","SLA"],["hot","Hot"],["churn","Churn"],["human","Humano"],["ai","IA"]].map(([key, label]) => (
+                    <button key={key} type="button" className={inboxQueueFilter === key ? "active" : ""} onClick={() => setInboxQueueFilter(key)}>{label}</button>
+                  ))}
+                </div>
+              </div>
               {inboxMode === "comments" ? (
                 <>
                   <div className="panel-head inbox-thread-head">
