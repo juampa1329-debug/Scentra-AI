@@ -880,7 +880,6 @@ function App() {
   const [crmDraft, setCrmDraft] = useState({});
   const [conversationTasks, setConversationTasks] = useState([]);
   const [messageStatusEvents, setMessageStatusEvents] = useState([]);
-  const [conversationTimeline, setConversationTimeline] = useState([]);
   const [dedupeCandidates, setDedupeCandidates] = useState([]);
   const [mergingCustomerId, setMergingCustomerId] = useState("");
   const [taskDraft, setTaskDraft] = useState({ title: "", due_at: "", priority: "normal" });
@@ -1622,12 +1621,11 @@ function App() {
   const loadMessages = async (conversation, options = {}) => {
     if (!conversation?.id) return;
     try {
-      const [data, memoryData, tasksData, statusData, timelineData, dedupeData, searchData, multimodalData] = await Promise.all([
+      const [data, memoryData, tasksData, statusData, dedupeData, searchData, multimodalData] = await Promise.all([
         apiCall(`/saas/v1/conversations/${encodeURIComponent(conversation.id)}/messages`),
         apiCall(`/saas/v1/ai/conversations/${encodeURIComponent(conversation.id)}/memory`).catch(() => null),
         apiCall(`/saas/v1/conversations/${encodeURIComponent(conversation.id)}/tasks`).catch(() => ({ tasks: [] })),
         apiCall(`/saas/v1/conversations/${encodeURIComponent(conversation.id)}/status-events?limit=40`).catch(() => ({ events: [] })),
-        apiCall(`/saas/v1/conversations/${encodeURIComponent(conversation.id)}/timeline?limit=80`).catch(() => ({ events: [] })),
         apiCall(`/saas/v1/customers/${encodeURIComponent(conversation.id)}/dedupe-candidates?limit=6`).catch(() => ({ candidates: [] })),
         apiCall(`/saas/v1/media/search/runs?conversation_id=${encodeURIComponent(conversation.id)}&limit=8`).catch(() => ({ runs: [] })),
         apiCall(`/saas/v1/agents/multimodal-memory/events?conversation_id=${encodeURIComponent(conversation.id)}&limit=24`).catch(() => ({ events: [] })),
@@ -1637,7 +1635,6 @@ function App() {
       setConversationMemory(memoryData || null);
       setConversationTasks(tasksData?.tasks || []);
       setMessageStatusEvents(statusData?.events || []);
-      setConversationTimeline(timelineData?.events || []);
       setDedupeCandidates(dedupeData?.candidates || []);
       setWebSearchRuns(searchData?.runs || []);
       setMultimodalMemoryEvents(multimodalData?.events || []);
@@ -1899,7 +1896,6 @@ function App() {
       setConversationMemory(null);
       setConversationTasks([]);
       setMessageStatusEvents([]);
-      setConversationTimeline([]);
       setDedupeCandidates([]);
       setWebSearchRuns([]);
       setMultimodalMemoryEvents([]);
@@ -4521,8 +4517,8 @@ function App() {
                     <div className="crm-predictive-card">
                       <div className="ai-context-head"><strong>Inteligencia predictiva</strong><small>{selectedPredictive.source || "crm_baseline"}</small></div>
                       <div className="predictive-mini-grid">
-                        <span><b>{number(selectedPredictive.conversion_probability || selectedPredictive.lead_score || 0)}%</b>Conversion</span>
-                        <span><b>{number(selectedPredictive.engagement_score || 0)}</b>Engagement</span>
+                        <span><b>{number(selectedPredictive.conversion_probability || selectedPredictive.lead_score || 0)}%</b>Conv.</span>
+                        <span><b>{number(selectedPredictive.engagement_score || 0)}</b>Eng.</span>
                         <span className={Number(selectedPredictive.churn_risk || 0) >= 70 ? "danger" : ""}><b>{number(selectedPredictive.churn_risk || 0)}</b>Churn</span>
                       </div>
                       <p>{selectedPredictive.recommended_action || "Genera predicciones para obtener accion recomendada."}</p>
@@ -4684,17 +4680,6 @@ function App() {
                         </div>
                       ))}
                       {dedupeCandidates.length === 0 ? <p className="muted-note">Sin duplicados evidentes por telefono, nombre o email.</p> : null}
-                    </div>
-                    <div className="crm-timeline-card">
-                      <div className="ai-context-head"><strong>Timeline completo</strong><small>{conversationTimeline.length}</small></div>
-                      {conversationTimeline.slice(0, 8).map((event) => (
-                        <div className={`timeline-event ${event.event_type || ""}`} key={`${event.event_type}-${event.id}-${event.occurred_at}`}>
-                          <strong>{event.title || event.event_type}</strong>
-                          <span>{compactDateTimeLabel(event.occurred_at || event.created_at)}</span>
-                          {event.description ? <small>{event.description}</small> : null}
-                        </div>
-                      ))}
-                      {conversationTimeline.length === 0 ? <p className="muted-note">Aun no hay actividad historica para esta conversacion.</p> : null}
                     </div>
                     <div className="ai-context-card">
                       <div className="ai-context-head"><strong>Contexto IA</strong><button type="button" onClick={() => loadConversationMemory(selectedConversation.id)}>Refrescar</button></div>

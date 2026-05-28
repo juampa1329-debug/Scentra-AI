@@ -22,6 +22,7 @@ from app_saas.agents.service import (
 )
 from app_saas.api_credentials.router import _ensure_api_credentials_table
 from app_saas.billing.limits import ensure_ai_token_quota, ensure_monthly_message_quota
+from app_saas.crm.notes import compact_ai_notes, merge_ai_note
 from app_saas.db import db_session, set_tenant_context
 from app_saas.knowledge.router import ensure_knowledge_tables, knowledge_context_for_query
 from app_saas.shared.secrets import decrypt_secret
@@ -808,6 +809,7 @@ Tarea:
 1. Responde al ultimo mensaje del cliente si corresponde.
 2. Extrae o mejora los campos CRM solo con datos razonables de la conversacion.
 3. Actualiza una memoria breve para continuar el seguimiento comercial.
+4. En crm.notes escribe solo informacion nueva para notas internas; si ya aparece en Contexto CRM actual.notes, deja "".
 
 Devuelve UNICAMENTE JSON valido con esta forma:
 {{
@@ -1060,6 +1062,9 @@ def _split_tags(value: Any) -> list[str]:
 
 def _merge_crm_patch(conversation: dict[str, Any], crm: dict[str, Any]) -> dict[str, Any]:
     patch: dict[str, Any] = {}
+    compact_notes = compact_ai_notes(conversation.get("notes"), limit=5000)
+    if compact_notes != _clean(conversation.get("notes"), 5000):
+        patch["notes"] = compact_notes
     for field in CRM_FIELDS:
         if field == "tags":
             existing = _split_tags(conversation.get("tags"))
@@ -1077,9 +1082,9 @@ def _merge_crm_patch(conversation: dict[str, Any], crm: dict[str, Any]) -> dict[
         if not value:
             continue
         if field == "notes":
-            existing = _clean(conversation.get("notes"), 5000)
-            if value and value.lower() not in existing.lower():
-                patch["notes"] = (f"{existing}\nIA: {value}" if existing else f"IA: {value}")[:5000]
+            merged_notes = merge_ai_note(patch.get("notes", conversation.get("notes")), value, limit=5000)
+            if merged_notes != _clean(conversation.get("notes"), 5000):
+                patch["notes"] = merged_notes
             continue
         if not _clean(conversation.get(field)) or field in {"interests", "customer_type", "payment_status", "crm_stage", "intent"}:
             patch[field] = value[:4000]

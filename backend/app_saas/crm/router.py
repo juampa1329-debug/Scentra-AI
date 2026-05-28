@@ -12,6 +12,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app_saas.agents.service import assign_conversation_ai_agent
 from app_saas.billing.limits import ensure_monthly_message_quota
+from app_saas.crm.notes import compact_ai_notes
 from app_saas.crm.schemas import (
     CrmCustomFieldCreateIn,
     CrmCustomFieldPatchIn,
@@ -1691,6 +1692,9 @@ def update_customer(
             raw_temperature = _clean_text(value, 40).lower()
             params[key] = raw_temperature if raw_temperature in TEMPERATURE_VALUES else _temperature_from_score(int(data.get("lead_score") or 0))
             assignments.append("lead_temperature = :lead_temperature")
+        elif key == "notes":
+            params[key] = compact_ai_notes(value, limit=4000)
+            assignments.append("notes = :notes")
         else:
             params[key] = _clean_text(value)
             assignments.append(f"{key} = :{key}")
