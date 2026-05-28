@@ -1279,7 +1279,7 @@ nav { display: grid; gap: 8px; width: 100%; }
 .recording-panel strong { white-space: nowrap; }
 .inbox-crm { overflow: auto; }
 .crm-mini-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-.crm-mini-form label, .crm-mini-form .check-row, .crm-mini-form button.primary, .crm-snapshot, .assignment-actions, .crm-ops-card, .crm-tasks-card, .message-status-card, .crm-custom-card, .crm-dedupe-card, .inbox-analysis-card, .web-search-card { grid-column: span 2; }
+.crm-mini-form label, .crm-mini-form .check-row, .crm-mini-form button.primary, .crm-snapshot, .assignment-actions, .crm-ops-card, .crm-predictive-card, .crm-tasks-card, .message-status-card, .crm-custom-card, .crm-dedupe-card, .inbox-analysis-card, .web-search-card { grid-column: span 2; }
 .crm-mini-form label:nth-of-type(1), .crm-mini-form label:nth-of-type(2), .crm-mini-form label:nth-of-type(3), .crm-mini-form label:nth-of-type(4), .crm-mini-form label:nth-of-type(5), .crm-mini-form label:nth-of-type(6) { grid-column: span 1; }
 .crm-snapshot { display: grid; grid-template-columns: auto 1fr; gap: 8px 12px; border: 1px solid var(--line); border-radius: 18px; padding: 14px; background: rgba(255,255,255,0.055); }
 .crm-snapshot span { color: var(--muted); font-size: 12px; }
@@ -2514,7 +2514,7 @@ nav { display: grid; gap: 8px; width: 100%; }
   .post-media-frame, .post-media-frame img { min-height: 210px; }
   .comment-composer-row { grid-template-columns: 1fr auto; }
   .social-post-card img { width: 100%; height: 190px; }
-  .crm-mini-form label, .crm-mini-form .check-row, .crm-mini-form button.primary, .crm-snapshot, .assignment-actions, .crm-ops-card, .crm-tasks-card, .message-status-card, .crm-custom-card, .crm-dedupe-card, .inbox-analysis-card, .web-search-card, .crm-mini-form label:nth-of-type(n) { grid-column: auto; }
+  .crm-mini-form label, .crm-mini-form .check-row, .crm-mini-form button.primary, .crm-snapshot, .assignment-actions, .crm-ops-card, .crm-predictive-card, .crm-tasks-card, .message-status-card, .crm-custom-card, .crm-dedupe-card, .inbox-analysis-card, .web-search-card, .crm-mini-form label:nth-of-type(n) { grid-column: auto; }
   .web-search-result, .visual-reference-item { grid-template-columns: 1fr; }
   .inbox-analysis-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .emoji-panel { left: 0; right: 0; grid-template-columns: repeat(6, 1fr); }
