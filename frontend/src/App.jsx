@@ -5560,10 +5560,19 @@ function App() {
                   <span className={diagnostics?.integrations?.some((item) => item.channel === "whatsapp" && item.dispatch_mode === "meta_cloud") ? "ok" : "warn"}>Modo Meta Cloud</span>
                   <span className={diagnostics?.integrations?.some((item) => item.channel === "whatsapp" && item.has_token) ? "ok" : "bad"}>Token Meta guardado</span>
                   <span className={(diagnostics?.webhooks?.endpoints || []).some((item) => item.is_active) ? "ok" : "bad"}>Webhook activo</span>
-                  <span className={diagnostics?.credentials?.some((item) => item.category === "ai" && item.has_secret) ? "ok" : "bad"}>API IA guardada</span>
+                  <span className={diagnostics?.ai?.credential_runtime_ok ? "ok" : diagnostics?.credentials?.some((item) => item.category === "ai" && item.has_secret) ? "bad" : "bad"}>API IA usable</span>
                   <span className={diagnostics?.ai?.active_model ? "ok" : "warn"}>Modelo IA seleccionado</span>
                   <span className={diagnostics?.whatsapp_symptoms?.statuses_without_inbound ? "bad" : "ok"}>Statuses vs inbound</span>
                 </div>
+                {diagnostics?.ai?.credential_runtime_ok === false ? (
+                  <div className="debug-result bad">
+                    <strong>La IA no puede usar la credencial guardada</strong>
+                    <span>Hay una API key guardada, pero el backend no puede leerla en runtime. Revisa `SAAS_SECRET_KEY` o vuelve a guardar la API key del proveedor IA.</span>
+                    {(diagnostics?.ai?.credential_runtime_statuses || []).map((item, idx) => (
+                      <small key={`${item.provider_code}-${idx}`}>{item.provider_code || "-"} / {item.credential_key || "-"}: {item.runtime_status || "sin estado"} / modelo: {item.selected_model || "sin modelo"}</small>
+                    ))}
+                  </div>
+                ) : null}
                 {diagnostics?.whatsapp_symptoms?.statuses_without_inbound ? (
                   <div className="debug-result bad">
                     <strong>Meta esta enviando statuses, pero no llegan mensajes entrantes</strong>
@@ -5661,6 +5670,8 @@ function App() {
                   <div><strong>IA pendiente</strong>{(diagnostics?.queues?.ai_pending || []).map((item) => <span key={item.status}>{item.status}: {item.total}</span>)}</div>
                   <div><strong>Outbound</strong>{(diagnostics?.queues?.outbound || []).map((item) => <span key={item.status}>{item.status}: {item.total}</span>)}</div>
                 </div>
+                <div className="debug-table">{(diagnostics?.queues?.ai_pending_recent || []).map((item, idx) => <div className={`debug-row ${["failed","skipped"].includes(item.status) || item.last_error ? "error" : ""}`} key={`${item.id}-${idx}`}><strong>{item.status} / intento {number(item.attempts || 0)}</strong><span>{item.conversation_id || "-"}</span><small>{fullDateTimeLabel(item.updated_at || item.created_at)} - {item.last_error || "sin error"}</small></div>)}{!diagnostics?.queues?.ai_pending_recent?.length ? <div className="empty">Sin trabajos IA recientes.</div> : null}</div>
+                <div className="debug-table">{(diagnostics?.ai?.recent_runs || []).map((item, idx) => <div className={`debug-row ${item.status === "failed" || item.status === "skipped" ? "error" : ""}`} key={`${item.id}-${idx}`}><strong>{item.agent_type || "agent"} / {item.provider_code || "-"}</strong><span>{item.status} / {item.model || "-"}</span><small>{fullDateTimeLabel(item.created_at)} / {number(item.total_tokens || 0)} tokens / {number(item.latency_ms || 0)} ms {item.error_code ? `/ ${item.error_code}: ${item.error_message}` : ""}</small></div>)}{!diagnostics?.ai?.recent_runs?.length ? <div className="empty">Sin llamadas AI Gateway recientes.</div> : null}</div>
                 <div className="debug-table">{(diagnostics?.queues?.outbound_errors || []).map((item, idx) => <div className="debug-row error" key={`${item.updated_at}-${idx}`}><strong>{item.status} / {item.channel}</strong><span>{item.recipient_external_id || "-"}</span><small>{fullDateTimeLabel(item.updated_at)} - {item.error}</small></div>)}{!diagnostics?.queues?.outbound_errors?.length ? <div className="empty">Sin errores outbound recientes.</div> : null}</div>
               </article>
               <article className="panel glass-card">

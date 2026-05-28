@@ -1073,11 +1073,27 @@ nav { display: grid; gap: 8px; width: 100%; }
 .inbox-agent-filter { margin: -4px 0 12px; }
 .inbox-agent-filter label { display: grid; gap: 6px; color: var(--muted); font-size: 11px; font-weight: 900; }
 .inbox-agent-filter select { min-height: 36px; border-radius: 12px; }
-.conversation-list { align-content: start; max-height: calc(100vh - 310px); overflow: auto; padding-right: 8px; scrollbar-gutter: stable; }
+.conversation-list { align-content: start; grid-auto-rows: max-content; max-height: calc(100vh - 310px); overflow: auto; padding-right: 8px; scrollbar-gutter: stable; }
 .content-inbox .conversation-list { max-height: none; min-height: 0; }
-.conversation-item { align-self: start; display: grid; gap: 6px; min-width: 0; min-height: 74px; height: auto; overflow: hidden; text-align: left; padding: 12px; border-radius: 16px; }
+.conversation-item {
+  align-self: start;
+  justify-items: stretch;
+  display: grid;
+  grid-template-rows: repeat(4, max-content);
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  height: auto;
+  overflow: hidden;
+  text-align: left;
+  padding: 12px;
+  border-radius: 16px;
+  line-height: 1.25;
+  contain: layout paint;
+}
 .conversation-item.active { border-color: rgba(94,234,212,0.55); background: rgba(20,184,166,0.16); }
-.conversation-item.comment-item { min-height: 78px; border-color: rgba(96,165,250,0.24); background: linear-gradient(135deg, rgba(15,118,110,0.10), rgba(59,130,246,0.08)); }
+.conversation-item.comment-item { min-height: 0; border-color: rgba(96,165,250,0.24); background: linear-gradient(135deg, rgba(15,118,110,0.10), rgba(59,130,246,0.08)); }
 .conversation-item.comment-item.active { border-color: rgba(52,211,153,0.58); background: linear-gradient(135deg, rgba(20,184,166,0.20), rgba(96,165,250,0.14)); }
 .conversation-item span, .conversation-item small, .message span, .message small { color: var(--muted); font-size: 12px; }
 .conversation-item b { color: var(--ok); font-weight: 900; }
@@ -1088,7 +1104,7 @@ nav { display: grid; gap: 8px; width: 100%; }
 .conversation-meta { display: flex; min-width: 0; align-items: center; gap: 8px; }
 .conversation-meta b, .conversation-meta small { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .conversation-meta small { color: var(--muted); font-size: 11px; }
-.conversation-badges { display: flex; flex-wrap: wrap; gap: 5px; min-width: 0; max-width: 100%; }
+.conversation-badges { display: flex; flex-wrap: wrap; gap: 5px; min-width: 0; max-width: 100%; overflow: hidden; }
 .conversation-badges mark, .lead-pill {
   display: inline-flex;
   width: fit-content;
@@ -1899,7 +1915,7 @@ nav { display: grid; gap: 8px; width: 100%; }
   padding: 12px;
 }
 .kb-source strong, .debug-row strong { display: block; color: var(--ink); }
-.kb-source span, .kb-source p, .kb-source small, .debug-row span, .debug-row small { color: var(--muted); font-size: 12px; }
+.kb-source span, .kb-source p, .kb-source small, .debug-row span, .debug-row small { color: var(--muted); font-size: 12px; min-width: 0; overflow-wrap: anywhere; }
 .debug-row code { grid-column: 1 / -1; overflow-wrap: anywhere; color: var(--soft); font-size: 12px; }
 .kb-source p { margin: 6px 0 0; white-space: normal; }
 .debug-grid, .queue-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; }

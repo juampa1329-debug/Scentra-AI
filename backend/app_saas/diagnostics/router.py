@@ -20,6 +20,7 @@ from app_saas.integrations.router import _instagram_page_token, _integration_tok
 from app_saas.integrations.whatsapp_subscription import ensure_whatsapp_subscription_log_table
 from app_saas.knowledge.router import ensure_knowledge_tables
 from app_saas.shared.security import AuthContext, get_current_user, require_role
+from app_saas.shared.secrets import decrypt_secret
 from app_saas.social.service import ensure_social_tables
 from app_saas.workers.dispatch import process_due_outbound_messages
 from app_saas.workers.ingest import process_due_webhook_events
@@ -62,6 +63,34 @@ def _status_counts(conn: Connection, table_name: str, tenant_id: str) -> list[di
 def _recent_rows(conn: Connection, sql: str, tenant_id: str, limit: int = 5) -> list[dict[str, Any]]:
     rows = conn.execute(text(sql), {"tenant_id": tenant_id, "limit": limit}).mappings().all()
     return [dict(row) for row in rows]
+
+
+def _credential_runtime_status(row: dict[str, Any]) -> dict[str, Any]:
+    secret_value = str(row.get("secret_value") or "").strip()
+    has_secret = bool(secret_value)
+    selected_model = ""
+    metadata = row.get("metadata_json") if isinstance(row.get("metadata_json"), dict) else {}
+    if isinstance(metadata, dict):
+        selected_model = str(metadata.get("selected_model") or "")
+    runtime_secret_available = bool(decrypt_secret(secret_value)) if has_secret else False
+    if not has_secret:
+        runtime_status = "missing_secret"
+    elif runtime_secret_available:
+        runtime_status = "ok"
+    elif secret_value.startswith("enc:v1:"):
+        runtime_status = "unreadable_encrypted_secret"
+    else:
+        runtime_status = "empty_secret"
+    return {
+        "category": row.get("category"),
+        "provider_code": row.get("provider_code"),
+        "credential_key": row.get("credential_key"),
+        "has_secret": bool(str(row.get("secret_hint") or "").strip() or has_secret),
+        "runtime_secret_available": runtime_secret_available,
+        "runtime_status": runtime_status,
+        "selected_model": selected_model,
+        "updated_at": row.get("updated_at"),
+    }
 
 
 def _load_debug_whatsapp_integration(conn: Connection, tenant_id: str) -> dict[str, Any]:
@@ -282,7 +311,7 @@ def diagnostics_overview(ctx: AuthContext = Depends(get_current_user)):
         credentials = conn.execute(
             text(
                 """
-                SELECT category, provider_code, credential_key, secret_hint, metadata_json, updated_at::text
+                SELECT category, provider_code, credential_key, secret_value, secret_hint, metadata_json, updated_at::text
                 FROM saas_api_credentials
                 WHERE tenant_id = CAST(:tenant_id AS uuid)
                 ORDER BY category, provider_code, credential_key
@@ -388,9 +417,47 @@ def diagnostics_overview(ctx: AuthContext = Depends(get_current_user)):
         webhook_counts = _status_counts(conn, "saas_webhook_events", ctx.tenant_id)
         outbound_counts = _status_counts(conn, "saas_outbound_messages", ctx.tenant_id)
         ai_pending_counts = _status_counts(conn, "saas_ai_pending_replies", ctx.tenant_id)
+        ai_pending_recent = _recent_rows(
+            conn,
+            """
+            SELECT id::text, conversation_id::text, COALESCE(last_message_id::text, '') AS last_message_id,
+                   status, attempts, last_error, scheduled_at::text, created_at::text, updated_at::text
+            FROM saas_ai_pending_replies
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+            ORDER BY updated_at DESC
+            LIMIT :limit
+            """,
+            ctx.tenant_id,
+            limit=8,
+        ) if _table_exists(conn, "saas_ai_pending_replies") else []
+        ai_gateway_recent = _recent_rows(
+            conn,
+            """
+            SELECT id::text, COALESCE(conversation_id::text, '') AS conversation_id,
+                   agent_type, task_type, route_code, provider_code, model, status,
+                   total_tokens, latency_ms, fallback_used, error_code, error_message,
+                   created_at::text
+            FROM saas_ai_runs
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+            ORDER BY created_at DESC
+            LIMIT :limit
+            """,
+            ctx.tenant_id,
+            limit=8,
+        ) if _table_exists(conn, "saas_ai_runs") else []
         whatsapp_signal = _whatsapp_webhook_signal(conn, ctx.tenant_id)
         subscription_checks = _recent_subscription_checks(conn, ctx.tenant_id)
         social_meta = _social_meta_diagnostics(conn, ctx.tenant_id)
+        credential_rows = [_credential_runtime_status(dict(row)) for row in credentials]
+        ai_credential_rows = [row for row in credential_rows if row.get("category") == "ai"]
+        ai_provider = str(ai_settings.get("provider_code") or "")
+        ai_fallback_provider = str(ai_settings.get("fallback_provider_code") or "")
+        selected_ai_credentials = [
+            row
+            for row in ai_credential_rows
+            if row.get("provider_code") in {ai_provider, ai_fallback_provider}
+        ] or ai_credential_rows
+        credential_runtime_ok = any(bool(row.get("runtime_secret_available")) for row in selected_ai_credentials)
     return {
         "generated_at": generated_at,
         "diagnostic_type": "overview",
@@ -409,18 +476,11 @@ def diagnostics_overview(ctx: AuthContext = Depends(get_current_user)):
             "active_model": ai_settings.get("active_model"),
             "fallback_provider": ai_settings.get("fallback_provider_code"),
             "fallback_model": ai_settings.get("fallback_model"),
+            "credential_runtime_ok": credential_runtime_ok,
+            "credential_runtime_statuses": selected_ai_credentials,
+            "recent_runs": ai_gateway_recent,
         },
-        "credentials": [
-            {
-                "category": row["category"],
-                "provider_code": row["provider_code"],
-                "credential_key": row["credential_key"],
-                "has_secret": bool(str(row.get("secret_hint") or "").strip()),
-                "selected_model": (row.get("metadata_json") or {}).get("selected_model", "") if isinstance(row.get("metadata_json"), dict) else "",
-                "updated_at": row["updated_at"],
-            }
-            for row in credentials
-        ],
+        "credentials": credential_rows,
         "integrations": integration_rows,
         "webhooks": {"endpoints": webhooks, "events": webhook_counts, "last_events": last_events},
         "whatsapp_symptoms": whatsapp_signal,
@@ -429,6 +489,7 @@ def diagnostics_overview(ctx: AuthContext = Depends(get_current_user)):
         "queues": {
             "outbound": outbound_counts,
             "ai_pending": ai_pending_counts,
+            "ai_pending_recent": ai_pending_recent,
             "outbound_errors": outbound_errors,
         },
         "totals": dict(totals or {}),
