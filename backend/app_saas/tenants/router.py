@@ -24,9 +24,9 @@ def list_tenants(ctx: AuthContext = Depends(get_current_user)):
                     t.id::text AS tenant_id,
                     t.slug,
                     t.name,
-                    t.plan_code,
+                    COALESCE(NULLIF(t.plan_code, ''), 'starter') AS plan_code,
                     t.status,
-                    t.industry_code,
+                    COALESCE(NULLIF(t.industry_code, ''), 'general') AS industry_code,
                     t.vertical_pack_applied_at::text,
                     m.role
                 FROM saas_memberships m
