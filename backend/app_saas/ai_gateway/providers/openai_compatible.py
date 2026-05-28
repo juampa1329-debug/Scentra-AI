@@ -8,6 +8,28 @@ from app_saas.ai_gateway.providers.http import estimate_tokens, post_json
 from app_saas.config import settings as app_settings
 
 
+def _data_url(mime_type: str, data_base64: str) -> str:
+    return f"data:{mime_type};base64,{data_base64}"
+
+
+def _user_content(request: GatewayRequest):
+    if not request.attachments:
+        return request.user_prompt
+    content: list[dict] = [{"type": "text", "text": request.user_prompt}]
+    for attachment in request.attachments:
+        if attachment.text:
+            content.append({"type": "text", "text": attachment.text})
+        if attachment.kind == "image" or attachment.mime_type.startswith("image/"):
+            if attachment.data_base64 and attachment.mime_type:
+                content.append({"type": "image_url", "image_url": {"url": _data_url(attachment.mime_type, attachment.data_base64)}})
+            elif attachment.uri:
+                content.append({"type": "image_url", "image_url": {"url": attachment.uri}})
+        elif attachment.name or attachment.mime_type:
+            label = attachment.name or attachment.mime_type or attachment.kind
+            content.append({"type": "text", "text": f"[Adjunto {attachment.kind or 'file'} disponible para preprocesamiento: {label}]"})
+    return content
+
+
 class OpenAICompatibleAdapter(BaseProviderAdapter):
     def generate(self, request: GatewayRequest, token: str, model: str) -> ProviderResult:
         provider = self.definition.code
@@ -26,7 +48,7 @@ class OpenAICompatibleAdapter(BaseProviderAdapter):
             "model": selected_model,
             "messages": [
                 {"role": "system", "content": request.system_prompt},
-                {"role": "user", "content": request.user_prompt},
+                {"role": "user", "content": _user_content(request)},
             ],
             "temperature": float(request.settings.get("temperature") or 0.5),
             "max_tokens": int(request.settings.get("max_tokens") or 1800),
@@ -52,6 +74,5 @@ class OpenAICompatibleAdapter(BaseProviderAdapter):
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             latency_ms=latency_ms,
-            metadata={"usage": usage, "id": data.get("id") or ""},
+            metadata={"usage": usage, "id": data.get("id") or "", "attachment_count": len(request.attachments)},
         )
-

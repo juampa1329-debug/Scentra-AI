@@ -36,6 +36,10 @@ const fallbackCatalog = {
     { key: "comment_keywords", label: "Palabras clave en comentario" },
     { key: "template_sent_status", label: "Plantilla enviada/no enviada" },
     { key: "current_tag", label: "Etiqueta actual" },
+    { key: "crm_stage", label: "Etapa CRM" },
+    { key: "payment_status", label: "Estado de pago" },
+    { key: "customer_type", label: "Tipo de cliente" },
+    { key: "intent", label: "Intencion comercial" },
     { key: "schedule", label: "Horario" },
   ],
   action_types: [
@@ -52,7 +56,8 @@ const fallbackCatalog = {
 
 const conditionMenuGroups = [
   ["last_message_sent", "sent_count", "check_words", "comment_keywords"],
-  ["template_sent_status", "current_tag", "schedule"],
+  ["template_sent_status", "current_tag", "crm_stage", "payment_status"],
+  ["customer_type", "intent", "schedule"],
 ];
 
 const weekDays = [
@@ -64,6 +69,22 @@ const weekDays = [
   { key: "sat", label: "Sab" },
   { key: "sun", label: "Dom" },
 ];
+
+const defaultQuietHours = () => ({
+  enabled: false,
+  timezone: "America/Bogota",
+  start_time: "21:00",
+  end_time: "08:00",
+  days: ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+});
+
+const defaultAbTest = () => ({
+  enabled: false,
+  variants: [
+    { key: "A", weight: 50, template_id: "" },
+    { key: "B", weight: 50, template_id: "" },
+  ],
+});
 
 function blankTrigger() {
   return {
@@ -81,6 +102,9 @@ function blankTrigger() {
     block_ai: true,
     stop_on_match: true,
     only_when_no_takeover: true,
+    quiet_hours_json: defaultQuietHours(),
+    ab_test_json: defaultAbTest(),
+    revision_note: "",
   };
 }
 
@@ -88,6 +112,7 @@ function blankCondition(type = "check_words") {
   if (type === "comment_keywords") return { type, mode: "any", words: [] };
   if (type === "template_sent_status") return { type, state: "not_sent", template_id: "" };
   if (type === "current_tag") return { type, state: "has", tag: "" };
+  if (["crm_stage", "payment_status", "customer_type", "intent"].includes(type)) return { type, op: "is", value: "" };
   if (type === "last_message_sent") return { type, op: "gte", minutes: 10 };
   if (type === "sent_count") return { type, op: "gte", value: 1, window_hours: 24 };
   if (type === "schedule") return { type, timezone: "America/Bogota", start_time: "08:00", end_time: "20:00", days: ["mon", "tue", "wed", "thu", "fri", "sat"] };
@@ -132,6 +157,10 @@ function cleanConditions(conditions) {
       }
       if (type === "template_sent_status") return { type, state: c.state === "sent" ? "sent" : "not_sent", template_id: c.template_id || null };
       if (type === "current_tag") return { type, state: c.state === "not_has" ? "not_has" : "has", tag: String(c.tag || "").trim() };
+      if (["crm_stage", "payment_status", "customer_type", "intent"].includes(type)) {
+        const op = ["not_is", "contains", "not_contains"].includes(c.op) ? c.op : "is";
+        return { type, op, value: String(c.value || c.status || c.stage || "").trim() };
+      }
       if (type === "last_message_sent") return { type, op: c.op || "gte", minutes: Number(c.minutes || 0) };
       if (type === "sent_count") return { type, op: c.op || "gte", value: Number(c.value || 0), window_hours: Number(c.window_hours || 24) };
       if (type === "schedule") {
@@ -178,6 +207,34 @@ function cleanActions(actions) {
     .filter(Boolean);
 }
 
+function normalizeQuietHours(value) {
+  const root = value && typeof value === "object" ? value : {};
+  const base = defaultQuietHours();
+  const days = Array.isArray(root.days) ? root.days.map((item) => String(item || "").slice(0, 3).toLowerCase()).filter(Boolean) : base.days;
+  return {
+    enabled: !!root.enabled,
+    timezone: String(root.timezone || base.timezone),
+    start_time: String(root.start_time || base.start_time),
+    end_time: String(root.end_time || base.end_time),
+    days: days.length ? days : base.days,
+  };
+}
+
+function normalizeAbTest(value) {
+  const root = value && typeof value === "object" ? value : {};
+  const base = defaultAbTest();
+  const variants = Array.isArray(root.variants) && root.variants.length ? root.variants : base.variants;
+  return {
+    enabled: !!root.enabled,
+    variants: variants.map((variant, idx) => ({
+      key: String(variant?.key || variant?.name || (idx === 0 ? "A" : "B")).slice(0, 40),
+      weight: Number(variant?.weight || variant?.traffic || (idx === 0 ? 50 : 50)),
+      template_id: variant?.template_id || "",
+      reply_text: String(variant?.reply_text || ""),
+    })),
+  };
+}
+
 function labelFor(items, key, fallback = "") {
   const row = (items || []).find((x) => String(x?.key || "") === String(key || ""));
   return row?.label || fallback || String(key || "");
@@ -210,6 +267,18 @@ export default function SaasTriggerBuilderPanel({ apiCall, templates = [], trigg
   const [actionMenuOpen, setActionMenuOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [search, setSearch] = useState("");
+  const [preflightResult, setPreflightResult] = useState(null);
+  const [simulation, setSimulation] = useState(null);
+  const [simulationInput, setSimulationInput] = useState({
+    message_text: "Hola, quiero saber precio",
+    customer_name: "Cliente demo",
+    customer_phone: "+573001112233",
+    crm_stage: "",
+    payment_status: "",
+    tags: "",
+  });
+  const [versions, setVersions] = useState([]);
+  const [abReport, setAbReport] = useState(null);
 
   useEffect(() => {
     let live = true;
@@ -234,6 +303,10 @@ export default function SaasTriggerBuilderPanel({ apiCall, templates = [], trigg
       setConditionMode("all");
       setConditions([]);
       setActions([]);
+      setPreflightResult(null);
+      setSimulation(null);
+      setVersions([]);
+      setAbReport(null);
       return;
     }
     const row = (triggers || []).find((item) => String(item.id) === String(selectedTriggerId));
@@ -254,10 +327,19 @@ export default function SaasTriggerBuilderPanel({ apiCall, templates = [], trigg
       block_ai: !!row.block_ai,
       stop_on_match: !!row.stop_on_match,
       only_when_no_takeover: !!row.only_when_no_takeover,
+      quiet_hours_json: normalizeQuietHours(row.quiet_hours_json),
+      ab_test_json: normalizeAbTest(row.ab_test_json),
+      revision_note: "",
+      version_number: row.version_number || 1,
+      preflight_json: row.preflight_json || null,
     });
+    setPreflightResult(row.preflight_json || null);
     setConditionMode(conditionRoot.match === "any" ? "any" : "all");
     setConditions(normalizeConditions(row.conditions_json));
     setActions(normalizeActions(row.actions_json || row.action_json));
+    setSimulation(null);
+    setVersions([]);
+    setAbReport(null);
   }, [selectedTriggerId, triggers]);
 
   const eventTypes = catalog.event_types || fallbackCatalog.event_types;
@@ -274,6 +356,13 @@ export default function SaasTriggerBuilderPanel({ apiCall, templates = [], trigg
 
   const updateCondition = (idx, patch) => setConditions((prev) => prev.map((c, i) => (i === idx ? { ...c, ...patch } : c)));
   const updateAction = (idx, patch) => setActions((prev) => prev.map((a, i) => (i === idx ? { ...a, ...patch } : a)));
+  const patchQuietHours = (patch) => setForm((prev) => ({ ...prev, quiet_hours_json: { ...normalizeQuietHours(prev.quiet_hours_json), ...patch } }));
+  const patchAbTest = (patch) => setForm((prev) => ({ ...prev, ab_test_json: { ...normalizeAbTest(prev.ab_test_json), ...patch } }));
+  const updateAbVariant = (idx, patch) => setForm((prev) => {
+    const current = normalizeAbTest(prev.ab_test_json);
+    const variants = current.variants.map((variant, i) => (i === idx ? { ...variant, ...patch } : variant));
+    return { ...prev, ab_test_json: { ...current, variants } };
+  });
 
   const moveItem = (kind, idx, direction) => {
     const setter = kind === "condition" ? setConditions : setActions;
@@ -318,8 +407,7 @@ export default function SaasTriggerBuilderPanel({ apiCall, templates = [], trigg
     setActionMenuOpen(false);
   };
 
-  const saveTrigger = async () => {
-    const payload = {
+  const triggerPayload = () => ({
       name: String(form.name || "").trim(),
       channel: String(form.channel || "whatsapp").trim().toLowerCase() || "whatsapp",
       event_type: form.event_type || "message_in",
@@ -335,7 +423,13 @@ export default function SaasTriggerBuilderPanel({ apiCall, templates = [], trigg
       only_when_no_takeover: !!form.only_when_no_takeover,
       conditions_json: { match: conditionMode, conditions: cleanConditions(conditions) },
       actions_json: { actions: cleanActions(actions) },
-    };
+      quiet_hours_json: normalizeQuietHours(form.quiet_hours_json),
+      ab_test_json: normalizeAbTest(form.ab_test_json),
+      revision_note: String(form.revision_note || "").trim(),
+    });
+
+  const saveTrigger = async () => {
+    const payload = triggerPayload();
     if (!payload.name) return showStatus?.("Nombre del trigger requerido.", "error");
 
     setSaving(true);
@@ -346,11 +440,88 @@ export default function SaasTriggerBuilderPanel({ apiCall, templates = [], trigg
       await onReload?.();
       const id = data?.trigger?.id || form.id;
       if (id) setSelectedTriggerId(id);
+      if (data?.trigger?.preflight_json) setPreflightResult(data.trigger.preflight_json);
       showStatus?.(isUpdate ? "Trigger actualizado." : "Trigger creado.", "ok");
     } catch (err) {
       showStatus?.(String(err.message || err), "error");
     } finally {
       setSaving(false);
+    }
+  };
+
+  const runPreflight = async () => {
+    const payload = triggerPayload();
+    try {
+      const path = form.id ? `/saas/v1/campaigns/triggers/${encodeURIComponent(form.id)}/preflight` : "/saas/v1/campaigns/triggers/preflight";
+      const data = await apiCall(path, form.id ? { method: "POST" } : { method: "POST", body: JSON.stringify({ entity_type: "trigger", draft: payload }) });
+      setPreflightResult(data?.preflight || null);
+      showStatus?.(data?.preflight?.ready ? "Preflight listo para activar." : "Preflight con bloqueos.", data?.preflight?.ready ? "ok" : "error");
+    } catch (err) {
+      showStatus?.(String(err.message || err), "error");
+    }
+  };
+
+  const runSimulation = async () => {
+    const payload = triggerPayload();
+    try {
+      const data = await apiCall("/saas/v1/campaigns/triggers/simulate", {
+        method: "POST",
+        body: JSON.stringify({
+          trigger_id: form.id || null,
+          trigger: form.id ? null : payload,
+          event_kind: payload.event_type === "comment_in" ? "comment" : payload.flow_event || "received",
+          channel: payload.channel,
+          message_text: simulationInput.message_text,
+          customer_name: simulationInput.customer_name,
+          customer_phone: simulationInput.customer_phone,
+          crm_stage: simulationInput.crm_stage,
+          payment_status: simulationInput.payment_status,
+          tags: simulationInput.tags,
+        }),
+      });
+      setSimulation(data?.simulation || null);
+      showStatus?.(data?.simulation?.matched ? "Simulacion con match." : "Simulacion sin match.", data?.simulation?.matched ? "ok" : "neutral");
+    } catch (err) {
+      showStatus?.(String(err.message || err), "error");
+    }
+  };
+
+  const loadVersions = async () => {
+    if (!form.id) return;
+    try {
+      const data = await apiCall(`/saas/v1/campaigns/triggers/${encodeURIComponent(form.id)}/versions`);
+      setVersions(data?.versions || []);
+      showStatus?.("Versiones cargadas.", "ok");
+    } catch (err) {
+      showStatus?.(String(err.message || err), "error");
+    }
+  };
+
+  const restoreVersion = async (version) => {
+    if (!form.id || !version?.id) return;
+    const ok = window.confirm(`Restaurar version ${version.version_number}?`);
+    if (!ok) return;
+    try {
+      await apiCall(`/saas/v1/campaigns/triggers/${encodeURIComponent(form.id)}/versions/${encodeURIComponent(version.id)}/restore`, {
+        method: "POST",
+        body: JSON.stringify({ revision_note: `restore_v${version.version_number}` }),
+      });
+      await onReload?.();
+      await loadVersions();
+      showStatus?.("Version restaurada.", "ok");
+    } catch (err) {
+      showStatus?.(String(err.message || err), "error");
+    }
+  };
+
+  const loadAbReport = async () => {
+    if (!form.id) return;
+    try {
+      const data = await apiCall(`/saas/v1/campaigns/ab-report?entity_type=trigger&entity_id=${encodeURIComponent(form.id)}`);
+      setAbReport(data || null);
+      showStatus?.("Reporte A/B actualizado.", "ok");
+    } catch (err) {
+      showStatus?.(String(err.message || err), "error");
     }
   };
 
@@ -472,6 +643,7 @@ export default function SaasTriggerBuilderPanel({ apiCall, templates = [], trigg
         <div className="trigger-builder-tabs">
           <button type="button" className={builderTab === "conditions" ? "active danger-tab" : ""} onClick={() => setBuilderTab("conditions")}>Condiciones</button>
           <button type="button" className={builderTab === "actions" ? "active success-tab" : ""} onClick={() => setBuilderTab("actions")}>Acciones</button>
+          <button type="button" className={builderTab === "governance" ? "active" : ""} onClick={() => setBuilderTab("governance")}>Preflight</button>
         </div>
 
         {builderTab === "conditions" ? (
@@ -533,6 +705,13 @@ export default function SaasTriggerBuilderPanel({ apiCall, templates = [], trigg
                   <div className="trigger-two-col">
                     <select value={condition.state || "has"} onChange={(event) => updateCondition(idx, { state: event.target.value })}><option value="has">Tiene etiqueta</option><option value="not_has">No tiene etiqueta</option></select>
                     <input placeholder="Etiqueta" value={condition.tag || ""} onChange={(event) => updateCondition(idx, { tag: event.target.value })} />
+                  </div>
+                ) : null}
+
+                {["crm_stage", "payment_status", "customer_type", "intent"].includes(condition.type) ? (
+                  <div className="trigger-two-col">
+                    <select value={condition.op || "is"} onChange={(event) => updateCondition(idx, { op: event.target.value })}><option value="is">Igual a</option><option value="not_is">Distinto de</option><option value="contains">Contiene</option><option value="not_contains">No contiene</option></select>
+                    <input placeholder="Valor esperado" value={condition.value || ""} onChange={(event) => updateCondition(idx, { value: event.target.value })} />
                   </div>
                 ) : null}
 
@@ -632,7 +811,7 @@ export default function SaasTriggerBuilderPanel({ apiCall, templates = [], trigg
 
                 {action.type === "change_contact_status" ? (
                   <div className="trigger-two-col">
-                    <select value={action.field || "customer_type"} onChange={(event) => updateAction(idx, { field: event.target.value })}><option value="customer_type">Estado contacto</option><option value="payment_status">Estado pago</option></select>
+                    <select value={action.field || "customer_type"} onChange={(event) => updateAction(idx, { field: event.target.value })}><option value="customer_type">Estado contacto</option><option value="payment_status">Estado pago</option><option value="crm_stage">Etapa CRM</option><option value="intent">Intencion</option></select>
                     <input placeholder="Valor estado" value={action.status || ""} onChange={(event) => updateAction(idx, { status: event.target.value })} />
                   </div>
                 ) : null}
@@ -655,6 +834,97 @@ export default function SaasTriggerBuilderPanel({ apiCall, templates = [], trigg
                 ) : null}
               </div>
             ))}
+          </div>
+        ) : null}
+
+        {builderTab === "governance" ? (
+          <div className="trigger-rule-stack">
+            <div className="trigger-rule-card">
+              <div className="trigger-rule-head">
+                <strong>Simulador y preflight</strong>
+                <span>
+                  <button type="button" onClick={runPreflight}>Preflight</button>
+                  <button type="button" onClick={runSimulation}>Simular</button>
+                </span>
+              </div>
+              <div className="trigger-three-col">
+                <input value={simulationInput.message_text} onChange={(event) => setSimulationInput((prev) => ({ ...prev, message_text: event.target.value }))} placeholder="Mensaje de prueba" />
+                <input value={simulationInput.customer_name} onChange={(event) => setSimulationInput((prev) => ({ ...prev, customer_name: event.target.value }))} placeholder="Cliente" />
+                <input value={simulationInput.customer_phone} onChange={(event) => setSimulationInput((prev) => ({ ...prev, customer_phone: event.target.value }))} placeholder="Telefono" />
+              </div>
+              <div className="trigger-three-col">
+                <input value={simulationInput.crm_stage} onChange={(event) => setSimulationInput((prev) => ({ ...prev, crm_stage: event.target.value }))} placeholder="Etapa CRM" />
+                <input value={simulationInput.payment_status} onChange={(event) => setSimulationInput((prev) => ({ ...prev, payment_status: event.target.value }))} placeholder="Estado de pago" />
+                <input value={simulationInput.tags} onChange={(event) => setSimulationInput((prev) => ({ ...prev, tags: event.target.value }))} placeholder="Etiquetas" />
+              </div>
+              {preflightResult ? (
+                <div className="trigger-result-box">
+                  <strong>Preflight {preflightResult.status} / score {preflightResult.score}</strong>
+                  {(preflightResult.checks || []).map((check, idx) => <span key={`${idx}-${check.code}`} className={check.ok ? "ok-chip" : "danger-chip"}>{check.label}</span>)}
+                </div>
+              ) : null}
+              {simulation ? (
+                <div className="trigger-result-box">
+                  <strong>{simulation.matched ? "Match detectado" : "Sin match"} / block_ai {simulation.block_ai ? "si" : "no"}</strong>
+                  {(simulation.actions || []).map((action) => <span key={`${action.index}-${action.type}`} className={action.would_queue ? "ok-chip" : "warn-chip"}>{action.type}: {action.would_queue || 0} mensajes</span>)}
+                </div>
+              ) : null}
+            </div>
+
+            <div className="trigger-rule-card">
+              <div className="trigger-rule-head"><strong>Quiet hours del trigger</strong></div>
+              <label className="check-row"><input type="checkbox" checked={!!normalizeQuietHours(form.quiet_hours_json).enabled} onChange={(event) => patchQuietHours({ enabled: event.target.checked })} /> Pausar dentro de horario silencioso</label>
+              <div className="trigger-three-col">
+                <input value={normalizeQuietHours(form.quiet_hours_json).timezone} onChange={(event) => patchQuietHours({ timezone: event.target.value })} />
+                <input value={normalizeQuietHours(form.quiet_hours_json).start_time} onChange={(event) => patchQuietHours({ start_time: event.target.value })} />
+                <input value={normalizeQuietHours(form.quiet_hours_json).end_time} onChange={(event) => patchQuietHours({ end_time: event.target.value })} />
+              </div>
+              <div className="trigger-chip-wrap">
+                {weekDays.map((day) => {
+                  const current = normalizeQuietHours(form.quiet_hours_json);
+                  const has = current.days.includes(day.key);
+                  return <button type="button" key={day.key} className={`trigger-day ${has ? "on" : ""}`} onClick={() => patchQuietHours({ days: has ? current.days.filter((item) => item !== day.key) : [...current.days, day.key] })}>{day.label}</button>;
+                })}
+              </div>
+            </div>
+
+            <div className="trigger-rule-card">
+              <div className="trigger-rule-head">
+                <strong>A/B testing</strong>
+                <span><button type="button" onClick={loadAbReport} disabled={!form.id}>Reporte</button></span>
+              </div>
+              <label className="check-row"><input type="checkbox" checked={!!normalizeAbTest(form.ab_test_json).enabled} onChange={(event) => patchAbTest({ enabled: event.target.checked })} /> Activar variantes</label>
+              {normalizeAbTest(form.ab_test_json).variants.map((variant, idx) => (
+                <div className="trigger-three-col" key={`${idx}-${variant.key}`}>
+                  <input value={variant.key} onChange={(event) => updateAbVariant(idx, { key: event.target.value })} placeholder="Variante" />
+                  <input type="number" value={variant.weight} onChange={(event) => updateAbVariant(idx, { weight: Number(event.target.value || 0) })} placeholder="Peso" />
+                  <select value={variant.template_id || ""} onChange={(event) => updateAbVariant(idx, { template_id: event.target.value })}>{renderTemplateOptions()}</select>
+                </div>
+              ))}
+              {abReport ? (
+                <div className="trigger-result-box">
+                  <strong>{abReport.totals?.events || 0} eventos A/B</strong>
+                  {(abReport.variants || []).map((variant) => <span key={`${variant.variant_key}-${variant.template_id}`} className="ok-chip">{variant.variant_key}: {variant.queued}/{variant.events}</span>)}
+                </div>
+              ) : null}
+            </div>
+
+            <div className="trigger-rule-card">
+              <div className="trigger-rule-head">
+                <strong>Versiones</strong>
+                <span><button type="button" onClick={loadVersions} disabled={!form.id}>Cargar</button></span>
+              </div>
+              <input value={form.revision_note || ""} onChange={(event) => setForm((prev) => ({ ...prev, revision_note: event.target.value }))} placeholder="Nota de revision" />
+              <div className="trigger-version-list">
+                {versions.map((version) => (
+                  <div key={version.id} className="trigger-version-row">
+                    <span>v{version.version_number} / {version.change_reason || "sin nota"}</span>
+                    <button type="button" onClick={() => restoreVersion(version)}>Restaurar</button>
+                  </div>
+                ))}
+                {!versions.length ? <div className="empty">Carga versiones para revisar rollback.</div> : null}
+              </div>
+            </div>
           </div>
         ) : null}
 

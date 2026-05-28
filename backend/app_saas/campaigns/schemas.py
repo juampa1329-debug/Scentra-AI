@@ -55,6 +55,8 @@ class CampaignIn(BaseModel):
     segment_id: str | None = None
     status: str = Field(default="draft", max_length=40)
     scheduled_at: str | None = None
+    quiet_hours_json: dict[str, Any] | None = None
+    ab_test_json: dict[str, Any] | None = None
 
 
 class CampaignPatchIn(BaseModel):
@@ -65,6 +67,8 @@ class CampaignPatchIn(BaseModel):
     segment_id: str | None = None
     status: str | None = Field(default=None, max_length=40)
     scheduled_at: str | None = None
+    quiet_hours_json: dict[str, Any] | None = None
+    ab_test_json: dict[str, Any] | None = None
 
 
 class TriggerIn(BaseModel):
@@ -83,6 +87,9 @@ class TriggerIn(BaseModel):
     block_ai: bool = True
     stop_on_match: bool = True
     only_when_no_takeover: bool = True
+    quiet_hours_json: dict[str, Any] | None = None
+    ab_test_json: dict[str, Any] | None = None
+    revision_note: str = Field(default="", max_length=500)
 
 
 class TriggerPatchIn(BaseModel):
@@ -101,11 +108,18 @@ class TriggerPatchIn(BaseModel):
     block_ai: bool | None = None
     stop_on_match: bool | None = None
     only_when_no_takeover: bool | None = None
+    quiet_hours_json: dict[str, Any] | None = None
+    ab_test_json: dict[str, Any] | None = None
+    revision_note: str | None = Field(default=None, max_length=500)
 
 
 class TriggerCopyIn(BaseModel):
     channel: str = Field(default="whatsapp", max_length=40)
     name: str | None = Field(default=None, max_length=160)
+
+
+class TriggerVersionRestoreIn(BaseModel):
+    revision_note: str = Field(default="restore_version", max_length=500)
 
 
 class FlowIn(BaseModel):
@@ -116,6 +130,8 @@ class FlowIn(BaseModel):
     entry_rules_json: dict[str, Any] = Field(default_factory=dict)
     exit_rules_json: dict[str, Any] = Field(default_factory=dict)
     steps_json: list[dict[str, Any]] = Field(default_factory=list)
+    quiet_hours_json: dict[str, Any] | None = None
+    ab_test_json: dict[str, Any] | None = None
 
 
 class FlowPatchIn(BaseModel):
@@ -126,3 +142,36 @@ class FlowPatchIn(BaseModel):
     entry_rules_json: dict[str, Any] | None = None
     exit_rules_json: dict[str, Any] | None = None
     steps_json: list[dict[str, Any]] | None = None
+    quiet_hours_json: dict[str, Any] | None = None
+    ab_test_json: dict[str, Any] | None = None
+
+
+class TriggerSimulateIn(BaseModel):
+    trigger_id: str | None = None
+    trigger: dict[str, Any] | None = None
+    conversation_id: str | None = None
+    event_kind: str = Field(default="received", max_length=40)
+    channel: str = Field(default="whatsapp", max_length=40)
+    message_text: str = Field(default="Hola, quiero saber precio", max_length=4000)
+    customer_name: str = Field(default="Cliente demo", max_length=160)
+    customer_phone: str = Field(default="+573001112233", max_length=80)
+    tags: str = Field(default="", max_length=500)
+    crm_stage: str = Field(default="", max_length=120)
+    payment_status: str = Field(default="", max_length=120)
+    takeover: bool = False
+
+
+class PreflightIn(BaseModel):
+    entity_type: str = Field(default="campaign", max_length=40)
+    entity_id: str | None = None
+    draft: dict[str, Any] | None = None
+
+
+class QuietHoursIn(BaseModel):
+    channel: str = Field(default="all", max_length=40)
+    entity_type: str = Field(default="all", max_length=40)
+    enabled: bool = False
+    timezone: str = Field(default="America/Bogota", max_length=80)
+    start_time: str = Field(default="21:00", max_length=10)
+    end_time: str = Field(default="08:00", max_length=10)
+    days: list[str] = Field(default_factory=lambda: ["mon", "tue", "wed", "thu", "fri", "sat", "sun"])

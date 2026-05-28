@@ -4,6 +4,7 @@ import json
 import re
 import unicodedata
 from datetime import datetime, timedelta
+from hashlib import sha256
 from typing import Any
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -278,6 +279,28 @@ def _condition_current_tag(conversation: dict[str, Any], condition: dict[str, An
     return (not has if state == "not_has" else has), {"state": state, "tag": expected, "tags": tags}
 
 
+def _condition_conversation_field(conversation: dict[str, Any], condition: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+    ctype = _norm(condition.get("type"))
+    field = _norm(condition.get("field") or ctype)
+    allowed = {"crm_stage", "payment_status", "customer_type", "intent"}
+    if field not in allowed:
+        return False, {"reason": "unsupported_field", "field": field}
+    expected = _norm(condition.get("value") or condition.get("status") or condition.get("stage"))
+    actual = _norm(conversation.get(field))
+    if not expected:
+        return False, {"reason": "empty_value", "field": field, "actual": actual}
+    op = _norm(condition.get("op") or condition.get("state") or "is")
+    if op in {"not", "not_is", "neq", "!="}:
+        ok = actual != expected
+    elif op in {"contains", "has"}:
+        ok = expected in actual
+    elif op in {"not_contains", "not_has"}:
+        ok = expected not in actual
+    else:
+        ok = actual == expected
+    return bool(ok), {"field": field, "op": op or "is", "expected": expected, "actual": actual}
+
+
 def _condition_last_message_sent(conn, tenant_id: str, conversation_id: str, condition: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
     row = conn.execute(
         text(
@@ -354,6 +377,102 @@ def _condition_schedule(condition: dict[str, Any]) -> tuple[bool, dict[str, Any]
     return in_window, {"timezone": tz_name, "current_day": current_day, "days": days, "start_minutes": start, "end_minutes": end, "now_minutes": current}
 
 
+def _quiet_hours_blocked(value: Any) -> tuple[bool, dict[str, Any]]:
+    settings = _safe_dict(value)
+    if not bool(settings.get("enabled")):
+        return False, {"enabled": False}
+    condition = {
+        "timezone": settings.get("timezone") or "America/Bogota",
+        "start_time": settings.get("start_time") or "21:00",
+        "end_time": settings.get("end_time") or "08:00",
+        "days": settings.get("days") or ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+    }
+    in_window, info = _condition_schedule(condition)
+    return bool(in_window), {"enabled": True, **info}
+
+
+def _campaign_quiet_hours_rows(conn, tenant_id: str, channel: str, entity_type: str) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        text(
+            """
+            SELECT channel, entity_type, enabled, timezone, start_time, end_time, days_json
+            FROM saas_campaign_quiet_hours
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND enabled = TRUE
+              AND channel IN ('all', :channel)
+              AND entity_type IN ('all', :entity_type)
+            ORDER BY
+                CASE WHEN channel = :channel THEN 0 ELSE 1 END,
+                CASE WHEN entity_type = :entity_type THEN 0 ELSE 1 END,
+                updated_at DESC
+            """
+        ),
+        {
+            "tenant_id": tenant_id,
+            "channel": _clean(channel, 40).lower() or "whatsapp",
+            "entity_type": _clean(entity_type, 40).lower() or "all",
+        },
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _campaign_quiet_hours_blocked(conn, tenant_id: str, channel: str, entity_type: str) -> tuple[bool, dict[str, Any]]:
+    details = []
+    for row in _campaign_quiet_hours_rows(conn, tenant_id, channel, entity_type):
+        blocked, info = _quiet_hours_blocked(
+            {
+                "enabled": bool(row.get("enabled")),
+                "timezone": row.get("timezone") or "America/Bogota",
+                "start_time": row.get("start_time") or "21:00",
+                "end_time": row.get("end_time") or "08:00",
+                "days": _safe_list(row.get("days_json")) or ["mon", "tue", "wed", "thu", "fri", "sat", "sun"],
+            }
+        )
+        info = {**info, "scope": {"channel": row.get("channel") or "all", "entity_type": row.get("entity_type") or "all"}}
+        details.append(info)
+        if blocked:
+            return True, {"enabled": True, "source": "global", "matches": details}
+    return False, {"enabled": bool(details), "source": "global", "matches": details}
+
+
+def _select_ab_variant(config_value: Any, recipient: str) -> dict[str, Any]:
+    config = _safe_dict(config_value)
+    if not bool(config.get("enabled")):
+        return {}
+    variants = [row for row in _safe_list(config.get("variants")) if isinstance(row, dict)]
+    if not variants:
+        return {}
+    bucket = int(sha256(str(recipient or "anonymous").encode("utf-8")).hexdigest()[:8], 16) % 100
+    cursor = 0
+    fallback = variants[-1]
+    for idx, variant in enumerate(variants):
+        weight = max(1, min(int(variant.get("weight") or variant.get("traffic") or (100 / max(1, len(variants)))), 100))
+        cursor += weight
+        if bucket < cursor or idx == len(variants) - 1:
+            selected = dict(variant)
+            selected["bucket"] = bucket
+            return selected
+    selected = dict(fallback)
+    selected["bucket"] = bucket
+    return selected
+
+
+def _apply_action_variant(trigger: dict[str, Any], action: dict[str, Any], recipient: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    selected = _select_ab_variant(trigger.get("ab_test_json"), recipient)
+    if not selected:
+        return action, {}
+    patched = dict(action)
+    if selected.get("template_id"):
+        patched["template_id"] = selected.get("template_id")
+    if selected.get("reply_text"):
+        patched["reply_text"] = selected.get("reply_text")
+    return patched, {
+        "key": selected.get("key") or selected.get("name") or "",
+        "bucket": selected.get("bucket"),
+        "template_id": selected.get("template_id") or "",
+    }
+
+
 def _evaluate_conditions(conn, tenant_id: str, conversation: dict[str, Any], user_text: str, conditions_json: Any) -> tuple[bool, list[dict[str, Any]]]:
     mode, conditions = _conditions_payload(conditions_json)
     if not conditions:
@@ -369,6 +488,8 @@ def _evaluate_conditions(conn, tenant_id: str, conversation: dict[str, Any], use
             ok, info = _condition_template_sent_status(conn, tenant_id, conversation["id"], condition)
         elif ctype == "current_tag":
             ok, info = _condition_current_tag(conversation, condition)
+        elif ctype in {"crm_stage", "payment_status", "customer_type", "intent", "conversation_field"}:
+            ok, info = _condition_conversation_field(conversation, condition)
         elif ctype == "last_message_sent":
             ok, info = _condition_last_message_sent(conn, tenant_id, conversation["id"], condition)
         elif ctype == "sent_count":
@@ -398,6 +519,56 @@ def _load_template(conn, tenant_id: str, template_id: str) -> dict[str, Any] | N
         {"tenant_id": tenant_id, "template_id": template_id},
     ).mappings().first()
     return dict(row) if row else None
+
+
+def _record_ab_event(
+    conn,
+    *,
+    tenant_id: str,
+    entity_type: str,
+    entity_id: str,
+    conversation: dict[str, Any],
+    variant: dict[str, Any],
+    action: dict[str, Any],
+    result: dict[str, Any],
+    source: str,
+) -> None:
+    if not variant:
+        return
+    messages = _safe_list(result.get("messages"))
+    first_message = next((item for item in messages if isinstance(item, dict)), {})
+    conn.execute(
+        text(
+            """
+            INSERT INTO saas_campaign_ab_events (
+                tenant_id, entity_type, entity_id, conversation_id, message_id, outbound_id,
+                channel, recipient_external_id, variant_key, template_id, source, outcome, metadata_json
+            )
+            VALUES (
+                CAST(:tenant_id AS uuid), :entity_type, CAST(NULLIF(:entity_id, '') AS uuid),
+                CAST(NULLIF(:conversation_id, '') AS uuid), CAST(NULLIF(:message_id, '') AS uuid),
+                CAST(NULLIF(:outbound_id, '') AS uuid), :channel, :recipient_external_id,
+                :variant_key, CAST(NULLIF(:template_id, '') AS uuid), :source, :outcome,
+                CAST(:metadata_json AS jsonb)
+            )
+            """
+        ),
+        {
+            "tenant_id": tenant_id,
+            "entity_type": _clean(entity_type, 40).lower() or "trigger",
+            "entity_id": _clean(entity_id, 120),
+            "conversation_id": _clean(conversation.get("id"), 120),
+            "message_id": _clean(first_message.get("message_id"), 120),
+            "outbound_id": _clean(first_message.get("outbound_id"), 120),
+            "channel": _clean(conversation.get("channel"), 40).lower() or "whatsapp",
+            "recipient_external_id": _clean(conversation.get("external_contact_id") or conversation.get("phone"), 180),
+            "variant_key": _clean(variant.get("key") or variant.get("template_id") or variant.get("bucket"), 120),
+            "template_id": _clean(action.get("template_id") or variant.get("template_id"), 120),
+            "source": _clean(source, 80),
+            "outcome": "queued" if result.get("ok") else "failed",
+            "metadata_json": _json({"variant": variant, "result": result, "action_type": action.get("type")}),
+        },
+    )
 
 
 def _text_blocks(template: dict[str, Any], variables: dict[str, Any]) -> list[str]:
@@ -522,6 +693,8 @@ def _action_send_template(conn, tenant_id: str, conversation: dict[str, Any], tr
     template = _load_template(conn, tenant_id, template_id)
     if not template:
         return {"ok": False, "error": "template_not_found", "template_id": template_id}
+    if _norm(template.get("status")) not in {"draft", "approved"}:
+        return {"ok": False, "error": "template_not_sendable", "template_id": template_id, "status": template.get("status") or ""}
     variables = {**_safe_dict(template.get("params_json")), **_conversation_vars(conversation), **_safe_dict(action.get("overrides"))}
     bodies = _text_blocks(template, variables)
     if not bodies:
@@ -731,14 +904,18 @@ def _execute_actions(conn, tenant_id: str, conversation: dict[str, Any], trigger
     results = []
     failed = 0
     queued_total = 0
+    recipient = _clean(conversation.get("external_contact_id") or conversation.get("phone"), 180)
     for idx, action in enumerate(actions):
+        action, variant = _apply_action_variant(trigger, action, recipient)
         atype = _norm(action.get("type"))
+        action_source = "trigger"
         try:
             if atype == "send_template":
                 result = _action_send_template(conn, tenant_id, conversation, trigger, action, "trigger")
                 queued_total += int(result.get("queued") or 0)
             elif atype == "reply_comment":
                 mode = _norm(action.get("mode") or ("ai" if action.get("use_ai") else "text"))
+                action_source = "trigger_comment"
                 if mode == "template":
                     result = _action_send_template(conn, tenant_id, conversation, trigger, action, "trigger_comment")
                     queued_total += int(result.get("queued") or 0)
@@ -757,14 +934,27 @@ def _execute_actions(conn, tenant_id: str, conversation: dict[str, Any], trigger
             elif atype == "extract_conversation_info":
                 result = _action_extract_conversation_info(conn, tenant_id, conversation, action)
             elif atype == "schedule_message":
+                action_source = "trigger_scheduled"
                 result = _action_schedule_message(conn, tenant_id, conversation, trigger, action)
             else:
                 result = {"ok": False, "error": "unknown_action_type"}
         except Exception as exc:
             result = {"ok": False, "error": str(exc)[:900]}
+        if variant:
+            _record_ab_event(
+                conn,
+                tenant_id=tenant_id,
+                entity_type="trigger",
+                entity_id=trigger.get("id") or "",
+                conversation=conversation,
+                variant=variant,
+                action=action,
+                result=result,
+                source=action_source,
+            )
         if result.get("ok") is not True:
             failed += 1
-        results.append({"index": idx, "type": atype or "unknown", "ok": result.get("ok") is True, "result": result})
+        results.append({"index": idx, "type": atype or "unknown", "ok": result.get("ok") is True, "variant": variant, "result": result})
     return {"ok": failed == 0, "actions_total": len(actions), "failed_actions": failed, "queued_messages": queued_total, "actions": results, "event_kind": event_kind}
 
 
@@ -844,7 +1034,7 @@ def execute_triggers_for_message(
             """
             SELECT id::text, name, channel, event_type, trigger_type, flow_event, conditions_json, actions_json,
                    priority, cooldown_minutes, is_active, assistant_enabled, assistant_message_type,
-                   block_ai, stop_on_match, only_when_no_takeover
+                   block_ai, stop_on_match, only_when_no_takeover, quiet_hours_json, ab_test_json, version_number
             FROM saas_crm_triggers
             WHERE tenant_id = CAST(:tenant_id AS uuid)
               AND is_active = TRUE
@@ -860,13 +1050,21 @@ def execute_triggers_for_message(
     details = []
     recipient = _clean(conversation.get("external_contact_id") or conversation.get("phone"), 180)
     takeover = bool(conversation.get("takeover"))
+    global_quiet_blocked, global_quiet_info = _campaign_quiet_hours_blocked(conn, tenant_id, channel, "trigger")
 
     for row in triggers:
         trigger = dict(row)
         if not _event_matches(trigger, event_kind):
             continue
+        if global_quiet_blocked:
+            details.append({"trigger_id": trigger["id"], "name": trigger.get("name"), "skipped": "global_quiet_hours", "quiet_hours": global_quiet_info})
+            continue
         if bool(trigger.get("only_when_no_takeover")) and takeover:
             details.append({"trigger_id": trigger["id"], "name": trigger.get("name"), "skipped": "takeover_on"})
+            continue
+        quiet_blocked, quiet_info = _quiet_hours_blocked(trigger.get("quiet_hours_json"))
+        if quiet_blocked:
+            details.append({"trigger_id": trigger["id"], "name": trigger.get("name"), "skipped": "quiet_hours", "quiet_hours": quiet_info})
             continue
         if _is_in_cooldown(conn, tenant_id, trigger["id"], recipient, int(trigger.get("cooldown_minutes") or 0)):
             details.append({"trigger_id": trigger["id"], "name": trigger.get("name"), "skipped": "cooldown"})
@@ -909,8 +1107,106 @@ def execute_triggers_for_message(
     return {"ok": True, "matched": matched, "sent": sent, "details": details}
 
 
+def simulate_trigger_draft(
+    conn,
+    *,
+    tenant_id: str,
+    trigger: dict[str, Any],
+    conversation_id: str = "",
+    event_kind: str = "received",
+    message_text: str = "",
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    set_tenant_context(conn, tenant_id)
+    conversation = _load_context(conn, tenant_id, conversation_id) if conversation_id else None
+    context = context or {}
+    if not conversation:
+        conversation = {
+            "id": "00000000-0000-0000-0000-000000000000",
+            "tenant_id": tenant_id,
+            "channel": context.get("channel") or trigger.get("channel") or "whatsapp",
+            "external_contact_id": context.get("customer_phone") or "+573001112233",
+            "phone": context.get("customer_phone") or "+573001112233",
+            "display_name": context.get("customer_name") or "Cliente demo",
+            "first_name": str(context.get("customer_name") or "Cliente").split(" ", 1)[0],
+            "last_name": "",
+            "city": context.get("city") or "",
+            "customer_type": context.get("customer_type") or "",
+            "interests": context.get("interests") or "",
+            "takeover": bool(context.get("takeover")),
+            "tags": context.get("tags") or "",
+            "notes": "",
+            "payment_status": context.get("payment_status") or "",
+            "crm_stage": context.get("crm_stage") or "",
+            "intent": context.get("intent") or "",
+            "profile_json": {},
+            "message_id": "",
+            "message_text": message_text or context.get("message_text") or "",
+            "msg_type": "comment" if _norm(event_kind) == "comment" else "text",
+            "direction": "in",
+        }
+    else:
+        conversation["message_text"] = message_text or conversation.get("message_text") or ""
+
+    recipient = _clean(conversation.get("external_contact_id") or conversation.get("phone"), 180)
+    checks: list[dict[str, Any]] = []
+    event_ok = _event_matches(trigger, event_kind)
+    checks.append({"code": "event_match", "ok": bool(event_ok), "label": "Evento compatible", "details": {"event_kind": event_kind}})
+    global_quiet_blocked, global_quiet_info = _campaign_quiet_hours_blocked(conn, tenant_id, conversation.get("channel") or trigger.get("channel") or "whatsapp", "trigger")
+    checks.append({"code": "global_quiet_hours", "ok": not global_quiet_blocked, "label": "Fuera de quiet hours globales", "details": global_quiet_info})
+    quiet_blocked, quiet_info = _quiet_hours_blocked(trigger.get("quiet_hours_json"))
+    checks.append({"code": "quiet_hours", "ok": not quiet_blocked, "label": "Fuera de quiet hours", "details": quiet_info})
+    takeover_blocked = bool(trigger.get("only_when_no_takeover")) and bool(conversation.get("takeover"))
+    checks.append({"code": "takeover", "ok": not takeover_blocked, "label": "Takeover permite automatizar", "details": {"takeover": bool(conversation.get("takeover"))}})
+    cooldown_blocked = False
+    if conversation_id and trigger.get("id"):
+        cooldown_blocked = _is_in_cooldown(conn, tenant_id, trigger["id"], recipient, int(trigger.get("cooldown_minutes") or 0))
+    checks.append({"code": "cooldown", "ok": not cooldown_blocked, "label": "Cooldown disponible", "details": {"checked": bool(conversation_id and trigger.get("id"))}})
+
+    conditions_ok, condition_evals = _evaluate_conditions(conn, tenant_id, conversation, conversation.get("message_text") or "", trigger.get("conditions_json"))
+    checks.append({"code": "conditions", "ok": bool(conditions_ok), "label": "Condiciones cumplen", "details": {"items": condition_evals}})
+
+    action_previews = []
+    for idx, raw_action in enumerate(_actions_payload(trigger.get("actions_json") or trigger.get("action_json"))):
+        action, variant = _apply_action_variant(trigger, raw_action, recipient)
+        atype = _norm(action.get("type"))
+        preview: dict[str, Any] = {"index": idx, "type": atype or "unknown", "variant": variant}
+        if atype in {"send_template", "schedule_message"}:
+            template_id = _clean(action.get("template_id"), 120)
+            template = _load_template(conn, tenant_id, template_id)
+            preview.update({
+                "template_id": template_id,
+                "template_found": bool(template),
+                "template_status": (template or {}).get("status") or "",
+                "would_queue": len(_text_blocks(template, {**_safe_dict((template or {}).get("params_json")), **_conversation_vars(conversation)})) if template else 0,
+            })
+        elif atype == "reply_comment":
+            body = action.get("reply_text") or action.get("text") or action.get("ai_prompt") or ""
+            preview.update({"mode": action.get("mode") or ("ai" if action.get("use_ai") else "text"), "sample": _render(body, _conversation_vars(conversation))[:500]})
+        else:
+            preview.update({"details": {key: value for key, value in action.items() if key != "type"}})
+        action_previews.append(preview)
+
+    ready = all(item["ok"] for item in checks)
+    return {
+        "ok": True,
+        "ready": bool(ready),
+        "matched": bool(event_ok and not global_quiet_blocked and not quiet_blocked and not takeover_blocked and not cooldown_blocked and conditions_ok),
+        "block_ai": bool(trigger.get("block_ai")) and bool(conditions_ok),
+        "checks": checks,
+        "conditions": condition_evals,
+        "actions": action_previews,
+        "conversation": {
+            "id": conversation.get("id"),
+            "channel": conversation.get("channel"),
+            "display_name": conversation.get("display_name"),
+            "recipient": recipient,
+        },
+    }
+
+
 def process_due_scheduled_trigger_messages(limit: int = 50, tenant_id: str | None = None) -> dict[str, int]:
-    stats = {"picked": 0, "queued": 0, "failed": 0}
+    stats = {"picked": 0, "queued": 0, "failed": 0, "skipped": 0}
     with db_session() as conn:
         filters = ["status = 'pending'", "run_at <= NOW()"]
         params: dict[str, Any] = {"limit": max(1, min(int(limit or 50), 500))}
@@ -960,6 +1256,23 @@ def process_due_scheduled_trigger_messages(limit: int = 50, tenant_id: str | Non
                     {"id": row["id"], "error": "invalid_scheduled_message"},
                 )
                 stats["failed"] += 1
+                continue
+            quiet_blocked, quiet_info = _campaign_quiet_hours_blocked(conn, tenant, conversation.get("channel") or "whatsapp", "trigger")
+            if quiet_blocked:
+                conn.execute(
+                    text(
+                        """
+                        UPDATE saas_trigger_scheduled_messages
+                        SET status = 'pending',
+                            run_at = NOW() + INTERVAL '30 minutes',
+                            last_error = :error,
+                            updated_at = NOW()
+                        WHERE id = CAST(:id AS uuid)
+                        """
+                    ),
+                    {"id": row["id"], "error": _clean(f"global_quiet_hours:{quiet_info}", 900)},
+                )
+                stats["skipped"] += 1
                 continue
             result = _action_send_template(conn, tenant, conversation, trigger, {"template_id": row["template_id"], **_safe_dict(row["payload_json"])}, "trigger_scheduled")
             if result.get("ok"):

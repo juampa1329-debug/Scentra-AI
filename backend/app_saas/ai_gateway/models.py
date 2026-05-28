@@ -18,6 +18,17 @@ class ProviderDefinition:
 
 
 @dataclass
+class GatewayAttachment:
+    kind: str
+    mime_type: str
+    data_base64: str = ""
+    uri: str = ""
+    text: str = ""
+    name: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class GatewayRequest:
     tenant_id: str
     task_type: str
@@ -28,6 +39,7 @@ class GatewayRequest:
     route_code: str = "conversation.sales"
     conversation_id: str = ""
     response_format: str = "json_object"
+    attachments: list[GatewayAttachment] = field(default_factory=list)
 
 
 @dataclass
@@ -47,4 +59,3 @@ class ProviderCallError(RuntimeError):
         self.code = code
         self.retryable = retryable
         self.http_status = http_status
-

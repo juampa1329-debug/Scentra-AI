@@ -8,6 +8,8 @@ from app_saas.billing.trials import configured_trial_plan_code, create_trial_sub
 from app_saas.db import db_session
 from app_saas.shared.security import AuthContext, get_current_user, normalize_slug, require_role
 from app_saas.tenants.schemas import TenantCreateIn, TenantOut, TenantPatchIn
+from app_saas.verticals.catalog import normalize_industry_code
+from app_saas.verticals.service import apply_industry_pack
 
 router = APIRouter(prefix="/tenants", tags=["saas-tenants"])
 
@@ -24,6 +26,8 @@ def list_tenants(ctx: AuthContext = Depends(get_current_user)):
                     t.name,
                     t.plan_code,
                     t.status,
+                    t.industry_code,
+                    t.vertical_pack_applied_at::text,
                     m.role
                 FROM saas_memberships m
                 JOIN saas_tenants t ON t.id = m.tenant_id
@@ -40,6 +44,7 @@ def list_tenants(ctx: AuthContext = Depends(get_current_user)):
 @router.post("", response_model=TenantOut)
 def create_tenant(payload: TenantCreateIn, ctx: AuthContext = Depends(get_current_user)):
     slug = normalize_slug(payload.slug or payload.name)
+    industry_code = normalize_industry_code(payload.industry_code)
     if not slug:
         raise HTTPException(status_code=400, detail="valid_tenant_slug_required")
     try:
@@ -48,9 +53,9 @@ def create_tenant(payload: TenantCreateIn, ctx: AuthContext = Depends(get_curren
             tenant = conn.execute(
                 text(
                     """
-                    INSERT INTO saas_tenants (slug, name, timezone, locale, status, plan_code)
-                    VALUES (:slug, :name, :timezone, :locale, 'trial', :plan_code)
-                    RETURNING id::text AS tenant_id, slug, name, plan_code, status
+                    INSERT INTO saas_tenants (slug, name, timezone, locale, status, plan_code, industry_code)
+                    VALUES (:slug, :name, :timezone, :locale, 'trial', :plan_code, :industry_code)
+                    RETURNING id::text AS tenant_id, slug, name, plan_code, status, industry_code, vertical_pack_applied_at::text
                     """
                 ),
                 {
@@ -59,6 +64,7 @@ def create_tenant(payload: TenantCreateIn, ctx: AuthContext = Depends(get_curren
                     "timezone": payload.timezone.strip(),
                     "locale": payload.locale.strip(),
                     "plan_code": trial_plan_code,
+                    "industry_code": industry_code,
                 },
             ).mappings().first()
             conn.execute(
@@ -71,6 +77,8 @@ def create_tenant(payload: TenantCreateIn, ctx: AuthContext = Depends(get_curren
                 {"tenant_id": tenant["tenant_id"], "user_id": ctx.user_id},
             )
             create_trial_subscription(conn, tenant["tenant_id"], trial_plan_code)
+            vertical = apply_industry_pack(conn, tenant["tenant_id"], ctx.user_id, industry_code, create_agents=False)
+            tenant = {**dict(tenant), **(vertical.get("tenant") or {})}
     except IntegrityError:
         raise HTTPException(status_code=409, detail="tenant_slug_already_exists")
 
@@ -103,7 +111,7 @@ def patch_tenant(
                 UPDATE saas_tenants
                 SET {", ".join(updates)}
                 WHERE id = CAST(:tenant_id AS uuid)
-                RETURNING id::text AS tenant_id, slug, name, plan_code, status
+                RETURNING id::text AS tenant_id, slug, name, plan_code, status, industry_code, vertical_pack_applied_at::text
                 """
             ),
             params,

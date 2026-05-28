@@ -5,37 +5,115 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import Response
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from app_saas.admin.schemas import (
     AdminBootstrapIn,
     AdminLoginIn,
+    AdminMfaChallengeOut,
+    AdminMfaVerifyIn,
+    AdminTwoFactorPatchIn,
+    BillingCreditCreateIn,
+    BillingInvoiceCreateIn,
     FeatureFlagPatchIn,
     PlanPatchIn,
     PlanUpsertIn,
     PlatformTokenOut,
+    ReliabilityBackpressurePatchIn,
+    ReliabilityRetentionPatchIn,
     TenantImpersonateIn,
     SubscriptionPatchIn,
     TenantPatchIn,
 )
 from app_saas.billing.limits import billing_overview
+from app_saas.billing.service import apply_manual_credit, create_manual_invoice, get_invoice, invoice_pdf_bytes, sync_billing_lifecycle
 from app_saas.config import settings
 from app_saas.db import db_session, set_tenant_context
+from app_saas.intelligence.catalog import INTELLIGENCE_FEATURES
+from app_saas.intelligence.schemas import (
+    AdminAiProviderPolicyPatchIn,
+    AdminIntelligenceFeaturePatchIn,
+    AdminIntelligencePlanFeaturePatchIn,
+    AutoLabelGenerationRequestIn,
+    AutoLabelTrainingRequestIn,
+    DatasetBuildRequestIn,
+    FeaturePipelineRequestIn,
+    ModelMetricsRecomputeIn,
+    ModelRegistryCreateIn,
+    ModelRegistryPatchIn,
+    SyntheticTrainingRequestIn,
+)
+from app_saas.intelligence.service import (
+    admin_multimodal_premium_gating,
+    admin_intelligence_tenants,
+    assess_model_rollout,
+    generate_auto_labels,
+    intelligence_catalog,
+    intelligence_feature_state,
+    list_model_metrics,
+    list_model_registry,
+    mlops_overview,
+    recompute_model_metrics,
+    recompute_training_feature_pipelines,
+    register_model_registry_entry,
+    request_ml_autolabel_training,
+    request_ml_dataset_build,
+    request_ml_synthetic_training,
+    training_dataset_readiness,
+    update_model_registry_control,
+    upsert_feature_grant,
+)
+from app_saas.intelligence.premium import upsert_plan_feature_limit, upsert_provider_policy
+from app_saas.intelligence.realtime import admin_refresh_realtime_metrics, admin_realtime_overview
+from app_saas.observability.service import (
+    channel_diagnostics,
+    dead_letter_events,
+    global_health,
+    meta_error_history,
+    queue_snapshot,
+    resolve_dead_letter,
+    retry_dead_letter,
+    sync_dead_letters,
+)
+from app_saas.reliability.service import (
+    backpressure_status,
+    index_audit,
+    record_reliability_snapshot,
+    reliability_overview,
+    run_reliability_drill,
+    run_retention,
+    update_retention_policy,
+)
+from app_saas.shared.captcha import verify_captcha_or_raise
+from app_saas.shared.email import smtp_is_configured
+from app_saas.shared.mfa import create_mfa_challenge, role_requires_mfa, send_security_notice, verify_mfa_code
 from app_saas.shared.security import (
     PLATFORM_ROLE_ORDER,
     PlatformAuthContext,
+    clear_login_lock,
     create_token,
     get_current_platform_admin,
     hash_password,
+    increment_failed_login,
     normalize_email,
     normalize_slug,
     require_platform_role,
     verify_password,
 )
+from app_saas.shared.security_events import enforce_auth_rate_limits, rate_limit_key, record_security_event
+from app_saas.verticals.catalog import normalize_industry_code
+from app_saas.verticals.service import apply_industry_pack
+from app_saas.agents.orchestrator import process_due_agent_orchestration
+from app_saas.ai_agent.service import process_due_ai_replies
 from app_saas.workers.dispatch import process_due_outbound_messages
 from app_saas.workers.ingest import process_due_webhook_events
+from app_saas.workers.intelligence import process_due_intelligence
+from app_saas.workers.meta_tokens import process_due_meta_token_refreshes
+from app_saas.workers.remarketing import process_due_remarketing_flows
+from app_saas.workers.reliability import process_due_reliability
 from app_saas.workers.triggers import process_due_scheduled_trigger_messages
 
 router = APIRouter(prefix="/admin", tags=["saas-admin"])
@@ -43,13 +121,21 @@ router = APIRouter(prefix="/admin", tags=["saas-admin"])
 FEATURE_CATALOG = [
     {"key": "inbox", "label": "Inbox"},
     {"key": "ai", "label": "IA comercial"},
+    {"key": "ai_agents", "label": "AI Agents"},
+    {"key": "advisor", "label": "Advisor AI"},
     {"key": "broadcast", "label": "Mensajeria masiva"},
     {"key": "triggers", "label": "Triggers CRM"},
     {"key": "remarketing", "label": "Remarketing"},
     {"key": "ads", "label": "Ads Manager"},
     {"key": "whatsapp_cloud", "label": "WhatsApp Cloud real"},
+    {"key": "instagram_business", "label": "Instagram Business"},
+    {"key": "facebook_messenger", "label": "Facebook Messenger"},
+    {"key": "social_comments", "label": "Comentarios sociales"},
+    {"key": "knowledge_base", "label": "Knowledge Base"},
+    {"key": "woocommerce", "label": "WooCommerce"},
+    {"key": "shopify", "label": "Shopify"},
     {"key": "elevenlabs_voice", "label": "Voz ElevenLabs"},
-]
+] + [{"key": item["key"], "label": item["label"]} for item in INTELLIGENCE_FEATURES]
 TENANT_STATUSES = {"active", "trial", "paused", "past_due", "suspended", "cancelled"}
 SUBSCRIPTION_STATUSES = {"trial", "active", "past_due", "cancelled", "suspended"}
 IMPERSONATION_ROLES = {"owner", "admin", "supervisor", "agent", "viewer"}
@@ -64,18 +150,25 @@ def _period_yyyymm() -> str:
 
 
 def _json(value: Any) -> str:
-    return json.dumps(value if value is not None else {}, ensure_ascii=False)
+    return json.dumps(value if value is not None else {}, ensure_ascii=False, default=str)
 
 
-def _admin_token(row: dict[str, Any]) -> PlatformTokenOut:
+def _admin_token(row: dict[str, Any], *, mfa_verified: bool = False) -> PlatformTokenOut:
     role = str(row["platform_role"] or row["role"] or "platform_admin").strip().lower()
-    token = create_token(user_id=row["user_id"], email=row["email"], token_type="access", platform_role=role)
+    token = create_token(user_id=row["user_id"], email=row["email"], token_type="access", platform_role=role, mfa_verified=mfa_verified)
     return PlatformTokenOut(
         access_token=token,
         user_id=row["user_id"],
         email=row["email"],
         platform_role=role,
     )
+
+
+def _admin_mfa_required(row: dict[str, Any]) -> bool:
+    method = str(row.get("two_factor_method") or "none").strip().lower()
+    enabled = bool(row.get("two_factor_enabled")) and method == "email_otp"
+    role = str(row.get("platform_role") or row.get("role") or "").strip().lower()
+    return enabled or role_requires_mfa(role, settings.saas_admin_mfa_required_roles)
 
 
 def _audit(
@@ -122,13 +215,108 @@ def _platform_admin_count(conn) -> int:
     )
 
 
+def _ensure_ai_agent_plan_limit_table(conn) -> None:
+    conn.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS saas_ai_agent_plan_limits (
+                plan_code TEXT PRIMARY KEY,
+                max_ai_agents INTEGER NOT NULL DEFAULT 1,
+                max_active_ai_agents INTEGER NOT NULL DEFAULT 1,
+                max_memory_archives INTEGER NOT NULL DEFAULT 1,
+                allowed_agent_types_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+                builder_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                notes TEXT NOT NULL DEFAULT '',
+                created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
+            ALTER TABLE saas_ai_agent_plan_limits
+              ADD COLUMN IF NOT EXISTS max_ai_agents INTEGER NOT NULL DEFAULT 1,
+              ADD COLUMN IF NOT EXISTS max_active_ai_agents INTEGER NOT NULL DEFAULT 1,
+              ADD COLUMN IF NOT EXISTS max_memory_archives INTEGER NOT NULL DEFAULT 1,
+              ADD COLUMN IF NOT EXISTS allowed_agent_types_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+              ADD COLUMN IF NOT EXISTS builder_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+              ADD COLUMN IF NOT EXISTS notes TEXT NOT NULL DEFAULT '',
+              ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+              ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+            """
+        )
+    )
+
+
+def _upsert_ai_agent_plan_limits(conn, plan_code: str, raw_limits: dict[str, Any] | None) -> dict[str, Any] | None:
+    if raw_limits is None:
+        return None
+    _ensure_ai_agent_plan_limit_table(conn)
+    allowed = raw_limits.get("allowed_agent_types_json")
+    if not isinstance(allowed, list):
+        allowed = []
+    row = conn.execute(
+        text(
+            """
+            INSERT INTO saas_ai_agent_plan_limits (
+                plan_code, max_ai_agents, max_active_ai_agents, max_memory_archives,
+                allowed_agent_types_json, builder_enabled, notes, updated_at
+            )
+            VALUES (
+                :plan_code, :max_ai_agents, :max_active_ai_agents, :max_memory_archives,
+                CAST(:allowed_agent_types_json AS jsonb), :builder_enabled, :notes, NOW()
+            )
+            ON CONFLICT (plan_code)
+            DO UPDATE SET
+                max_ai_agents = EXCLUDED.max_ai_agents,
+                max_active_ai_agents = EXCLUDED.max_active_ai_agents,
+                max_memory_archives = EXCLUDED.max_memory_archives,
+                allowed_agent_types_json = EXCLUDED.allowed_agent_types_json,
+                builder_enabled = EXCLUDED.builder_enabled,
+                notes = EXCLUDED.notes,
+                updated_at = NOW()
+            RETURNING plan_code, max_ai_agents, max_active_ai_agents, max_memory_archives,
+                      allowed_agent_types_json, builder_enabled, notes, updated_at::text
+            """
+        ),
+        {
+            "plan_code": plan_code,
+            "max_ai_agents": int(raw_limits.get("max_ai_agents") or 0),
+            "max_active_ai_agents": int(raw_limits.get("max_active_ai_agents") or 0),
+            "max_memory_archives": int(raw_limits.get("max_memory_archives") or 0),
+            "allowed_agent_types_json": _json([str(item).strip() for item in allowed if str(item).strip()]),
+            "builder_enabled": bool(raw_limits.get("builder_enabled", True)),
+            "notes": _clean(raw_limits.get("notes"), 1000),
+        },
+    ).mappings().first()
+    return dict(row or {})
+
+
 def _load_plan(conn, plan_code: str) -> dict[str, Any] | None:
+    _ensure_ai_agent_plan_limit_table(conn)
     row = conn.execute(
         text(
             """
             SELECT plan_code, display_name, max_agents, max_monthly_messages, max_integrations, max_storage_gb,
                    max_campaigns, max_broadcasts, max_ai_tokens, feature_flags_json, price_monthly_cents,
-                   currency, is_public, is_active, sort_order, created_at::text, updated_at::text
+                   currency, is_public, is_active, sort_order, created_at::text, updated_at::text,
+                   COALESCE((
+                       SELECT jsonb_build_object(
+                           'plan_code', apl.plan_code,
+                           'max_ai_agents', apl.max_ai_agents,
+                           'max_active_ai_agents', apl.max_active_ai_agents,
+                           'max_memory_archives', apl.max_memory_archives,
+                           'allowed_agent_types_json', apl.allowed_agent_types_json,
+                           'builder_enabled', apl.builder_enabled,
+                           'notes', apl.notes,
+                           'updated_at', apl.updated_at::text
+                       )
+                       FROM saas_ai_agent_plan_limits apl
+                       WHERE apl.plan_code = saas_plan_limits.plan_code
+                       LIMIT 1
+                   ), '{}'::jsonb) AS ai_agent_limits
             FROM saas_plan_limits
             WHERE plan_code = :plan_code
             LIMIT 1
@@ -143,7 +331,20 @@ def _tenant_exists(conn, tenant_id: str) -> dict[str, Any]:
     row = conn.execute(
         text(
             """
-            SELECT id::text, slug, name, status, plan_code, timezone, locale, created_at::text, updated_at::text
+            SELECT
+                id::text,
+                slug,
+                name,
+                status,
+                plan_code,
+                timezone,
+                locale,
+                industry_code,
+                vertical_pack_version,
+                vertical_pack_json,
+                vertical_pack_applied_at::text,
+                created_at::text,
+                updated_at::text
             FROM saas_tenants
             WHERE id = CAST(:tenant_id AS uuid)
             LIMIT 1
@@ -157,78 +358,277 @@ def _tenant_exists(conn, tenant_id: str) -> dict[str, Any]:
 
 
 @router.post("/auth/bootstrap", response_model=PlatformTokenOut)
-def bootstrap_platform_admin(payload: AdminBootstrapIn):
+def bootstrap_platform_admin(payload: AdminBootstrapIn, request: Request):
     if not settings.is_local:
         raise HTTPException(status_code=403, detail="bootstrap_only_available_locally")
     email = normalize_email(payload.email)
     role = _clean(payload.platform_role, 40).lower() or "superadmin"
     if role not in PLATFORM_ROLE_ORDER:
         raise HTTPException(status_code=400, detail="invalid_platform_role")
+    auth_error: HTTPException | None = None
+    token_payload: PlatformTokenOut | None = None
+    rate_key = rate_limit_key(action="admin.bootstrap", principal=email, request=request)
     with db_session() as conn:
-        user = conn.execute(
-            text(
-                """
-                INSERT INTO saas_users (email, full_name, password_hash, password_algo, status, updated_at)
-                VALUES (:email, :full_name, :password_hash, 'argon2id', 'active', NOW())
-                ON CONFLICT (email)
-                DO UPDATE SET
-                    full_name = COALESCE(NULLIF(EXCLUDED.full_name, ''), saas_users.full_name),
-                    password_hash = EXCLUDED.password_hash,
-                    status = 'active',
-                    updated_at = NOW()
-                RETURNING id::text AS user_id, email
-                """
-            ),
-            {
-                "email": email,
-                "full_name": _clean(payload.full_name, 180),
-                "password_hash": hash_password(payload.password),
-            },
-        ).mappings().first()
-        conn.execute(
-            text(
-                """
-                INSERT INTO saas_platform_admins (user_id, role, status, notes, updated_at)
-                VALUES (CAST(:user_id AS uuid), :role, 'active', 'local bootstrap', NOW())
-                ON CONFLICT (user_id)
-                DO UPDATE SET role = EXCLUDED.role, status = 'active', updated_at = NOW()
-                """
-            ),
-            {"user_id": user["user_id"], "role": role},
+        enforce_auth_rate_limits(
+            conn,
+            event_type="admin.bootstrap",
+            rate_key=rate_key,
+            combined_limit=3,
+            principal_limit=3,
+            ip_limit=10,
+            window_seconds=3600,
+            request=request,
+            principal=email,
+            count_statuses=("attempt", "failed", "blocked"),
         )
-    return _admin_token({"user_id": user["user_id"], "email": user["email"], "platform_role": role, "role": role})
+        try:
+            verify_captcha_or_raise(token=payload.captcha_token, provider=payload.captcha_provider, request=request)
+        except HTTPException as exc:
+            auth_error = exc
+            record_security_event(
+                conn,
+                event_type="admin.bootstrap",
+                status="blocked",
+                request=request,
+                principal=email,
+                rate_key=rate_key,
+                reason="captcha_rejected",
+                details={"detail": exc.detail},
+            )
+        if not auth_error:
+            record_security_event(conn, event_type="admin.bootstrap", status="attempt", request=request, principal=email, rate_key=rate_key)
+            user = conn.execute(
+                text(
+                    """
+                    INSERT INTO saas_users (
+                        email, full_name, password_hash, password_algo, status,
+                        failed_login_count, locked_until, password_changed_at, updated_at
+                    )
+                    VALUES (:email, :full_name, :password_hash, 'argon2id', 'active', 0, NULL, NOW(), NOW())
+                    ON CONFLICT (email)
+                    DO UPDATE SET
+                        full_name = COALESCE(NULLIF(EXCLUDED.full_name, ''), saas_users.full_name),
+                        password_hash = EXCLUDED.password_hash,
+                        status = 'active',
+                        failed_login_count = 0,
+                        locked_until = NULL,
+                        password_changed_at = NOW(),
+                        updated_at = NOW()
+                    RETURNING id::text AS user_id, email
+                    """
+                ),
+                {
+                    "email": email,
+                    "full_name": _clean(payload.full_name, 180),
+                    "password_hash": hash_password(payload.password),
+                },
+            ).mappings().first()
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO saas_platform_admins (user_id, role, status, notes, updated_at)
+                    VALUES (CAST(:user_id AS uuid), :role, 'active', 'local bootstrap', NOW())
+                    ON CONFLICT (user_id)
+                    DO UPDATE SET role = EXCLUDED.role, status = 'active', updated_at = NOW()
+                    """
+                ),
+                {"user_id": user["user_id"], "role": role},
+            )
+            record_security_event(conn, event_type="admin.bootstrap", status="success", request=request, principal=email, rate_key=rate_key, user_id=user["user_id"])
+            token_payload = _admin_token({"user_id": user["user_id"], "email": user["email"], "platform_role": role, "role": role})
+    if auth_error:
+        raise auth_error
+    if token_payload is None:
+        raise HTTPException(status_code=500, detail="admin_bootstrap_response_unavailable")
+    return token_payload
 
 
-@router.post("/auth/login", response_model=PlatformTokenOut)
-def admin_login(payload: AdminLoginIn):
+@router.post("/auth/login", response_model=PlatformTokenOut | AdminMfaChallengeOut)
+def admin_login(payload: AdminLoginIn, request: Request):
     email = normalize_email(payload.email)
+    auth_error: HTTPException | None = None
+    token_payload: PlatformTokenOut | AdminMfaChallengeOut | None = None
+    rate_key = rate_limit_key(action="admin.login", principal=email, request=request)
     with db_session() as conn:
+        enforce_auth_rate_limits(
+            conn,
+            event_type="admin.login",
+            rate_key=rate_key,
+            combined_limit=6,
+            principal_limit=8,
+            ip_limit=30,
+            window_seconds=900,
+            request=request,
+            principal=email,
+            count_statuses=("failed", "blocked"),
+        )
+        try:
+            verify_captcha_or_raise(token=payload.captcha_token, provider=payload.captcha_provider, request=request)
+        except HTTPException as exc:
+            auth_error = exc
+            record_security_event(
+                conn,
+                event_type="admin.login",
+                status="blocked",
+                request=request,
+                principal=email,
+                rate_key=rate_key,
+                reason="captcha_rejected",
+                details={"detail": exc.detail},
+            )
+        if not auth_error:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT u.id::text AS user_id, u.email, u.password_hash, u.status AS user_status,
+                           u.locked_until::text, u.two_factor_enabled, u.two_factor_method,
+                           pa.role AS platform_role, pa.status AS admin_status
+                    FROM saas_users u
+                    JOIN saas_platform_admins pa ON pa.user_id = u.id
+                    WHERE LOWER(u.email) = :email
+                    LIMIT 1
+                    """
+                ),
+                {"email": email},
+            ).mappings().first()
+            if row and row["locked_until"]:
+                locked = conn.execute(
+                    text(
+                        """
+                        SELECT locked_until > NOW() AS is_locked,
+                               locked_until::text AS locked_until
+                        FROM saas_users
+                        WHERE id = CAST(:user_id AS uuid)
+                        LIMIT 1
+                        """
+                    ),
+                    {"user_id": row["user_id"]},
+                ).mappings().first()
+                if locked and locked["is_locked"]:
+                    record_security_event(
+                        conn,
+                        event_type="admin.login",
+                        status="blocked",
+                        request=request,
+                        principal=email,
+                        rate_key=rate_key,
+                        user_id=row["user_id"],
+                        reason="account_temporarily_locked",
+                        details={"locked_until": locked["locked_until"]},
+                    )
+                    auth_error = HTTPException(
+                        status_code=423,
+                        detail={"code": "account_temporarily_locked", "locked_until": locked["locked_until"]},
+                    )
+            if not auth_error and (
+                not row
+                or row["user_status"] != "active"
+                or row["admin_status"] != "active"
+                or str(row["platform_role"] or "").lower() not in PLATFORM_ROLE_ORDER
+                or not verify_password(payload.password, row["password_hash"])
+            ):
+                lock_info = increment_failed_login(conn, row["user_id"]) if row and row["user_status"] == "active" else {}
+                record_security_event(
+                    conn,
+                    event_type="admin.login",
+                    status="failed",
+                    request=request,
+                    principal=email,
+                    rate_key=rate_key,
+                    user_id=row["user_id"] if row else None,
+                    reason="invalid_admin_credentials",
+                    details={"failed_login_count": lock_info.get("failed_login_count"), "locked_until": lock_info.get("locked_until")},
+                )
+                auth_error = HTTPException(status_code=401, detail="invalid_admin_credentials")
+            elif not auth_error:
+                if _admin_mfa_required(dict(row)):
+                    token_payload = AdminMfaChallengeOut(
+                        **create_mfa_challenge(
+                            conn,
+                            request=request,
+                            user_id=row["user_id"],
+                            email=row["email"],
+                            context="platform_admin",
+                            platform_role=row["platform_role"],
+                            event_type="admin.login.mfa",
+                            rate_key=rate_key,
+                        )
+                    )
+                else:
+                    clear_login_lock(conn, row["user_id"])
+                    conn.execute(
+                        text("UPDATE saas_users SET last_login_at = NOW(), updated_at = NOW() WHERE id = CAST(:id AS uuid)"),
+                        {"id": row["user_id"]},
+                    )
+                    record_security_event(conn, event_type="admin.login", status="success", request=request, principal=email, rate_key=rate_key, user_id=row["user_id"])
+                    token_payload = _admin_token(dict(row))
+    if auth_error:
+        raise auth_error
+    if token_payload is None:
+        raise HTTPException(status_code=500, detail="admin_auth_response_unavailable")
+    return token_payload
+
+
+@router.post("/auth/login/verify-otp", response_model=PlatformTokenOut)
+def admin_verify_login_otp(payload: AdminMfaVerifyIn, request: Request):
+    rate_key = rate_limit_key(action="admin.login.mfa_verify", principal=payload.challenge_token[:24], request=request)
+    with db_session() as conn:
+        enforce_auth_rate_limits(
+            conn,
+            event_type="admin.login.mfa_verify",
+            rate_key=rate_key,
+            combined_limit=10,
+            principal_limit=10,
+            ip_limit=40,
+            window_seconds=900,
+            request=request,
+            principal=payload.challenge_token[:24],
+            count_statuses=("failed", "blocked"),
+        )
+        challenge = verify_mfa_code(
+            conn,
+            request=request,
+            challenge_token=payload.challenge_token,
+            code=payload.code,
+            context="platform_admin",
+            event_type="admin.login.mfa_verify",
+            rate_key=rate_key,
+        )
         row = conn.execute(
             text(
                 """
-                SELECT u.id::text AS user_id, u.email, u.password_hash, u.status AS user_status,
-                       pa.role AS platform_role, pa.status AS admin_status
+                SELECT u.id::text AS user_id, u.email, pa.role AS platform_role, pa.status AS admin_status, u.status AS user_status
                 FROM saas_users u
                 JOIN saas_platform_admins pa ON pa.user_id = u.id
-                WHERE LOWER(u.email) = :email
+                WHERE u.id = CAST(:user_id AS uuid)
                 LIMIT 1
                 """
             ),
-            {"email": email},
+            {"user_id": challenge["user_id"]},
         ).mappings().first()
-        if (
-            not row
-            or row["user_status"] != "active"
-            or row["admin_status"] != "active"
-            or str(row["platform_role"] or "").lower() not in PLATFORM_ROLE_ORDER
-            or not verify_password(payload.password, row["password_hash"])
-        ):
-            raise HTTPException(status_code=401, detail="invalid_admin_credentials")
+        if not row or row["user_status"] != "active" or row["admin_status"] != "active":
+            raise HTTPException(status_code=403, detail="platform_admin_inactive")
+        clear_login_lock(conn, row["user_id"])
         conn.execute(
             text("UPDATE saas_users SET last_login_at = NOW(), updated_at = NOW() WHERE id = CAST(:id AS uuid)"),
             {"id": row["user_id"]},
         )
-    return _admin_token(dict(row))
+        record_security_event(
+            conn,
+            event_type="admin.login",
+            status="success",
+            request=request,
+            principal=row["email"],
+            rate_key=rate_key,
+            user_id=row["user_id"],
+            reason="mfa_verified",
+        )
+        send_security_notice(
+            row["email"],
+            "Nuevo ingreso protegido al Admin Scentra",
+            "Se completo un ingreso al panel Admin con segundo factor. Si no fuiste tu, cambia tu clave de inmediato.",
+        )
+    return _admin_token(dict(row), mfa_verified=True)
 
 
 @router.get("/auth/me")
@@ -236,9 +636,529 @@ def admin_me(ctx: PlatformAuthContext = Depends(get_current_platform_admin)):
     return {"user_id": ctx.user_id, "email": ctx.email, "platform_role": ctx.platform_role}
 
 
+@router.get("/auth/security")
+def admin_security_status(ctx: PlatformAuthContext = Depends(get_current_platform_admin)):
+    with db_session() as conn:
+        row = conn.execute(
+            text(
+                """
+                SELECT two_factor_enabled, two_factor_method, locked_until::text, password_changed_at::text
+                FROM saas_users
+                WHERE id = CAST(:user_id AS uuid)
+                LIMIT 1
+                """
+            ),
+            {"user_id": ctx.user_id},
+        ).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="user_not_found")
+    method = str(row["two_factor_method"] or "none").strip().lower()
+    return {
+        "two_factor_enabled": bool(row["two_factor_enabled"]),
+        "two_factor_method": method if method == "email_otp" else "none",
+        "locked_until": row["locked_until"],
+        "password_changed_at": row["password_changed_at"],
+        "smtp_configured": smtp_is_configured(),
+    }
+
+
+@router.patch("/auth/security/2fa")
+def admin_update_two_factor(payload: AdminTwoFactorPatchIn, request: Request, ctx: PlatformAuthContext = Depends(get_current_platform_admin)):
+    method = str(payload.method or "email_otp").strip().lower()
+    if payload.enabled and method != "email_otp":
+        raise HTTPException(status_code=400, detail="invalid_two_factor_method")
+    if payload.enabled and not smtp_is_configured() and not settings.is_local:
+        raise HTTPException(status_code=409, detail="smtp_required_for_email_otp")
+    if not payload.enabled:
+        method = "none"
+    with db_session() as conn:
+        row = conn.execute(
+            text(
+                """
+                UPDATE saas_users
+                SET two_factor_enabled = :enabled,
+                    two_factor_method = :method,
+                    updated_at = NOW()
+                WHERE id = CAST(:user_id AS uuid)
+                RETURNING two_factor_enabled, two_factor_method, locked_until::text, password_changed_at::text
+                """
+            ),
+            {"user_id": ctx.user_id, "enabled": bool(payload.enabled), "method": method},
+        ).mappings().first()
+        record_security_event(
+            conn,
+            event_type="admin.two_factor_policy",
+            status="success",
+            request=request,
+            principal=ctx.email,
+            user_id=ctx.user_id,
+            reason="two_factor_enabled" if payload.enabled else "two_factor_disabled",
+            details={"method": method},
+        )
+        send_security_notice(
+            ctx.email,
+            "Cambio de seguridad en Scentra Admin",
+            f"El segundo factor fue {'activado' if payload.enabled else 'desactivado'} para tu cuenta Admin.",
+        )
+    return {
+        "two_factor_enabled": bool(row["two_factor_enabled"]) if row else False,
+        "two_factor_method": str((row or {}).get("two_factor_method") or "none"),
+        "locked_until": (row or {}).get("locked_until"),
+        "password_changed_at": (row or {}).get("password_changed_at"),
+        "smtp_configured": smtp_is_configured(),
+    }
+
+
 @router.get("/feature-flags/catalog")
 def feature_flags_catalog(ctx: PlatformAuthContext = Depends(get_current_platform_admin)):
     return {"features": FEATURE_CATALOG}
+
+
+@router.get("/intelligence/catalog")
+def admin_intelligence_catalog(ctx: PlatformAuthContext = Depends(get_current_platform_admin)):
+    return {"ok": True, "features": intelligence_catalog()}
+
+
+@router.get("/intelligence/tenants")
+def admin_list_intelligence_tenants(
+    limit: int = Query(120, ge=1, le=300),
+    ctx: PlatformAuthContext = Depends(get_current_platform_admin),
+):
+    with db_session() as conn:
+        return {"ok": True, "tenants": admin_intelligence_tenants(conn, limit=limit)}
+
+
+@router.get("/intelligence/tenants/{tenant_id}")
+def admin_intelligence_tenant_detail(tenant_id: str, ctx: PlatformAuthContext = Depends(get_current_platform_admin)):
+    with db_session() as conn:
+        _tenant_exists(conn, tenant_id)
+        set_tenant_context(conn, tenant_id)
+        return {"ok": True, "state": intelligence_feature_state(conn, tenant_id)}
+
+
+@router.get("/intelligence/premium-gating")
+def admin_intelligence_premium_gating(
+    limit: int = Query(120, ge=1, le=300),
+    ctx: PlatformAuthContext = Depends(get_current_platform_admin),
+):
+    with db_session() as conn:
+        return {"ok": True, "gating": admin_multimodal_premium_gating(conn, limit=limit)}
+
+
+@router.patch("/intelligence/plans/{plan_code}/features")
+def admin_set_intelligence_plan_feature(
+    plan_code: str,
+    payload: AdminIntelligencePlanFeaturePatchIn,
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin", "billing_admin")),
+):
+    with db_session() as conn:
+        limit = upsert_plan_feature_limit(conn, plan_code, payload, actor_user_id=ctx.user_id)
+        _audit(
+            conn,
+            actor=ctx,
+            action="admin.intelligence_plan_feature.set",
+            resource_type="intelligence_plan_feature_limit",
+            resource_id=f"{limit.get('plan_code', plan_code)}:{limit.get('feature_key', payload.feature_key)}",
+            details=limit,
+        )
+        gating = admin_multimodal_premium_gating(conn, limit=120)
+    return {"ok": True, "limit": limit, "gating": gating}
+
+
+@router.patch("/intelligence/provider-policies")
+def admin_set_ai_provider_policy(
+    payload: AdminAiProviderPolicyPatchIn,
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin", "billing_admin")),
+):
+    with db_session() as conn:
+        policy = upsert_provider_policy(conn, payload, actor_user_id=ctx.user_id)
+        _audit(
+            conn,
+            actor=ctx,
+            action="admin.ai_provider_policy.set",
+            resource_type="ai_provider_policy",
+            resource_id=f"{policy.get('scope_type')}:{policy.get('scope_id')}:{policy.get('provider_category')}:{policy.get('provider_code')}:{policy.get('model_id') or '*'}",
+            details=policy,
+        )
+        gating = admin_multimodal_premium_gating(conn, limit=120)
+    return {"ok": True, "policy": policy, "gating": gating}
+
+
+@router.get("/intelligence/realtime")
+def admin_intelligence_realtime(
+    tenant_id: str = Query("", max_length=80),
+    limit: int = Query(80, ge=1, le=200),
+    ctx: PlatformAuthContext = Depends(get_current_platform_admin),
+):
+    with db_session() as conn:
+        if tenant_id:
+            _tenant_exists(conn, tenant_id)
+        return {"ok": True, "realtime": admin_realtime_overview(conn, tenant_id=tenant_id, limit=limit)}
+
+
+@router.post("/intelligence/realtime/metrics/refresh")
+def admin_intelligence_realtime_metrics_refresh(
+    tenant_id: str = Query("", max_length=80),
+    limit: int = Query(80, ge=1, le=200),
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin", "support")),
+):
+    with db_session() as conn:
+        if tenant_id:
+            _tenant_exists(conn, tenant_id)
+        result = admin_refresh_realtime_metrics(conn, tenant_id=tenant_id, limit=limit)
+        _audit(
+            conn,
+            actor=ctx,
+            action="admin.intelligence_realtime.metrics_refresh",
+            resource_type="realtime_intelligence_metrics",
+            resource_id=tenant_id or "all",
+            tenant_id=tenant_id or None,
+            details={"snapshots_written": result.get("snapshots_written", 0)},
+        )
+    return {"ok": True, **result}
+
+
+@router.patch("/intelligence/tenants/{tenant_id}/features")
+def admin_set_intelligence_feature(
+    tenant_id: str,
+    payload: AdminIntelligenceFeaturePatchIn,
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin", "billing_admin")),
+):
+    with db_session() as conn:
+        _tenant_exists(conn, tenant_id)
+        grant = upsert_feature_grant(conn, tenant_id, payload, actor_user_id=ctx.user_id)
+        _audit(
+            conn,
+            actor=ctx,
+            action="admin.intelligence_feature.set",
+            resource_type="intelligence_feature_grant",
+            resource_id=grant.get("feature_key", ""),
+            tenant_id=tenant_id,
+            details=grant,
+        )
+        state = intelligence_feature_state(conn, tenant_id)
+    return {"ok": True, "grant": grant, "state": state}
+
+
+@router.get("/intelligence/model-metrics")
+def admin_list_intelligence_model_metrics(
+    tenant_id: str = Query("", max_length=80),
+    model_key: str = Query("", max_length=160),
+    prediction_type: str = Query("", max_length=120),
+    limit: int = Query(120, ge=1, le=500),
+    ctx: PlatformAuthContext = Depends(get_current_platform_admin),
+):
+    with db_session() as conn:
+        if tenant_id:
+            _tenant_exists(conn, tenant_id)
+        return {
+            "ok": True,
+            "metrics": list_model_metrics(conn, tenant_id=tenant_id, model_key=model_key, prediction_type=prediction_type, limit=limit),
+        }
+
+
+@router.post("/intelligence/model-metrics/recompute")
+def admin_recompute_intelligence_model_metrics(
+    payload: ModelMetricsRecomputeIn,
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin", "support")),
+):
+    with db_session() as conn:
+        if payload.tenant_id:
+            _tenant_exists(conn, payload.tenant_id)
+        metrics = recompute_model_metrics(
+            conn,
+            tenant_id=payload.tenant_id,
+            model_key=payload.model_key,
+            prediction_type=payload.prediction_type,
+            window_key=payload.window_key,
+        )
+        _audit(
+            conn,
+            actor=ctx,
+            action="admin.intelligence_model_metrics.recompute",
+            resource_type="intelligence_model_metrics",
+            resource_id=payload.model_key or payload.prediction_type or "all",
+            tenant_id=payload.tenant_id or None,
+            details={"count": len(metrics), "window_key": payload.window_key},
+        )
+    return {"ok": True, "metrics": metrics}
+
+
+@router.get("/intelligence/training-dataset")
+def admin_intelligence_training_dataset(
+    tenant_id: str = Query("", max_length=80),
+    model_key: str = Query("", max_length=160),
+    prediction_type: str = Query("", max_length=120),
+    window_key: str = Query("90d", max_length=80),
+    only_labeled: bool = Query(True),
+    limit: int = Query(80, ge=1, le=500),
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin")),
+):
+    with db_session() as conn:
+        if tenant_id:
+            _tenant_exists(conn, tenant_id)
+        dataset = training_dataset_readiness(
+            conn,
+            tenant_id=tenant_id,
+            model_key=model_key,
+            prediction_type=prediction_type,
+            window_key=window_key,
+            only_labeled=only_labeled,
+            limit=limit,
+        )
+    return {"ok": True, **dataset}
+
+
+@router.get("/intelligence/mlops")
+def admin_intelligence_mlops(
+    tenant_id: str = Query("", max_length=80),
+    limit: int = Query(80, ge=1, le=300),
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin", "support")),
+):
+    with db_session() as conn:
+        if tenant_id:
+            _tenant_exists(conn, tenant_id)
+        overview = mlops_overview(conn, tenant_id=tenant_id, limit=limit)
+    return {"ok": True, **overview}
+
+
+@router.post("/intelligence/auto-labels/generate")
+def admin_generate_intelligence_auto_labels(
+    payload: AutoLabelGenerationRequestIn,
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin")),
+):
+    with db_session() as conn:
+        if payload.tenant_id:
+            _tenant_exists(conn, payload.tenant_id)
+        result = generate_auto_labels(
+            conn,
+            tenant_id=payload.tenant_id,
+            prediction_type=payload.prediction_type,
+            window_key=payload.window_key,
+            limit=payload.limit,
+        )
+        _audit(
+            conn,
+            actor=ctx,
+            action="admin.intelligence_auto_labels.generate",
+            resource_type="ml_auto_labels",
+            resource_id=payload.prediction_type or "all",
+            tenant_id=payload.tenant_id or None,
+            details=result,
+        )
+    return {"ok": True, **result}
+
+
+@router.post("/intelligence/feature-pipelines/recompute")
+def admin_recompute_intelligence_feature_pipelines(
+    payload: FeaturePipelineRequestIn,
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin")),
+):
+    with db_session() as conn:
+        if payload.tenant_id:
+            _tenant_exists(conn, payload.tenant_id)
+        result = recompute_training_feature_pipelines(
+            conn,
+            tenant_id=payload.tenant_id,
+            prediction_type=payload.prediction_type,
+            window_key=payload.window_key,
+            limit=payload.limit,
+        )
+        _audit(
+            conn,
+            actor=ctx,
+            action="admin.intelligence_feature_pipelines.recompute",
+            resource_type="ml_feature_pipeline",
+            resource_id=payload.prediction_type or "all",
+            tenant_id=payload.tenant_id or None,
+            details=result,
+        )
+    return {"ok": True, **result}
+
+
+@router.post("/intelligence/ml-datasets/build")
+def admin_build_intelligence_ml_dataset(
+    payload: DatasetBuildRequestIn,
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin")),
+):
+    with db_session() as conn:
+        if payload.tenant_id:
+            _tenant_exists(conn, payload.tenant_id)
+    dataset_result = request_ml_dataset_build(payload)
+    with db_session() as conn:
+        _audit(
+            conn,
+            actor=ctx,
+            action="admin.intelligence_ml_dataset.build",
+            resource_type="ml_training_dataset",
+            resource_id=((dataset_result.get("dataset") or {}).get("dataset_key") or payload.dataset_key or payload.task_type),
+            tenant_id=payload.tenant_id or None,
+            details=dataset_result,
+        )
+    return {"ok": True, **dataset_result}
+
+
+@router.post("/intelligence/ml-training/synthetic")
+def admin_run_synthetic_ml_training(
+    payload: SyntheticTrainingRequestIn,
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin")),
+):
+    with db_session() as conn:
+        if payload.tenant_id:
+            _tenant_exists(conn, payload.tenant_id)
+    training_result = request_ml_synthetic_training(payload)
+    registry_model = None
+    registry_error = None
+    artifact = training_result.get("artifact") or {}
+    if payload.register_model_registry and artifact.get("model_key"):
+        try:
+            with db_session() as conn:
+                registry_model = register_model_registry_entry(
+                    conn,
+                    ModelRegistryCreateIn(
+                        model_key=artifact.get("model_key") or payload.model_key,
+                        model_type="trained_ml",
+                        task_type=artifact.get("task_type") or payload.task_type,
+                        framework=artifact.get("framework") or payload.framework,
+                        version=artifact.get("version") or payload.version or "v1",
+                        status="candidate",
+                        stage="shadow",
+                        artifact_uri=artifact.get("artifact_uri") or "",
+                        shadow_mode=True,
+                        rollout_mode="shadow",
+                        traffic_percent=0,
+                        promotion_status="pending_review",
+                        metadata_json={
+                            "training_job_id": training_result.get("job_id") or "",
+                            "mlflow_run_id": artifact.get("mlflow_run_id") or "",
+                            "bentoml_tag": artifact.get("bentoml_tag") or "",
+                            "training_source": "synthetic_autolabel",
+                        },
+                        reason="Synthetic ML training registered from Scentra Admin",
+                    ),
+                    actor_user_id=ctx.user_id,
+                )
+                _audit(
+                    conn,
+                    actor=ctx,
+                    action="admin.intelligence_ml_training.synthetic",
+                    resource_type="intelligence_model",
+                    resource_id=registry_model.get("model_key", ""),
+                    tenant_id=payload.tenant_id or None,
+                    details={"training_result": training_result, "registry_model": registry_model},
+                )
+        except HTTPException as exc:
+            registry_error = exc.detail
+    return {"ok": True, "training": training_result, "registry_model": registry_model, "registry_error": registry_error}
+
+
+@router.post("/intelligence/ml-training/autolabel")
+def admin_run_autolabel_ml_training(
+    payload: AutoLabelTrainingRequestIn,
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin")),
+):
+    with db_session() as conn:
+        if payload.tenant_id:
+            _tenant_exists(conn, payload.tenant_id)
+    training_result = request_ml_autolabel_training(payload)
+    registry_model = None
+    registry_error = None
+    artifact = training_result.get("artifact") or {}
+    if payload.register_model_registry and artifact.get("model_key"):
+        try:
+            with db_session() as conn:
+                registry_model = register_model_registry_entry(
+                    conn,
+                    ModelRegistryCreateIn(
+                        model_key=artifact.get("model_key") or payload.model_key,
+                        model_type="trained_ml",
+                        task_type=artifact.get("task_type") or payload.task_type,
+                        framework=artifact.get("framework") or payload.framework,
+                        version=artifact.get("version") or payload.version or "v1",
+                        status="candidate",
+                        stage="shadow",
+                        artifact_uri=artifact.get("artifact_uri") or "",
+                        shadow_mode=True,
+                        rollout_mode="shadow",
+                        traffic_percent=0,
+                        promotion_status="pending_review",
+                        metadata_json={
+                            "training_job_id": training_result.get("job_id") or "",
+                            "mlflow_run_id": artifact.get("mlflow_run_id") or "",
+                            "bentoml_tag": artifact.get("bentoml_tag") or "",
+                            "dataset": artifact.get("dataset") or {},
+                            "training_source": "postgres_auto_labels",
+                            "raw_content_used": False,
+                        },
+                        reason="Autolabel ML training registered from Scentra Admin",
+                    ),
+                    actor_user_id=ctx.user_id,
+                )
+                _audit(
+                    conn,
+                    actor=ctx,
+                    action="admin.intelligence_ml_training.autolabel",
+                    resource_type="intelligence_model",
+                    resource_id=registry_model.get("model_key", ""),
+                    tenant_id=payload.tenant_id or None,
+                    details={"training_result": training_result, "registry_model": registry_model},
+                )
+        except HTTPException as exc:
+            registry_error = exc.detail
+    return {"ok": True, "training": training_result, "registry_model": registry_model, "registry_error": registry_error}
+
+
+@router.get("/intelligence/models")
+def admin_list_intelligence_models(
+    model_key: str = Query("", max_length=160),
+    limit: int = Query(120, ge=1, le=300),
+    ctx: PlatformAuthContext = Depends(get_current_platform_admin),
+):
+    with db_session() as conn:
+        return {"ok": True, "models": list_model_registry(conn, model_key=model_key, limit=limit)}
+
+
+@router.post("/intelligence/models")
+def admin_register_intelligence_model(
+    payload: ModelRegistryCreateIn,
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin")),
+):
+    with db_session() as conn:
+        model = register_model_registry_entry(conn, payload, actor_user_id=ctx.user_id)
+        _audit(
+            conn,
+            actor=ctx,
+            action="admin.intelligence_model_registry.create",
+            resource_type="intelligence_model",
+            resource_id=model.get("model_key", ""),
+            details=model,
+        )
+    return {"ok": True, "model": model}
+
+
+@router.get("/intelligence/models/{model_key}/assessment")
+def admin_assess_intelligence_model(model_key: str, ctx: PlatformAuthContext = Depends(get_current_platform_admin)):
+    with db_session() as conn:
+        return {"ok": True, "assessment": assess_model_rollout(conn, model_key)}
+
+
+@router.patch("/intelligence/models/{model_key}")
+def admin_update_intelligence_model(
+    model_key: str,
+    payload: ModelRegistryPatchIn,
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin", "support")),
+):
+    with db_session() as conn:
+        model = update_model_registry_control(conn, model_key, payload, actor_user_id=ctx.user_id)
+        _audit(
+            conn,
+            actor=ctx,
+            action="admin.intelligence_model_registry.update",
+            resource_type="intelligence_model",
+            resource_id=model_key,
+            details=model,
+        )
+    return {"ok": True, "model": model}
 
 
 @router.get("/overview")
@@ -290,27 +1210,7 @@ def platform_overview(ctx: PlatformAuthContext = Depends(get_current_platform_ad
 
 
 def _queue_counts(conn) -> dict[str, Any]:
-    outbound = conn.execute(
-        text("SELECT status, COUNT(*)::int AS total FROM saas_outbound_messages GROUP BY status ORDER BY status ASC")
-    ).mappings().all()
-    webhooks = conn.execute(
-        text("SELECT status, COUNT(*)::int AS total FROM saas_webhook_events GROUP BY status ORDER BY status ASC")
-    ).mappings().all()
-    scheduled = conn.execute(
-        text(
-            """
-            SELECT status, COUNT(*)::int AS total
-            FROM saas_trigger_scheduled_messages
-            GROUP BY status
-            ORDER BY status ASC
-            """
-        )
-    ).mappings().all()
-    return {
-        "outbound": [dict(row) for row in outbound],
-        "webhooks": [dict(row) for row in webhooks],
-        "scheduled_triggers": [dict(row) for row in scheduled],
-    }
+    return queue_snapshot(conn)
 
 
 @router.get("/tenants")
@@ -348,6 +1248,9 @@ def list_tenants(
                     t.plan_code,
                     t.timezone,
                     t.locale,
+                    t.industry_code,
+                    t.vertical_pack_version,
+                    t.vertical_pack_applied_at::text,
                     t.created_at::text,
                     t.updated_at::text,
                     COALESCE((SELECT COUNT(*)::int FROM saas_memberships m WHERE m.tenant_id = t.id AND m.is_active = TRUE), 0) AS users_count,
@@ -471,6 +1374,7 @@ def update_tenant(
         raise HTTPException(status_code=400, detail="tenant_patch_required")
     assignments: list[str] = []
     params: dict[str, Any] = {"tenant_id": tenant_id}
+    industry_to_apply = ""
     with db_session() as conn:
         _tenant_exists(conn, tenant_id)
         if "plan_code" in data and data["plan_code"]:
@@ -485,6 +1389,10 @@ def update_tenant(
                 raise HTTPException(status_code=400, detail="invalid_tenant_status")
             params["status"] = tenant_status
             assignments.append("status = :status")
+        if "industry_code" in data and data["industry_code"]:
+            industry_to_apply = normalize_industry_code(data["industry_code"])
+            params["industry_code"] = industry_to_apply
+            assignments.append("industry_code = :industry_code")
         for key in ("name", "timezone", "locale"):
             if key in data and data[key] is not None:
                 params[key] = _clean(data[key], 160 if key == "name" else 80)
@@ -500,6 +1408,9 @@ def update_tenant(
                 ),
                 params,
             )
+        if industry_to_apply:
+            set_tenant_context(conn, tenant_id)
+            apply_industry_pack(conn, tenant_id, ctx.user_id, industry_to_apply, create_agents=False)
         sub_status = _clean(data.get("subscription_status"), 40).lower()
         if sub_status:
             if sub_status not in SUBSCRIPTION_STATUSES:
@@ -627,12 +1538,28 @@ def impersonate_tenant(
 @router.get("/plans")
 def list_plans(ctx: PlatformAuthContext = Depends(get_current_platform_admin)):
     with db_session() as conn:
+        _ensure_ai_agent_plan_limit_table(conn)
         rows = conn.execute(
             text(
                 """
                 SELECT plan_code, display_name, max_agents, max_monthly_messages, max_integrations, max_storage_gb,
                        max_campaigns, max_broadcasts, max_ai_tokens, feature_flags_json, price_monthly_cents,
                        currency, is_public, is_active, sort_order, created_at::text, updated_at::text,
+                       COALESCE((
+                           SELECT jsonb_build_object(
+                               'plan_code', apl.plan_code,
+                               'max_ai_agents', apl.max_ai_agents,
+                               'max_active_ai_agents', apl.max_active_ai_agents,
+                               'max_memory_archives', apl.max_memory_archives,
+                               'allowed_agent_types_json', apl.allowed_agent_types_json,
+                               'builder_enabled', apl.builder_enabled,
+                               'notes', apl.notes,
+                               'updated_at', apl.updated_at::text
+                           )
+                           FROM saas_ai_agent_plan_limits apl
+                           WHERE apl.plan_code = saas_plan_limits.plan_code
+                           LIMIT 1
+                       ), '{}'::jsonb) AS ai_agent_limits,
                        (SELECT COUNT(*)::int FROM saas_tenants t WHERE t.plan_code = saas_plan_limits.plan_code) AS tenants_count
                 FROM saas_plan_limits
                 ORDER BY sort_order ASC, plan_code ASC
@@ -650,6 +1577,8 @@ def upsert_plan(
     plan_code = normalize_slug(payload.plan_code).replace("-", "_")
     if not plan_code:
         raise HTTPException(status_code=400, detail="valid_plan_code_required")
+    payload_data = payload.model_dump()
+    ai_agent_limits = payload_data.pop("ai_agent_limits", None)
     with db_session() as conn:
         row = conn.execute(
             text(
@@ -687,15 +1616,17 @@ def upsert_plan(
                 """
             ),
             {
-                **payload.model_dump(),
+                **payload_data,
                 "plan_code": plan_code,
                 "display_name": _clean(payload.display_name, 120) or plan_code.title(),
                 "currency": _clean(payload.currency, 12).upper() or "USD",
                 "feature_flags_json": _json(payload.feature_flags_json),
             },
         ).mappings().first()
-        _audit(conn, actor=ctx, action="admin.plan.upsert", resource_type="plan", resource_id=plan_code, details=dict(row or {}))
-    return {"ok": True, "plan": dict(row)}
+        updated_ai_limits = _upsert_ai_agent_plan_limits(conn, plan_code, ai_agent_limits)
+        plan = _load_plan(conn, plan_code) or dict(row or {})
+        _audit(conn, actor=ctx, action="admin.plan.upsert", resource_type="plan", resource_id=plan_code, details={"plan": plan, "ai_agent_limits": updated_ai_limits})
+    return {"ok": True, "plan": plan}
 
 
 @router.patch("/plans/{plan_code}")
@@ -708,6 +1639,7 @@ def patch_plan(
     data = payload.model_dump(exclude_unset=True)
     if not data:
         raise HTTPException(status_code=400, detail="plan_patch_required")
+    ai_agent_limits = data.pop("ai_agent_limits", None)
     assignments: list[str] = []
     params: dict[str, Any] = {"plan_code": clean_plan}
     for key, value in data.items():
@@ -723,20 +1655,20 @@ def patch_plan(
     with db_session() as conn:
         if not _load_plan(conn, clean_plan):
             raise HTTPException(status_code=404, detail="plan_not_found")
-        row = conn.execute(
-            text(
-                f"""
-                UPDATE saas_plan_limits
-                SET {", ".join(assignments)}, updated_at = NOW()
-                WHERE plan_code = :plan_code
-                RETURNING plan_code, display_name, max_agents, max_monthly_messages, max_integrations, max_storage_gb,
-                          max_campaigns, max_broadcasts, max_ai_tokens, feature_flags_json, price_monthly_cents,
-                          currency, is_public, is_active, sort_order, created_at::text, updated_at::text
-                """
-            ),
-            params,
-        ).mappings().first()
-        _audit(conn, actor=ctx, action="admin.plan.patch", resource_type="plan", resource_id=clean_plan, details=data)
+        if assignments:
+            conn.execute(
+                text(
+                    f"""
+                    UPDATE saas_plan_limits
+                    SET {", ".join(assignments)}, updated_at = NOW()
+                    WHERE plan_code = :plan_code
+                    """
+                ),
+                params,
+            )
+        updated_ai_limits = _upsert_ai_agent_plan_limits(conn, clean_plan, ai_agent_limits)
+        row = _load_plan(conn, clean_plan)
+        _audit(conn, actor=ctx, action="admin.plan.patch", resource_type="plan", resource_id=clean_plan, details={"patch": data, "ai_agent_limits": updated_ai_limits})
     return {"ok": True, "plan": dict(row)}
 
 
@@ -855,6 +1787,139 @@ def patch_subscription(
     return {"ok": True, "subscription": dict(row)}
 
 
+@router.get("/billing/invoices")
+def admin_billing_invoices(
+    tenant_id: str = Query("", max_length=80),
+    limit: int = Query(100, ge=1, le=500),
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin", "billing_admin")),
+):
+    where = ["1=1"]
+    params: dict[str, Any] = {"limit": limit}
+    if tenant_id:
+        params["tenant_id"] = tenant_id
+        where.append("i.tenant_id = CAST(:tenant_id AS uuid)")
+    with db_session() as conn:
+        rows = conn.execute(
+            text(
+                f"""
+                SELECT i.id::text, i.tenant_id::text, t.name AS tenant_name, t.slug AS tenant_slug,
+                       i.provider, i.provider_invoice_id, i.invoice_number, i.status,
+                       i.plan_code, i.currency, i.total_cents, i.amount_paid_cents,
+                       i.amount_due_cents, i.hosted_invoice_url, i.pdf_url,
+                       i.period_start::text, i.period_end::text, i.due_at::text,
+                       i.paid_at::text, i.created_at::text, i.updated_at::text
+                FROM saas_billing_invoices i
+                JOIN saas_tenants t ON t.id = i.tenant_id
+                WHERE {" AND ".join(where)}
+                ORDER BY i.created_at DESC
+                LIMIT :limit
+                """
+            ),
+            params,
+        ).mappings().all()
+    return {"invoices": [dict(row) for row in rows]}
+
+
+@router.post("/billing/invoices")
+def admin_create_invoice(
+    payload: BillingInvoiceCreateIn,
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin", "billing_admin")),
+):
+    with db_session() as conn:
+        _tenant_exists(conn, payload.tenant_id)
+        invoice = create_manual_invoice(
+            conn,
+            tenant_id=payload.tenant_id,
+            plan_code=payload.plan_code,
+            status=payload.status,
+            total_cents=payload.total_cents,
+            due_at=payload.due_at,
+        )
+        _audit(conn, actor=ctx, action="admin.billing.invoice.create", resource_type="billing_invoice", resource_id=invoice.get("id", ""), tenant_id=payload.tenant_id, details=invoice)
+    return {"ok": True, "invoice": invoice}
+
+
+@router.get("/billing/invoices/{invoice_id}/pdf")
+def admin_invoice_pdf(
+    invoice_id: str,
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin", "billing_admin")),
+):
+    with db_session() as conn:
+        invoice = get_invoice(conn, "", invoice_id)
+        conn.execute(
+            text("UPDATE saas_billing_invoices SET pdf_generated_at = NOW(), updated_at = NOW() WHERE id = CAST(:invoice_id AS uuid)"),
+            {"invoice_id": invoice_id},
+        )
+        _audit(conn, actor=ctx, action="admin.billing.invoice.pdf", resource_type="billing_invoice", resource_id=invoice_id, tenant_id=invoice.get("tenant_id"), details={"invoice_number": invoice.get("invoice_number")})
+    filename = f"scentra-invoice-{invoice.get('invoice_number') or invoice_id}.pdf".replace(" ", "-")
+    return Response(
+        content=invoice_pdf_bytes(invoice),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{filename}"'},
+    )
+
+
+@router.get("/billing/credits")
+def admin_billing_credits(
+    tenant_id: str = Query("", max_length=80),
+    limit: int = Query(100, ge=1, le=500),
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin", "billing_admin")),
+):
+    where = ["1=1"]
+    params: dict[str, Any] = {"limit": limit}
+    if tenant_id:
+        params["tenant_id"] = tenant_id
+        where.append("c.tenant_id = CAST(:tenant_id AS uuid)")
+    with db_session() as conn:
+        rows = conn.execute(
+            text(
+                f"""
+                SELECT c.id::text, c.tenant_id::text, t.name AS tenant_name, t.slug AS tenant_slug,
+                       c.metric_code, c.amount, c.remaining_amount, c.reason,
+                       c.expires_at::text, c.created_by_user_id::text,
+                       c.created_at::text, c.updated_at::text
+                FROM saas_billing_credits c
+                JOIN saas_tenants t ON t.id = c.tenant_id
+                WHERE {" AND ".join(where)}
+                ORDER BY c.created_at DESC
+                LIMIT :limit
+                """
+            ),
+            params,
+        ).mappings().all()
+    return {"credits": [dict(row) for row in rows]}
+
+
+@router.post("/billing/credits")
+def admin_create_credit(
+    payload: BillingCreditCreateIn,
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin", "billing_admin")),
+):
+    with db_session() as conn:
+        _tenant_exists(conn, payload.tenant_id)
+        credit = apply_manual_credit(
+            conn,
+            tenant_id=payload.tenant_id,
+            actor_user_id=ctx.user_id,
+            metric_code=payload.metric_code,
+            amount=payload.amount,
+            reason=payload.reason,
+            expires_at=payload.expires_at,
+        )
+        _audit(conn, actor=ctx, action="admin.billing.credit.create", resource_type="billing_credit", resource_id=credit.get("id", ""), tenant_id=payload.tenant_id, details=credit)
+    return {"ok": True, "credit": credit}
+
+
+@router.post("/billing/lifecycle/sync")
+def admin_sync_billing_lifecycle(
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin", "billing_admin")),
+):
+    with db_session() as conn:
+        result = sync_billing_lifecycle(conn)
+        _audit(conn, actor=ctx, action="admin.billing.lifecycle.sync", resource_type="billing", resource_id="lifecycle", details=result)
+    return {"ok": True, "result": result}
+
+
 @router.get("/audit")
 def audit_events(
     tenant_id: str = Query("", max_length=80),
@@ -885,10 +1950,302 @@ def audit_events(
     return {"audit": [dict(row) for row in rows]}
 
 
+@router.get("/audit/export.csv")
+def audit_events_export(
+    tenant_id: str = Query("", max_length=80),
+    limit: int = Query(1000, ge=1, le=5000),
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin", "support")),
+):
+    data = audit_events(tenant_id=tenant_id, limit=limit, ctx=ctx).get("audit", [])
+    headers = ["created_at", "action", "actor_email", "tenant_name", "resource_type", "resource_id"]
+    lines = [",".join(headers)]
+    for row in data:
+        values = []
+        for key in headers:
+            value = str(row.get(key) or "").replace('"', '""')
+            values.append(f'"{value}"')
+        lines.append(",".join(values))
+    return Response("\n".join(lines), media_type="text/csv", headers={"Content-Disposition": "attachment; filename=scentra-audit.csv"})
+
+
+@router.get("/security/compliance")
+def admin_security_compliance(ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin", "support"))):
+    with db_session() as conn:
+        users = conn.execute(
+            text(
+                """
+                SELECT COUNT(*)::int AS total,
+                       COUNT(*) FILTER (WHERE two_factor_enabled IS TRUE)::int AS two_factor_enabled,
+                       COUNT(*) FILTER (WHERE locked_until > NOW())::int AS locked
+                FROM saas_users
+                """
+            )
+        ).mappings().first() or {}
+        admins = conn.execute(
+            text(
+                """
+                SELECT COUNT(*)::int AS total,
+                       COUNT(*) FILTER (WHERE COALESCE(u.two_factor_enabled, FALSE) IS TRUE)::int AS two_factor_enabled,
+                       COUNT(*) FILTER (WHERE COALESCE(u.two_factor_enabled, FALSE) IS FALSE)::int AS without_two_factor
+                FROM saas_platform_admins pa
+                JOIN saas_users u ON u.id = pa.user_id
+                WHERE pa.status = 'active'
+                """
+            )
+        ).mappings().first() or {}
+        webhooks = conn.execute(
+            text(
+                """
+                SELECT COUNT(*)::int AS total,
+                       COUNT(*) FILTER (WHERE signature_required IS TRUE)::int AS signature_required,
+                       COUNT(*) FILTER (WHERE is_active IS TRUE)::int AS active
+                FROM saas_webhook_endpoints
+                """
+            )
+        ).mappings().first() or {}
+        security_24h = conn.execute(
+            text(
+                """
+                SELECT status, COUNT(*)::int AS total
+                FROM saas_security_events
+                WHERE created_at >= NOW() - INTERVAL '24 hours'
+                GROUP BY status
+                """
+            )
+        ).mappings().all()
+        privacy = conn.execute(
+            text(
+                """
+                SELECT status, COUNT(*)::int AS total
+                FROM saas_privacy_requests
+                GROUP BY status
+                """
+            )
+        ).mappings().all()
+    return {
+        "ok": True,
+        "users": dict(users),
+        "platform_admins": dict(admins),
+        "webhooks": dict(webhooks),
+        "security_events_24h": [dict(row) for row in security_24h],
+        "privacy_requests": [dict(row) for row in privacy],
+        "environment": {
+            "captcha_enabled": settings.saas_captcha_enabled,
+            "rate_limit_enabled": settings.saas_rate_limit_enabled,
+            "smtp_configured": smtp_is_configured(),
+            "jwt_secret_default": settings.saas_jwt_secret == "dev-only-change-me",
+            "tenant_mfa_required_roles": settings.saas_mfa_required_roles,
+            "admin_mfa_required_roles": settings.saas_admin_mfa_required_roles,
+        },
+    }
+
+
 @router.get("/operations/queues")
 def operation_queues(ctx: PlatformAuthContext = Depends(get_current_platform_admin)):
     with db_session() as conn:
         return {"queues": _queue_counts(conn)}
+
+
+@router.get("/reliability/overview")
+def admin_reliability_overview(
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin", "support")),
+):
+    with db_session() as conn:
+        return reliability_overview(conn)
+
+
+@router.get("/reliability/index-audit")
+def admin_reliability_index_audit(
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin", "support")),
+):
+    with db_session() as conn:
+        return {"index_audit": index_audit(conn)}
+
+
+@router.get("/reliability/backpressure")
+def admin_reliability_backpressure(
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin", "support")),
+):
+    with db_session() as conn:
+        return {"backpressure": backpressure_status(conn)}
+
+
+@router.patch("/reliability/backpressure/{queue_key}")
+def admin_reliability_update_backpressure(
+    queue_key: str,
+    payload: ReliabilityBackpressurePatchIn,
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin")),
+):
+    data = payload.model_dump(exclude_unset=True)
+    if not data:
+        raise HTTPException(status_code=400, detail="empty_patch")
+    if "critical_backlog" in data and "warn_backlog" in data and int(data["critical_backlog"]) < int(data["warn_backlog"]):
+        raise HTTPException(status_code=400, detail="critical_backlog_must_be_gte_warn_backlog")
+    assignments = ", ".join(f"{key} = :{key}" for key in data)
+    with db_session() as conn:
+        row = conn.execute(
+            text(
+                f"""
+                UPDATE saas_reliability_backpressure_policies
+                SET {assignments}, updated_at = NOW()
+                WHERE queue_key = :queue_key
+                RETURNING queue_key, warn_backlog, critical_backlog, max_batch_size, is_active, notes, updated_at::text
+                """
+            ),
+            {"queue_key": queue_key, **data},
+        ).mappings().first()
+        if not row:
+            raise HTTPException(status_code=404, detail="backpressure_policy_not_found")
+        _audit(conn, actor=ctx, action="admin.reliability.backpressure.update", resource_type="reliability_backpressure", resource_id=queue_key, details=dict(row))
+        return {"ok": True, "policy": dict(row)}
+
+
+@router.post("/reliability/snapshot")
+def admin_reliability_snapshot(
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin", "support")),
+):
+    with db_session() as conn:
+        result = record_reliability_snapshot(conn, snapshot_key="admin")
+        _audit(conn, actor=ctx, action="admin.reliability.snapshot", resource_type="reliability", resource_id=result.get("id", ""), details=result)
+        return {"ok": True, "snapshot": result}
+
+
+@router.post("/reliability/drills/{drill_type}")
+def admin_reliability_drill(
+    drill_type: str,
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin", "support")),
+):
+    with db_session() as conn:
+        result = run_reliability_drill(conn, drill_type, initiated_by=ctx.email)
+        _audit(conn, actor=ctx, action="admin.reliability.drill", resource_type="reliability_drill", resource_id=result.get("id", ""), details=result)
+        return {"ok": True, "drill": result}
+
+
+@router.patch("/reliability/retention/{policy_key}")
+def admin_reliability_update_retention(
+    policy_key: str,
+    payload: ReliabilityRetentionPatchIn,
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin")),
+):
+    try:
+        with db_session() as conn:
+            result = update_retention_policy(conn, policy_key, payload.model_dump(exclude_unset=True))
+            _audit(conn, actor=ctx, action="admin.reliability.retention.update", resource_type="reliability_retention", resource_id=policy_key, details=result)
+            return {"ok": True, **result}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/reliability/retention/run")
+def admin_reliability_run_retention(
+    dry_run: bool = Query(True),
+    policy_key: str = Query("", max_length=120),
+    include_disabled: bool = Query(True),
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin", "support")),
+):
+    if not dry_run and ctx.platform_role not in {"superadmin", "platform_admin"}:
+        raise HTTPException(status_code=403, detail="destructive_retention_requires_platform_admin")
+    with db_session() as conn:
+        result = run_retention(conn, dry_run=dry_run, policy_key=policy_key, include_disabled=include_disabled)
+        _audit(conn, actor=ctx, action="admin.reliability.retention.run", resource_type="reliability_retention", resource_id=policy_key or "all", details=result)
+        return {"ok": True, "result": result}
+
+
+@router.get("/observability/health")
+def admin_observability_health(
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin", "support")),
+):
+    with db_session() as conn:
+        synced = sync_dead_letters(conn, limit=200)
+        return {
+            "health": global_health(conn),
+            "channels": channel_diagnostics(conn),
+            "dead_letters": dead_letter_events(conn, limit=25),
+            "meta_error_history": meta_error_history(conn, limit=25),
+            "dead_letter_sync": synced,
+        }
+
+
+@router.get("/observability/dead-letter")
+def admin_dead_letter_events(
+    status: str = Query("open", max_length=40),
+    source_type: str = Query("all", max_length=80),
+    limit: int = Query(100, ge=1, le=300),
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin", "support")),
+):
+    with db_session() as conn:
+        sync_dead_letters(conn, limit=limit)
+        return {"dead_letters": dead_letter_events(conn, limit=limit, status=status, source_type=source_type)}
+
+
+@router.post("/observability/dead-letter/sync")
+def admin_sync_dead_letters(
+    limit: int = Query(200, ge=1, le=500),
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin", "support")),
+):
+    with db_session() as conn:
+        result = sync_dead_letters(conn, limit=limit)
+        _audit(conn, actor=ctx, action="admin.observability.dead_letter_sync", resource_type="dead_letter", details=result)
+        return {"ok": True, "result": result}
+
+
+@router.get("/observability/meta-errors")
+def admin_meta_error_history(
+    tenant_id: str = Query("", max_length=80),
+    limit: int = Query(100, ge=1, le=200),
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin", "support")),
+):
+    with db_session() as conn:
+        return {"meta_errors": meta_error_history(conn, tenant_id=tenant_id, limit=limit)}
+
+
+@router.post("/observability/dead-letter/{event_id}/resolve")
+def admin_resolve_dead_letter(
+    event_id: str,
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin", "support")),
+):
+    with db_session() as conn:
+        ok = resolve_dead_letter(conn, event_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="dead_letter_not_found")
+        _audit(conn, actor=ctx, action="admin.observability.dead_letter_resolve", resource_type="dead_letter", resource_id=event_id)
+        return {"ok": True}
+
+
+def _process_retry_queue(queue_kind: str, tenant_id: str, limit: int = 10) -> dict[str, Any]:
+    if queue_kind == "webhooks":
+        return process_due_webhook_events(limit=limit, tenant_id=tenant_id or None)
+    if queue_kind == "outbound":
+        return process_due_outbound_messages(limit=limit, tenant_id=tenant_id or None)
+    if queue_kind == "triggers":
+        return process_due_scheduled_trigger_messages(limit=limit, tenant_id=tenant_id or None)
+    if queue_kind == "ai":
+        return process_due_ai_replies(limit=limit, tenant_id=tenant_id or None)
+    if queue_kind == "remarketing":
+        return process_due_remarketing_flows(limit=limit, tenant_id=tenant_id or None)
+    if queue_kind == "agents":
+        return process_due_agent_orchestration(limit=limit, tenant_id=tenant_id or None)
+    if queue_kind == "intelligence":
+        return process_due_intelligence(limit=limit, tenant_id=tenant_id or None, force=True)
+    if queue_kind == "reliability":
+        return process_due_reliability()
+    return {}
+
+
+@router.post("/observability/dead-letter/{event_id}/retry")
+def admin_retry_dead_letter(
+    event_id: str,
+    process_now: bool = Query(True),
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin", "support")),
+):
+    with db_session() as conn:
+        result = retry_dead_letter(conn, event_id)
+        if not result.get("ok"):
+            status_code = 404 if result.get("error") == "dead_letter_not_found" else 400
+            raise HTTPException(status_code=status_code, detail=result.get("error") or "dead_letter_retry_failed")
+        _audit(conn, actor=ctx, action="admin.observability.dead_letter_retry", resource_type="dead_letter", resource_id=event_id, tenant_id=result.get("tenant_id") or None, details=result)
+    process_result = _process_retry_queue(str(result.get("queue_kind") or ""), str(result.get("tenant_id") or ""), limit=10) if process_now else {}
+    return {"ok": True, "result": result, "process_result": process_result}
 
 
 @router.post("/operations/webhooks/process")
@@ -924,4 +2281,72 @@ def admin_process_triggers(
     result = process_due_scheduled_trigger_messages(limit=limit, tenant_id=tenant_id or None)
     with db_session() as conn:
         _audit(conn, actor=ctx, action="admin.operations.triggers_process", resource_type="queue", details={"tenant_id": tenant_id, "limit": limit, "result": result})
+    return {"ok": True, "result": result}
+
+
+@router.post("/operations/ai/process")
+def admin_process_ai(
+    tenant_id: str = Query("", max_length=80),
+    limit: int = Query(50, ge=1, le=200),
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin", "support")),
+):
+    result = process_due_ai_replies(limit=limit, tenant_id=tenant_id or None)
+    with db_session() as conn:
+        _audit(conn, actor=ctx, action="admin.operations.ai_process", resource_type="queue", details={"tenant_id": tenant_id, "limit": limit, "result": result})
+    return {"ok": True, "result": result}
+
+
+@router.post("/operations/remarketing/process")
+def admin_process_remarketing(
+    tenant_id: str = Query("", max_length=80),
+    limit: int = Query(50, ge=1, le=200),
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin", "support")),
+):
+    result = process_due_remarketing_flows(limit=limit, tenant_id=tenant_id or None)
+    with db_session() as conn:
+        _audit(conn, actor=ctx, action="admin.operations.remarketing_process", resource_type="queue", details={"tenant_id": tenant_id, "limit": limit, "result": result})
+    return {"ok": True, "result": result}
+
+
+@router.post("/operations/agents/process")
+def admin_process_agent_orchestration(
+    tenant_id: str = Query("", max_length=80),
+    limit: int = Query(50, ge=1, le=200),
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin", "support")),
+):
+    result = process_due_agent_orchestration(limit=limit, tenant_id=tenant_id or None)
+    with db_session() as conn:
+        _audit(conn, actor=ctx, action="admin.operations.agent_orchestrator_process", resource_type="queue", details={"tenant_id": tenant_id, "limit": limit, "result": result})
+    return {"ok": True, "result": result}
+
+
+@router.post("/operations/intelligence/process")
+def admin_process_intelligence(
+    tenant_id: str = Query("", max_length=80),
+    limit: int = Query(25, ge=1, le=200),
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin", "support")),
+):
+    result = process_due_intelligence(limit=limit, tenant_id=tenant_id or None, force=True)
+    with db_session() as conn:
+        _audit(conn, actor=ctx, action="admin.operations.intelligence_process", resource_type="queue", details={"tenant_id": tenant_id, "limit": limit, "result": result})
+    return {"ok": True, "result": result}
+
+
+@router.post("/operations/reliability/process")
+def admin_process_reliability(
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin", "support")),
+):
+    result = process_due_reliability()
+    with db_session() as conn:
+        _audit(conn, actor=ctx, action="admin.operations.reliability_process", resource_type="queue", details={"result": result})
+    return {"ok": True, "result": result}
+
+
+@router.post("/operations/meta-tokens/process")
+def admin_process_meta_tokens(
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin", "support")),
+):
+    result = process_due_meta_token_refreshes()
+    with db_session() as conn:
+        _audit(conn, actor=ctx, action="admin.operations.meta_tokens_process", resource_type="queue", details={"result": result})
     return {"ok": True, "result": result}

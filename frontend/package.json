@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0 --port 5174",
     "build": "vite build",
-    "preview": "vite preview --host 0.0.0.0 --port 4174"
+    "preview": "vite preview --host 0.0.0.0 --port 4174",
+    "phase14:copy-audit": "node ../scripts/phase14-copy-audit.mjs --app=frontend",
+    "phase14:release-check": "node ../scripts/phase14-release-check.mjs"
   },
   "dependencies": {
     "react": "^19.2.0",

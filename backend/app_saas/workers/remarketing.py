@@ -8,7 +8,7 @@ from sqlalchemy import text
 
 from app_saas.billing.limits import tenant_entitlements
 from app_saas.db import db_session, set_tenant_context
-from app_saas.workers.triggers import _action_send_template, _clean, _load_context, _safe_dict, _safe_list
+from app_saas.workers.triggers import _action_send_template, _apply_action_variant, _campaign_quiet_hours_blocked, _clean, _load_context, _quiet_hours_blocked, _record_ab_event, _safe_dict, _safe_list
 
 
 def _json(value: Any) -> str:
@@ -162,7 +162,7 @@ def _load_flows(conn, tenant_id: str) -> list[dict[str, Any]]:
         text(
             """
             SELECT id::text, tenant_id::text, name, channel, status,
-                   entry_rules_json, exit_rules_json, steps_json
+                   entry_rules_json, exit_rules_json, steps_json, quiet_hours_json, ab_test_json
             FROM saas_remarketing_flows
             WHERE tenant_id = CAST(:tenant_id AS uuid)
               AND status = 'active'
@@ -333,7 +333,7 @@ def _load_flow(conn, tenant_id: str, flow_id: str) -> dict[str, Any] | None:
         text(
             """
             SELECT id::text, tenant_id::text, name, channel, status,
-                   entry_rules_json, exit_rules_json, steps_json
+                   entry_rules_json, exit_rules_json, steps_json, quiet_hours_json, ab_test_json
             FROM saas_remarketing_flows
             WHERE tenant_id = CAST(:tenant_id AS uuid)
               AND id = CAST(:flow_id AS uuid)
@@ -393,12 +393,21 @@ def _process_due_one(conn, enrollment: dict[str, Any]) -> tuple[str, int]:
     if bool(conversation.get("takeover")) and "takeover" not in _safe_dict(flow.get("entry_rules_json")):
         _mark_enrollment(conn, enrollment["id"], state="active", error="takeover_on", next_run_minutes=_retry_minutes(flow), meta={"last_skip": "takeover_on"})
         return "skipped", 0
+    global_quiet_blocked, global_quiet_info = _campaign_quiet_hours_blocked(conn, tenant_id, flow.get("channel") or conversation.get("channel") or "whatsapp", "flow")
+    if global_quiet_blocked:
+        _mark_enrollment(conn, enrollment["id"], state="active", error="global_quiet_hours", next_run_minutes=_retry_minutes(flow), meta={"last_skip": "global_quiet_hours", "quiet_hours": global_quiet_info})
+        return "skipped", 0
+    quiet_blocked, quiet_info = _quiet_hours_blocked(flow.get("quiet_hours_json"))
+    if quiet_blocked:
+        _mark_enrollment(conn, enrollment["id"], state="active", error="quiet_hours", next_run_minutes=_retry_minutes(flow), meta={"last_skip": "quiet_hours", "quiet_hours": quiet_info})
+        return "skipped", 0
 
     step = _current_step(flow, int(enrollment.get("current_step_order") or 0))
     if not step:
         _mark_enrollment(conn, enrollment["id"], state="completed", meta={"completed_reason": "no_steps"})
         return "completed", 0
-    template_id = _clean(step.get("template_id"), 120)
+    action, variant = _apply_action_variant({"ab_test_json": flow.get("ab_test_json")}, {"type": "send_template", "template_id": step.get("template_id")}, str(enrollment.get("recipient_external_id") or ""))
+    template_id = _clean(action.get("template_id"), 120)
     if not template_id:
         _mark_enrollment(conn, enrollment["id"], state="failed", error="step_template_required")
         return "failed", 0
@@ -412,6 +421,18 @@ def _process_due_one(conn, enrollment: dict[str, Any]) -> tuple[str, int]:
         {"template_id": template_id, "remarketing_flow_id": flow["id"], "remarketing_step_order": _step_order(step)},
         "remarketing",
     )
+    if variant:
+        _record_ab_event(
+            conn,
+            tenant_id=tenant_id,
+            entity_type="flow",
+            entity_id=flow["id"],
+            conversation=conversation,
+            variant=variant,
+            action=action,
+            result=result,
+            source="remarketing",
+        )
     if not result.get("ok"):
         _mark_enrollment(conn, enrollment["id"], state="active", error=result.get("error") or "send_failed", next_run_minutes=_retry_minutes(flow))
         return "failed", 0
@@ -440,7 +461,7 @@ def _process_due_one(conn, enrollment: dict[str, Any]) -> tuple[str, int]:
                 "next_order": next_order,
                 "wait_minutes": _step_wait(next_step),
                 "current_order": current_order,
-                "meta_json": _json({"last_sent_template_id": template_id, "last_sent_at": datetime.utcnow().isoformat()}),
+                "meta_json": _json({"last_sent_template_id": template_id, "last_sent_at": datetime.utcnow().isoformat(), "ab_variant": variant}),
             },
         )
         _add_flow_tags(conn, tenant_id, str(enrollment["conversation_id"]), flow, next_order, "active")
@@ -463,7 +484,7 @@ def _process_due_one(conn, enrollment: dict[str, Any]) -> tuple[str, int]:
         {
             "id": enrollment["id"],
             "current_order": current_order,
-            "meta_json": _json({"last_sent_template_id": template_id, "completed_at": datetime.utcnow().isoformat()}),
+            "meta_json": _json({"last_sent_template_id": template_id, "completed_at": datetime.utcnow().isoformat(), "ab_variant": variant}),
         },
     )
     _add_flow_tags(conn, tenant_id, str(enrollment["conversation_id"]), flow, current_order, "completed")

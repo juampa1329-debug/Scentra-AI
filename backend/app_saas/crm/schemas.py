@@ -28,7 +28,16 @@ class CustomerUpdateIn(BaseModel):
     crm_stage: str | None = Field(default=None, max_length=80)
     intent: str | None = Field(default=None, max_length=120)
     takeover: bool | None = None
+    assigned_user_id: str | None = Field(default=None, max_length=80)
+    assigned_ai_agent_id: str | None = Field(default=None, max_length=80)
+    ai_owner_mode: str | None = Field(default=None, max_length=40)
+    priority: str | None = Field(default=None, max_length=40)
+    sla_due_at: str | None = Field(default=None, max_length=80)
+    first_response_due_at: str | None = Field(default=None, max_length=80)
+    lead_score: int | None = Field(default=None, ge=0, le=100)
+    lead_temperature: str | None = Field(default=None, max_length=40)
     profile_json: dict[str, Any] | None = None
+    custom_fields: dict[str, Any] | None = None
 
 
 class CustomerCreateIn(CustomerUpdateIn):
@@ -49,3 +58,61 @@ class LabelPatchIn(BaseModel):
     description: str | None = Field(default=None, max_length=500)
     category: str | None = Field(default=None, max_length=80)
     is_active: bool | None = None
+
+
+class CrmTaskCreateIn(BaseModel):
+    title: str = Field(min_length=1, max_length=180)
+    description: str = Field(default="", max_length=1200)
+    assigned_user_id: str | None = Field(default=None, max_length=80)
+    priority: str = Field(default="normal", max_length=40)
+    due_at: str | None = Field(default=None, max_length=80)
+
+
+class CrmTaskPatchIn(BaseModel):
+    title: str | None = Field(default=None, max_length=180)
+    description: str | None = Field(default=None, max_length=1200)
+    assigned_user_id: str | None = Field(default=None, max_length=80)
+    priority: str | None = Field(default=None, max_length=40)
+    due_at: str | None = Field(default=None, max_length=80)
+    status: str | None = Field(default=None, max_length=40)
+
+
+class CrmCustomFieldCreateIn(BaseModel):
+    field_key: str = Field(min_length=1, max_length=80)
+    label: str = Field(min_length=1, max_length=120)
+    field_type: str = Field(default="text", max_length=40)
+    options_json: Any | None = None
+    is_required: bool = False
+    display_order: int = Field(default=100, ge=0, le=10000)
+
+
+class CrmCustomFieldPatchIn(BaseModel):
+    label: str | None = Field(default=None, min_length=1, max_length=120)
+    field_type: str | None = Field(default=None, max_length=40)
+    options_json: Any | None = None
+    is_required: bool | None = None
+    is_active: bool | None = None
+    display_order: int | None = Field(default=None, ge=0, le=10000)
+
+
+class CrmPipelineStageCreateIn(BaseModel):
+    stage_key: str = Field(min_length=1, max_length=80)
+    label: str = Field(min_length=1, max_length=120)
+    probability: int = Field(default=0, ge=0, le=100)
+    display_order: int = Field(default=100, ge=0, le=10000)
+    is_won: bool = False
+    is_lost: bool = False
+
+
+class CrmPipelineStagePatchIn(BaseModel):
+    label: str | None = Field(default=None, min_length=1, max_length=120)
+    probability: int | None = Field(default=None, ge=0, le=100)
+    display_order: int | None = Field(default=None, ge=0, le=10000)
+    is_won: bool | None = None
+    is_lost: bool | None = None
+    is_active: bool | None = None
+
+
+class CustomerMergeIn(BaseModel):
+    source_conversation_id: str = Field(min_length=1, max_length=80)
+    reason: str = Field(default="", max_length=500)

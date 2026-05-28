@@ -1,10 +1,22 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+import json
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 
 from app_saas.billing.limits import billing_overview, tenant_entitlements
+from app_saas.billing.service import (
+    create_checkout_session,
+    get_invoice,
+    invoice_pdf_bytes,
+    list_checkout_sessions,
+    list_credits,
+    list_invoices,
+    process_provider_event,
+)
 from app_saas.config import settings
 from app_saas.db import db_session, set_tenant_context
 from app_saas.shared.security import AuthContext, get_current_user, require_role
@@ -14,6 +26,13 @@ router = APIRouter(prefix="/billing", tags=["saas-billing"])
 
 class ChangePlanIn(BaseModel):
     plan_code: str = Field(min_length=2, max_length=40)
+
+
+class CheckoutIn(BaseModel):
+    plan_code: str = Field(min_length=2, max_length=40)
+    provider: str = Field(default="auto", max_length=40)
+    success_url: str = Field(default="", max_length=1500)
+    cancel_url: str = Field(default="", max_length=1500)
 
 
 @router.get("/subscription")
@@ -126,6 +145,101 @@ def plans(ctx: AuthContext = Depends(get_current_user)):
             )
         ).mappings().all()
     return {"tenant_id": ctx.tenant_id, "plans": [dict(row) for row in rows]}
+
+
+@router.get("/checkout-sessions")
+def checkout_sessions(
+    limit: int = 100,
+    ctx: AuthContext = Depends(require_role("owner", "admin")),
+):
+    with db_session() as conn:
+        set_tenant_context(conn, ctx.tenant_id)
+        rows = list_checkout_sessions(conn, ctx.tenant_id, limit)
+    return {"tenant_id": ctx.tenant_id, "checkout_sessions": rows}
+
+
+@router.post("/checkout")
+def checkout(
+    payload: CheckoutIn,
+    ctx: AuthContext = Depends(require_role("owner", "admin")),
+):
+    with db_session() as conn:
+        set_tenant_context(conn, ctx.tenant_id)
+        session = create_checkout_session(
+            conn,
+            tenant_id=ctx.tenant_id,
+            user_id=ctx.user_id,
+            plan_code=payload.plan_code,
+            provider=payload.provider,
+            success_url=payload.success_url,
+            cancel_url=payload.cancel_url,
+        )
+    return {"tenant_id": ctx.tenant_id, "checkout": session}
+
+
+@router.get("/invoices")
+def invoices(
+    limit: int = 100,
+    ctx: AuthContext = Depends(require_role("owner", "admin")),
+):
+    with db_session() as conn:
+        set_tenant_context(conn, ctx.tenant_id)
+        rows = list_invoices(conn, ctx.tenant_id, limit)
+    return {"tenant_id": ctx.tenant_id, "invoices": rows}
+
+
+@router.get("/invoices/{invoice_id}/pdf")
+def invoice_pdf(
+    invoice_id: str,
+    ctx: AuthContext = Depends(require_role("owner", "admin")),
+):
+    with db_session() as conn:
+        set_tenant_context(conn, ctx.tenant_id)
+        invoice = get_invoice(conn, ctx.tenant_id, invoice_id)
+        conn.execute(
+            text("UPDATE saas_billing_invoices SET pdf_generated_at = NOW(), updated_at = NOW() WHERE id = CAST(:invoice_id AS uuid)"),
+            {"invoice_id": invoice_id},
+        )
+    filename = f"scentra-invoice-{invoice.get('invoice_number') or invoice_id}.pdf".replace(" ", "-")
+    return Response(
+        content=invoice_pdf_bytes(invoice),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{filename}"'},
+    )
+
+
+@router.get("/credits")
+def credits(
+    limit: int = 100,
+    ctx: AuthContext = Depends(require_role("owner", "admin")),
+):
+    with db_session() as conn:
+        set_tenant_context(conn, ctx.tenant_id)
+        rows = list_credits(conn, ctx.tenant_id, limit)
+    return {"tenant_id": ctx.tenant_id, "credits": rows}
+
+
+@router.post("/webhooks/{provider}")
+async def provider_webhook(provider: str, request: Request):
+    raw_body = await request.body()
+    try:
+        payload = json.loads(raw_body.decode("utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="invalid_json_payload") from exc
+    header_checksum = request.headers.get("x-event-checksum", "")
+    headers = {key.lower(): value for key, value in request.headers.items()}
+    query_params = {key.lower(): value for key, value in request.query_params.items()}
+    with db_session() as conn:
+        result = process_provider_event(
+            conn,
+            provider=provider,
+            payload=payload,
+            raw_body=raw_body,
+            headers=headers,
+            query_params=query_params,
+            header_checksum=header_checksum,
+        )
+    return {"ok": True, **result}
 
 
 @router.post("/dev/change-plan")

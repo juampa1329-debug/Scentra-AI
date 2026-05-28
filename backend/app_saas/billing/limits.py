@@ -15,12 +15,97 @@ DISABLED_TENANT_STATUSES = {"paused", "suspended", "cancelled"}
 DEFAULT_FEATURE_FLAGS: dict[str, bool] = {
     "inbox": True,
     "ai": True,
+    "ai_agents": True,
+    "advisor": True,
     "broadcast": True,
     "triggers": False,
     "remarketing": False,
     "ads": False,
     "whatsapp_cloud": True,
+    "instagram_business": False,
+    "facebook_messenger": False,
+    "social_comments": False,
+    "knowledge_base": True,
+    "woocommerce": False,
+    "shopify": False,
     "elevenlabs_voice": False,
+    "intelligence_demo": True,
+    "ai_premium": False,
+    "ml_predictions": False,
+    "lead_scoring_ml": False,
+    "churn_prediction": False,
+    "smart_remarketing": False,
+    "ai_operational_intelligence": False,
+    "predictive_recommendations": False,
+    "advanced_analytics": False,
+    "ai_advisors_premium": False,
+    "multi_agent_os": False,
+    "event_driven_agents": False,
+    "agent_tool_tracing": False,
+    "autonomous_operations": False,
+    "ai_self_healing": False,
+    "ai_control_center": False,
+    "ai_marketplace": False,
+    "ai_plugin_center": False,
+    "ai_developer_console": False,
+    "ai_tool_registry": False,
+    "ai_app_framework": False,
+    "enterprise_ai_network": False,
+    "vertical_ai_intelligence": False,
+    "industry_ai_models": False,
+    "benchmark_intelligence": False,
+    "cross_tenant_intelligence": False,
+    "vertical_ai_advisors": False,
+    "ai_playbook_library": False,
+    "federated_learning": False,
+    "federated_model_updates": False,
+    "privacy_safe_model_aggregation": False,
+    "global_intelligence": False,
+    "federated_benchmarking": False,
+    "ai_workflow_composer": False,
+    "workflow_composer_templates": False,
+    "ai_trust_center": False,
+    "ai_governance_policies": False,
+    "ai_risk_assessments": False,
+    "ai_model_cards": False,
+    "ai_compliance_reports": False,
+    "ai_audit_exports": False,
+    "realtime_intelligence_layer": False,
+    "realtime_event_stream": False,
+    "realtime_ai_alerts": False,
+    "realtime_intelligence_dashboard": False,
+    "voice_intelligence": False,
+    "voice_transcription": False,
+    "voice_sentiment_intent": False,
+    "vision_intelligence": False,
+    "image_understanding": False,
+    "document_ocr": False,
+    "web_search_intelligence": False,
+    "image_search_intelligence": False,
+    "external_source_assist": False,
+    "agent_multimodal_tools": False,
+    "agent_voice_tools": False,
+    "agent_vision_tools": False,
+    "agent_external_search_tools": False,
+    "multimodal_memory_events": False,
+    "multimodal_training_events": False,
+    "multimodal_rag_materialization": False,
+    "multimodal_agent_memory": False,
+    "multimodal_observability": False,
+    "multimodal_cost_observability": False,
+    "multimodal_quality_monitoring": False,
+    "multimodal_safe_rollout": False,
+    "multimodal_canary": False,
+    "autonomous_revenue_engine": False,
+    "revenue_opportunity_detection": False,
+    "revenue_forecasting": False,
+    "revenue_playbooks": False,
+    "revenue_experiments": False,
+    "enterprise_memory_network": False,
+    "memory_graph": False,
+    "memory_governance": False,
+    "cross_agent_memory_routing": False,
+    "memory_quality_scoring": False,
 }
 
 
@@ -126,6 +211,23 @@ def _current_usage(conn: Connection, tenant_id: str, period: str) -> dict[str, i
         {"tenant_id": tenant_id, "period": period},
     ).mappings().all()
     return {str(row["metric_code"]): int(row["metric_value"] or 0) for row in rows}
+
+
+def _active_credits(conn: Connection, tenant_id: str) -> dict[str, int]:
+    rows = conn.execute(
+        text(
+            """
+            SELECT metric_code, COALESCE(SUM(remaining_amount), 0)::int AS total
+            FROM saas_billing_credits
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND remaining_amount > 0
+              AND (expires_at IS NULL OR expires_at > NOW())
+            GROUP BY metric_code
+            """
+        ),
+        {"tenant_id": tenant_id},
+    ).mappings().all()
+    return {str(row["metric_code"]): int(row["total"] or 0) for row in rows}
 
 
 def _membership_count(conn: Connection, tenant_id: str) -> int:
@@ -268,6 +370,7 @@ def billing_overview(conn: Connection, tenant_id: str) -> dict[str, Any]:
     entitlements = tenant_entitlements(conn, tenant_id)
     limits = entitlements["plan"]["limits"]
     usage = _current_usage(conn, tenant_id, period)
+    credits = _active_credits(conn, tenant_id)
     subscription = conn.execute(
         text(
             """
@@ -295,6 +398,8 @@ def billing_overview(conn: Connection, tenant_id: str) -> dict[str, Any]:
     used_broadcasts = _broadcast_count(conn, tenant_id)
     used_ai_tokens = int(usage.get("ai_tokens", 0) or 0)
     max_monthly_messages = int(limits["max_monthly_messages"] or 0)
+    extra_messages = int(credits.get("monthly_messages", 0) or 0) + int(credits.get("messages", 0) or 0)
+    effective_monthly_messages = max_monthly_messages + extra_messages
 
     return {
         "tenant_id": tenant_id,
@@ -317,8 +422,17 @@ def billing_overview(conn: Connection, tenant_id: str) -> dict[str, Any]:
             "used_campaigns": used_campaigns,
             "used_broadcasts": used_broadcasts,
         },
+        "credits": credits,
+        "effective_limits": {
+            "max_monthly_messages": effective_monthly_messages,
+            "max_integrations": int(limits["max_integrations"] or 0),
+            "max_agents": int(limits["max_agents"] or 0),
+            "max_campaigns": int(limits["max_campaigns"] or 0),
+            "max_broadcasts": int(limits["max_broadcasts"] or 0),
+            "max_ai_tokens": int(limits["max_ai_tokens"] or 0),
+        },
         "remaining": {
-            "monthly_messages": max(0, max_monthly_messages - used_monthly_messages),
+            "monthly_messages": max(0, effective_monthly_messages - used_monthly_messages),
             "integrations": max(0, int(limits["max_integrations"] or 0) - used_integrations),
             "agents": max(0, int(limits["max_agents"] or 0) - used_agents),
             "campaigns": max(0, int(limits["max_campaigns"] or 0) - used_campaigns),
@@ -331,7 +445,7 @@ def billing_overview(conn: Connection, tenant_id: str) -> dict[str, Any]:
 def ensure_monthly_message_quota(conn: Connection, tenant_id: str, requested: int = 1) -> None:
     ensure_tenant_operational(conn, tenant_id)
     overview = billing_overview(conn, tenant_id)
-    limit = int(overview["plan"]["limits"]["max_monthly_messages"] or 0)
+    limit = int(overview.get("effective_limits", {}).get("max_monthly_messages") or overview["plan"]["limits"]["max_monthly_messages"] or 0)
     used = int(overview["usage"]["used_monthly_messages"] or 0)
     if used + int(requested) > limit:
         raise HTTPException(

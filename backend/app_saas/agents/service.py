@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import uuid
+import hashlib
+import threading
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
@@ -31,6 +33,7 @@ ALL_AGENT_TYPES = [
     "appointment_scheduler",
     "real_estate_leads",
     "education_admissions",
+    "teacher",
     "automotive_service",
     "beauty_booking",
     "logistics_tracking",
@@ -50,11 +53,16 @@ ALL_AGENT_TYPES = [
     "public_sector_services",
     "saas_onboarding",
     "field_service_dispatch",
+    "custom",
 ]
 
 CORE_AGENT_TYPES = ALL_AGENT_TYPES[:10]
 
 EDITABLE_STATUSES = {"draft", "active", "paused", "archived"}
+
+_AGENT_TABLES_LOCK = threading.RLock()
+_AGENT_TABLES_ENSURED = False
+_AGENT_TABLES_ADVISORY_LOCK_ID = 24060051
 
 CHANNEL_CATALOG: list[dict[str, str]] = [
     {"code": "global", "label": "Global", "description": "Analisis y acciones internas sin canal conversacional directo."},
@@ -78,6 +86,9 @@ TOOL_CATALOG: list[dict[str, str]] = [
     {"code": "knowledge.audit", "group": "Knowledge", "label": "Auditar knowledge", "description": "Detectar huecos o fuentes desactualizadas."},
     {"code": "knowledge.search", "group": "Knowledge", "label": "Buscar knowledge", "description": "Usar RAG y fuentes internas."},
     {"code": "logs.read", "group": "Operaciones", "label": "Leer logs", "description": "Revisar eventos operacionales."},
+    {"code": "media.voice_analyze", "group": "Multimodal", "label": "Analizar audio", "description": "Solicitar transcripcion, resumen, sentimiento e intencion de audios existentes del Inbox."},
+    {"code": "media.vision_analyze", "group": "Multimodal", "label": "Analizar imagen/documento", "description": "Solicitar descripcion, OCR/resumen e intencion de imagenes o documentos existentes del Inbox."},
+    {"code": "media.web_image_search", "group": "Multimodal", "label": "Buscar web/imagen", "description": "Buscar fuentes externas con trazabilidad y aprobacion humana por resultado."},
     {"code": "meta.checks", "group": "Meta", "label": "Checks Meta", "description": "Validar tokens, suscripciones y webhooks Meta."},
     {"code": "rag.evaluate", "group": "Knowledge", "label": "Evaluar RAG", "description": "Medir calidad de recuperacion de contexto."},
     {"code": "remarketing.suggest", "group": "Remarketing", "label": "Sugerir remarketing", "description": "Proponer recuperaciones y flujos por etapa."},
@@ -94,6 +105,7 @@ TOOL_CATALOG: list[dict[str, str]] = [
     {"code": "appointments.schedule", "group": "Verticales", "label": "Agenda y citas", "description": "Calificar, agendar, confirmar o reprogramar citas."},
     {"code": "property.search", "group": "Verticales", "label": "Busqueda inmobiliaria", "description": "Filtrar inmuebles, presupuestos y visitas."},
     {"code": "admissions.qualify", "group": "Verticales", "label": "Admisiones educativas", "description": "Calificar aspirantes, programas y requisitos."},
+    {"code": "education.tutor", "group": "Verticales", "label": "Profesor tutor", "description": "Resolver dudas academicas con base en materiales, rubricas y politicas del curso."},
     {"code": "service.intake", "group": "Verticales", "label": "Intake de servicio", "description": "Recolectar datos para taller, soporte tecnico, salud o servicios locales."},
     {"code": "order.track", "group": "Verticales", "label": "Seguimiento logistico", "description": "Consultar estados de pedido, entrega, guia o incidencia."},
     {"code": "payments.followup", "group": "Verticales", "label": "Seguimiento de pagos", "description": "Crear recordatorios, acuerdos y alertas de cartera."},
@@ -198,6 +210,7 @@ MEMORY_FLAG_CATALOG: list[dict[str, str]] = [
     {"code": "workflow_history", "label": "Historial de workflows", "description": "Aprende de automatizaciones existentes."},
     {"code": "vertical_context", "label": "Contexto vertical", "description": "Usa reglas, catalogos, horarios y politicas de la industria."},
     {"code": "compliance_context", "label": "Contexto regulado", "description": "Recuerda limites, aprobaciones y disclaimers para sectores sensibles."},
+    {"code": "collective_memory", "label": "Memoria colectiva", "description": "Comparte hechos, decisiones y handoffs con otros agentes del tenant."},
 ]
 
 APPROVAL_FLAG_CATALOG: list[dict[str, str]] = [
@@ -287,9 +300,34 @@ INDUSTRY_POLICY_PRESETS: list[dict[str, Any]] = [
         "approval": {"requires_human_approval": True, "can_send_messages": True, "can_update_crm": True},
         "rules": ["No aprobar ni negar reclamaciones; solo registrar datos y documentos."],
     },
+    {
+        "code": "services",
+        "label": "Servicios",
+        "category": "vertical_services",
+        "risk_posture": "moderado",
+        "memory": {"vertical_context": True, "customer_profile": True, "workflow_history": True},
+        "approval": {"requires_human_approval": True, "can_send_messages": True, "can_update_crm": True},
+        "rules": ["Recolectar necesidad, direccion, prioridad y disponibilidad antes de coordinar visita o cotizacion."],
+    },
 ]
 
 AGENT_TEMPLATES: dict[str, dict[str, Any]] = {
+    "custom": {
+        "agent_type": "custom",
+        "name": "Custom Agent",
+        "category": "custom",
+        "headline": "Agente personalizado del tenant.",
+        "description": "Agente configurable desde cero para atender un rol especifico del negocio.",
+        "channels": ["whatsapp"],
+        "tools": ["conversation.reply", "crm.update", "knowledge.search", "media.voice_analyze", "media.vision_analyze", "media.web_image_search"],
+        "goals": ["Atender conversaciones asignadas", "Usar contexto de negocio", "Escalar casos sensibles"],
+        "personality": {"tone": "humano, claro y alineado a la marca", "risk_posture": "conservador"},
+        "provider_policy": {"route": "support", "preferred": "google", "fallback": "openrouter"},
+        "memory_policy": {"short_term": True, "semantic": True, "customer_profile": True},
+        "approval_policy": {"requires_human_approval": True, "can_send_messages": True, "can_update_crm": True},
+        "risk_level": "medium",
+        "is_custom": True,
+    },
     "advisor": {
         "agent_type": "advisor",
         "name": "Advisor Agent",
@@ -297,7 +335,7 @@ AGENT_TEMPLATES: dict[str, dict[str, Any]] = {
         "headline": "Copiloto empresarial y estratega operativo.",
         "description": "Analiza CRM, conversaciones, campanas, triggers y operacion para sugerir acciones.",
         "channels": ["global"],
-        "tools": ["crm.read", "analytics.read", "advisor.actions", "campaigns.suggest", "diagnostics.read"],
+        "tools": ["crm.read", "analytics.read", "advisor.actions", "campaigns.suggest", "diagnostics.read", "media.web_image_search"],
         "goals": [
             "Detectar oportunidades comerciales",
             "Priorizar clientes y cuellos de botella",
@@ -316,7 +354,7 @@ AGENT_TEMPLATES: dict[str, dict[str, Any]] = {
         "headline": "Calificacion, seguimiento y cierre de leads.",
         "description": "Acompana conversaciones comerciales, detecta intencion y propone proximos pasos.",
         "channels": ["whatsapp", "instagram"],
-        "tools": ["crm.update", "conversation.reply", "catalog.search", "campaigns.suggest"],
+        "tools": ["crm.update", "conversation.reply", "catalog.search", "campaigns.suggest", "media.voice_analyze", "media.vision_analyze", "media.web_image_search"],
         "goals": ["Calificar leads", "Recuperar conversaciones abiertas", "Aumentar conversion"],
         "personality": {"tone": "humano, vendedor consultivo y breve", "risk_posture": "moderado"},
         "provider_policy": {"route": "sales", "preferred": "google", "fallback": "openrouter"},
@@ -331,7 +369,7 @@ AGENT_TEMPLATES: dict[str, dict[str, Any]] = {
         "headline": "FAQs, soporte y escalacion humana.",
         "description": "Responde preguntas frecuentes usando knowledge base y escala casos sensibles.",
         "channels": ["whatsapp", "instagram"],
-        "tools": ["knowledge.search", "conversation.reply", "crm.update", "tickets.create"],
+        "tools": ["knowledge.search", "conversation.reply", "crm.update", "tickets.create", "media.voice_analyze", "media.vision_analyze", "media.web_image_search"],
         "goals": ["Resolver dudas repetidas", "Reducir tiempos de respuesta", "Escalar casos criticos"],
         "personality": {"tone": "calido, preciso y resolutivo", "risk_posture": "conservador"},
         "provider_policy": {"route": "support", "preferred": "google", "fallback": "mistral"},
@@ -421,7 +459,7 @@ AGENT_TEMPLATES: dict[str, dict[str, Any]] = {
         "headline": "RAG, politicas, documentos y FAQs.",
         "description": "Administra fuentes de conocimiento y valida respuestas contra documentos.",
         "channels": ["global"],
-        "tools": ["knowledge.search", "knowledge.audit", "rag.evaluate"],
+        "tools": ["knowledge.search", "knowledge.audit", "rag.evaluate", "media.vision_analyze", "media.web_image_search"],
         "goals": ["Mejorar base de conocimiento", "Reducir alucinaciones", "Detectar huecos de informacion"],
         "personality": {"tone": "preciso, verificable y didactico"},
         "provider_policy": {"route": "rag", "preferred": "google", "fallback": "mistral"},
@@ -546,6 +584,29 @@ AGENT_TEMPLATES: dict[str, dict[str, Any]] = {
         "personality": {"tone": "orientador, claro y motivador", "risk_posture": "conservador"},
         "provider_policy": {"route": "support", "preferred": "google", "fallback": "mistral"},
         "memory_policy": {"short_term": True, "semantic": True, "knowledge_grounded": True, "vertical_context": True},
+        "approval_policy": {"requires_human_approval": True, "can_send_messages": True, "can_update_crm": True},
+        "risk_level": "medium",
+    },
+    "teacher": {
+        "agent_type": "teacher",
+        "name": "Profesor Tutor Agent",
+        "category": "vertical_education",
+        "headline": "Tutor academico para dudas fuera de clase.",
+        "description": "Acompana estudiantes con explicaciones guiadas, ejercicios, repaso y escalacion al profesor humano cuando corresponda.",
+        "channels": ["whatsapp", "instagram", "facebook", "web"],
+        "tools": ["education.tutor", "knowledge.search", "conversation.reply", "crm.update"],
+        "goals": [
+            "Resolver dudas sobre materiales del curso",
+            "Explicar conceptos paso a paso sin hacer trampa academica",
+            "Detectar estudiantes con bloqueo y escalar al profesor",
+        ],
+        "personality": {
+            "tone": "didactico, paciente y motivador",
+            "risk_posture": "conservador",
+            "handoff_policy": "Escalar al profesor si el estudiante pide respuestas de examenes activos, calificaciones, datos sensibles o temas no cubiertos por la base de conocimiento.",
+        },
+        "provider_policy": {"route": "rag", "preferred": "google", "fallback": "mistral"},
+        "memory_policy": {"short_term": True, "semantic": True, "knowledge_grounded": True, "vertical_context": True, "collective_memory": True},
         "approval_policy": {"requires_human_approval": True, "can_send_messages": True, "can_update_crm": True},
         "risk_level": "medium",
     },
@@ -872,6 +933,70 @@ def _json_value(value: Any, fallback: Any) -> Any:
     return value
 
 
+def _default_system_prompt_template(template: dict[str, Any]) -> str:
+    goals = "\n".join(f"- {goal}" for goal in template.get("goals", []) if _clean(goal, 240))
+    tools = ", ".join(str(tool) for tool in template.get("tools", []) if tool)
+    channels = ", ".join(str(channel) for channel in template.get("channels", []) if channel)
+    return f"""
+Eres {{agent_name}}, agente IA de {{business_name}}.
+
+Rol:
+- Tipo: {template.get("agent_type") or "custom"}
+- Especialidad: {{agent_specialty}}
+- Descripcion: {{agent_description}}
+
+Objetivos base:
+{goals or "- Atender el objetivo configurado por el negocio."}
+
+Canales permitidos:
+- {channels or "configurados por el tenant"}
+
+Herramientas permitidas:
+- {tools or "configuradas por el tenant"}
+
+Contexto rellenable por el cliente:
+- Industria: {{industry}}
+- Marca/tono: {{brand_voice}}
+- Oferta principal: {{main_offer}}
+- Politicas clave: {{business_policies}}
+- Limites de escalacion: {{handoff_rules}}
+
+Reglas obligatorias:
+1. Responde solo dentro de tus canales, herramientas y permisos.
+2. Si falta informacion, pregunta brevemente; no inventes precios, disponibilidad, politicas ni promesas.
+3. Usa la base de conocimiento y el CRM cuando existan datos relevantes.
+4. Si el caso toca pagos, quejas, datos sensibles, salud, legal, seguros o decisiones reguladas, escala segun {{handoff_rules}}.
+5. Mantén una sola voz de IA: si esta conversacion te fue asignada, tu eres el agente responsable.
+""".strip()
+
+
+def _default_system_prompt_variables(template: dict[str, Any], *, name: str = "", description: str = "") -> dict[str, Any]:
+    return {
+        "agent_name": name or template.get("name") or "Custom Agent",
+        "business_name": "la empresa",
+        "agent_specialty": template.get("headline") or template.get("category") or "atencion al cliente",
+        "agent_description": description or template.get("description") or "",
+        "industry": template.get("category") or "general",
+        "brand_voice": _json_value(template.get("personality"), {}).get("tone", "humano, claro y profesional"),
+        "main_offer": "oferta configurada por el cliente",
+        "business_policies": "politicas cargadas en Knowledge Base o CRM",
+        "handoff_rules": _json_value(template.get("personality"), {}).get(
+            "handoff_policy",
+            "escalar a un humano ante dudas sensibles, pagos, quejas o informacion insuficiente",
+        ),
+    }
+
+
+def _render_system_prompt(template_text: str, variables: dict[str, Any]) -> str:
+    rendered = _clean(template_text, 20000)
+    safe_variables = variables if isinstance(variables, dict) else {}
+    for key, value in safe_variables.items():
+        token = "{" + _clean(key, 80) + "}"
+        if token != "{}":
+            rendered = rendered.replace(token, _clean(value, 1200))
+    return _clean(rendered, 20000)
+
+
 def _normalize_agent_type(value: str) -> str:
     clean = _clean(value, 80).lower().replace("-", "_").replace(" ", "_")
     if clean not in AGENT_TEMPLATES:
@@ -887,6 +1012,21 @@ def _normalize_status(value: str) -> str:
 
 
 def _ensure_tables(conn: Connection) -> None:
+    global _AGENT_TABLES_ENSURED
+    if _AGENT_TABLES_ENSURED:
+        return
+    with _AGENT_TABLES_LOCK:
+        if _AGENT_TABLES_ENSURED:
+            return
+        try:
+            conn.execute(text("SELECT pg_advisory_xact_lock(:lock_id)"), {"lock_id": _AGENT_TABLES_ADVISORY_LOCK_ID})
+        except Exception:
+            pass
+        _ensure_tables_unlocked(conn)
+        _AGENT_TABLES_ENSURED = True
+
+
+def _ensure_tables_unlocked(conn: Connection) -> None:
     try:
         with conn.begin_nested():
             conn.execute(text("CREATE EXTENSION IF NOT EXISTS pgcrypto"))
@@ -946,6 +1086,13 @@ def _ensure_tables(conn: Connection) -> None:
                 memory_policy_json JSONB NOT NULL DEFAULT '{}'::jsonb,
                 approval_policy_json JSONB NOT NULL DEFAULT '{}'::jsonb,
                 metrics_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                is_custom BOOLEAN NOT NULL DEFAULT FALSE,
+                base_template_type TEXT NOT NULL DEFAULT '',
+                system_prompt_template TEXT NOT NULL DEFAULT '',
+                system_prompt_variables_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                system_prompt_rendered TEXT NOT NULL DEFAULT '',
+                last_preflight_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                last_preflight_at TIMESTAMP NULL,
                 created_by_user_id UUID NULL REFERENCES saas_users(id) ON DELETE SET NULL,
                 created_at TIMESTAMP NOT NULL DEFAULT NOW(),
                 updated_at TIMESTAMP NOT NULL DEFAULT NOW()
@@ -971,6 +1118,13 @@ def _ensure_tables(conn: Connection) -> None:
               ADD COLUMN IF NOT EXISTS memory_policy_json JSONB NOT NULL DEFAULT '{}'::jsonb,
               ADD COLUMN IF NOT EXISTS approval_policy_json JSONB NOT NULL DEFAULT '{}'::jsonb,
               ADD COLUMN IF NOT EXISTS metrics_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+              ADD COLUMN IF NOT EXISTS is_custom BOOLEAN NOT NULL DEFAULT FALSE,
+              ADD COLUMN IF NOT EXISTS base_template_type TEXT NOT NULL DEFAULT '',
+              ADD COLUMN IF NOT EXISTS system_prompt_template TEXT NOT NULL DEFAULT '',
+              ADD COLUMN IF NOT EXISTS system_prompt_variables_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+              ADD COLUMN IF NOT EXISTS system_prompt_rendered TEXT NOT NULL DEFAULT '',
+              ADD COLUMN IF NOT EXISTS last_preflight_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+              ADD COLUMN IF NOT EXISTS last_preflight_at TIMESTAMP NULL,
               ADD COLUMN IF NOT EXISTS created_by_user_id UUID NULL,
               ADD COLUMN IF NOT EXISTS created_at TIMESTAMP NOT NULL DEFAULT NOW(),
               ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP NOT NULL DEFAULT NOW()
@@ -996,6 +1150,14 @@ def _ensure_tables(conn: Connection) -> None:
             """
             CREATE INDEX IF NOT EXISTS idx_saas_ai_agents_tenant_status
             ON saas_ai_agents (tenant_id, status, updated_at DESC)
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_saas_ai_agents_custom_status
+            ON saas_ai_agents (tenant_id, is_custom, status, updated_at DESC)
             """
         )
     )
@@ -1064,7 +1226,211 @@ def _ensure_tables(conn: Connection) -> None:
             """
         )
     )
+    conn.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS saas_ai_agent_evals (
+                id UUID PRIMARY KEY,
+                tenant_id UUID NOT NULL REFERENCES saas_tenants(id) ON DELETE CASCADE,
+                agent_id UUID NOT NULL REFERENCES saas_ai_agents(id) ON DELETE CASCADE,
+                eval_type TEXT NOT NULL DEFAULT 'preflight',
+                source TEXT NOT NULL DEFAULT 'system',
+                score INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'pending',
+                checks_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+                metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_saas_ai_agent_evals_agent_created
+            ON saas_ai_agent_evals (tenant_id, agent_id, created_at DESC)
+            """
+        )
+    )
     _seed_plan_limits(conn)
+
+
+def _ensure_conversation_agent_columns(conn: Connection) -> None:
+    conn.execute(
+        text(
+            """
+            ALTER TABLE saas_conversations
+              ADD COLUMN IF NOT EXISTS assigned_ai_agent_id UUID NULL REFERENCES saas_ai_agents(id) ON DELETE SET NULL,
+              ADD COLUMN IF NOT EXISTS ai_owner_mode TEXT NOT NULL DEFAULT 'general',
+              ADD COLUMN IF NOT EXISTS ai_owner_locked_at TIMESTAMP NULL
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_saas_conversations_ai_agent
+            ON saas_conversations (tenant_id, assigned_ai_agent_id, updated_at DESC)
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_saas_conversations_ai_owner_mode
+            ON saas_conversations (tenant_id, ai_owner_mode, updated_at DESC)
+            """
+        )
+    )
+
+
+def _ensure_governance_tables(conn: Connection) -> None:
+    _ensure_tables(conn)
+    conn.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS saas_ai_agent_collective_memory (
+                id UUID PRIMARY KEY,
+                tenant_id UUID NOT NULL REFERENCES saas_tenants(id) ON DELETE CASCADE,
+                source_agent_id UUID NULL REFERENCES saas_ai_agents(id) ON DELETE SET NULL,
+                source_agent_type TEXT NOT NULL DEFAULT '',
+                memory_scope TEXT NOT NULL DEFAULT 'tenant',
+                memory_type TEXT NOT NULL DEFAULT 'fact',
+                title TEXT NOT NULL DEFAULT '',
+                content TEXT NOT NULL DEFAULT '',
+                confidence_score INTEGER NOT NULL DEFAULT 80,
+                visibility TEXT NOT NULL DEFAULT 'agents',
+                tags_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+                created_by_user_id UUID NULL REFERENCES saas_users(id) ON DELETE SET NULL,
+                expires_at TIMESTAMP NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_saas_ai_agent_collective_memory_tenant_updated
+            ON saas_ai_agent_collective_memory (tenant_id, updated_at DESC)
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_saas_ai_agent_collective_memory_type
+            ON saas_ai_agent_collective_memory (tenant_id, memory_type, updated_at DESC)
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS saas_ai_agent_prompt_versions (
+                id UUID PRIMARY KEY,
+                tenant_id UUID NOT NULL REFERENCES saas_tenants(id) ON DELETE CASCADE,
+                agent_id UUID NULL REFERENCES saas_ai_agents(id) ON DELETE CASCADE,
+                agent_type TEXT NOT NULL DEFAULT '',
+                version_label TEXT NOT NULL DEFAULT '',
+                prompt_text TEXT NOT NULL DEFAULT '',
+                variables_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                status TEXT NOT NULL DEFAULT 'draft',
+                is_active BOOLEAN NOT NULL DEFAULT FALSE,
+                created_by_user_id UUID NULL REFERENCES saas_users(id) ON DELETE SET NULL,
+                activated_at TIMESTAMP NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_saas_ai_agent_prompt_versions_tenant_agent
+            ON saas_ai_agent_prompt_versions (tenant_id, agent_id, updated_at DESC)
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS saas_ai_agent_tool_approvals (
+                id UUID PRIMARY KEY,
+                tenant_id UUID NOT NULL REFERENCES saas_tenants(id) ON DELETE CASCADE,
+                agent_id UUID NULL REFERENCES saas_ai_agents(id) ON DELETE SET NULL,
+                tool_code TEXT NOT NULL DEFAULT '',
+                action_type TEXT NOT NULL DEFAULT '',
+                target_module TEXT NOT NULL DEFAULT '',
+                requested_payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                risk_level TEXT NOT NULL DEFAULT 'medium',
+                status TEXT NOT NULL DEFAULT 'pending',
+                requested_by_user_id UUID NULL REFERENCES saas_users(id) ON DELETE SET NULL,
+                decided_by_user_id UUID NULL REFERENCES saas_users(id) ON DELETE SET NULL,
+                decision_note TEXT NOT NULL DEFAULT '',
+                decided_at TIMESTAMP NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_saas_ai_agent_tool_approvals_tenant_status
+            ON saas_ai_agent_tool_approvals (tenant_id, status, updated_at DESC)
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS saas_ai_agent_budget_policies (
+                id UUID PRIMARY KEY,
+                tenant_id UUID NOT NULL REFERENCES saas_tenants(id) ON DELETE CASCADE,
+                agent_id UUID NOT NULL REFERENCES saas_ai_agents(id) ON DELETE CASCADE,
+                monthly_token_budget INTEGER NOT NULL DEFAULT 250000,
+                monthly_cost_cents INTEGER NOT NULL DEFAULT 2000,
+                hard_stop BOOLEAN NOT NULL DEFAULT FALSE,
+                warning_threshold_pct INTEGER NOT NULL DEFAULT 80,
+                updated_by_user_id UUID NULL REFERENCES saas_users(id) ON DELETE SET NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                UNIQUE (tenant_id, agent_id)
+            )
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS saas_ai_agent_coordination_events (
+                id UUID PRIMARY KEY,
+                tenant_id UUID NOT NULL REFERENCES saas_tenants(id) ON DELETE CASCADE,
+                source_agent_id UUID NULL REFERENCES saas_ai_agents(id) ON DELETE SET NULL,
+                target_agent_id UUID NULL REFERENCES saas_ai_agents(id) ON DELETE SET NULL,
+                event_type TEXT NOT NULL DEFAULT 'coordination.note',
+                summary TEXT NOT NULL DEFAULT '',
+                payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                status TEXT NOT NULL DEFAULT 'open',
+                created_by_user_id UUID NULL REFERENCES saas_users(id) ON DELETE SET NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+    )
+    conn.execute(
+        text(
+            """
+            CREATE INDEX IF NOT EXISTS idx_saas_ai_agent_coordination_events_tenant_created
+            ON saas_ai_agent_coordination_events (tenant_id, created_at DESC)
+            """
+        )
+    )
 
 
 def _seed_plan_limits(conn: Connection) -> None:
@@ -1211,7 +1577,15 @@ def agent_counts(conn: Connection, tenant_id: str) -> dict[str, int]:
 
 
 def list_templates() -> list[dict[str, Any]]:
-    return [dict(template) for template in AGENT_TEMPLATES.values()]
+    enriched: list[dict[str, Any]] = []
+    for template in AGENT_TEMPLATES.values():
+        item = dict(template)
+        prompt_template = item.get("system_prompt_template") or _default_system_prompt_template(item)
+        item["system_prompt_template"] = prompt_template
+        item["system_prompt_variables_json"] = _default_system_prompt_variables(item)
+        item["is_custom"] = bool(item.get("is_custom")) or item.get("agent_type") == "custom"
+        enriched.append(item)
+    return enriched
 
 
 def builder_catalog() -> dict[str, Any]:
@@ -1225,36 +1599,486 @@ def builder_catalog() -> dict[str, Any]:
         "action_draft_presets": ACTION_DRAFT_PRESETS,
         "industry_policy_presets": INDUSTRY_POLICY_PRESETS,
         "budget_defaults": BUDGET_DEFAULTS,
+        "system_prompt_variables": list(_default_system_prompt_variables(AGENT_TEMPLATES["custom"]).keys()),
     }
 
 
-def runtime_agent_for_conversation(conn: Connection, tenant_id: str, channel: str) -> dict[str, Any] | None:
+def _collective_memory_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(row.get("id") or ""),
+        "tenant_id": str(row.get("tenant_id") or ""),
+        "source_agent_id": str(row.get("source_agent_id") or ""),
+        "source_agent_type": str(row.get("source_agent_type") or ""),
+        "memory_scope": str(row.get("memory_scope") or "tenant"),
+        "memory_type": str(row.get("memory_type") or "fact"),
+        "title": str(row.get("title") or ""),
+        "content": str(row.get("content") or ""),
+        "confidence_score": int(row.get("confidence_score") or 0),
+        "visibility": str(row.get("visibility") or "agents"),
+        "tags_json": _json_value(row.get("tags_json"), []),
+        "created_by_user_id": str(row.get("created_by_user_id") or ""),
+        "expires_at": str(row.get("expires_at") or ""),
+        "created_at": str(row.get("created_at") or ""),
+        "updated_at": str(row.get("updated_at") or ""),
+    }
+
+
+def list_collective_memory(conn: Connection, tenant_id: str, limit: int = 80) -> list[dict[str, Any]]:
+    _ensure_governance_tables(conn)
+    rows = conn.execute(
+        text(
+            """
+            SELECT id::text, tenant_id::text, source_agent_id::text, source_agent_type,
+                   memory_scope, memory_type, title, content, confidence_score, visibility,
+                   tags_json, created_by_user_id::text, expires_at::text, created_at::text, updated_at::text
+            FROM saas_ai_agent_collective_memory
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND (expires_at IS NULL OR expires_at > NOW())
+            ORDER BY updated_at DESC
+            LIMIT :limit
+            """
+        ),
+        {"tenant_id": tenant_id, "limit": max(1, min(int(limit or 80), 200))},
+    ).mappings().all()
+    return [_collective_memory_row(dict(row)) for row in rows]
+
+
+def create_collective_memory(
+    conn: Connection,
+    tenant_id: str,
+    user_id: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    _ensure_governance_tables(conn)
+    title = _clean(payload.get("title"), 180)
+    content = _clean(payload.get("content"), 4000)
+    if not title or not content:
+        raise HTTPException(status_code=400, detail={"code": "collective_memory_requires_title_content"})
+    source_agent_id = _clean(payload.get("source_agent_id"), 80)
+    source_agent_type = _clean(payload.get("source_agent_type"), 80).lower()
+    if source_agent_id:
+        agent = get_agent(conn, tenant_id, source_agent_id)
+        source_agent_type = agent.get("agent_type") or source_agent_type
+    memory_type = _clean(payload.get("memory_type"), 40).lower() or "fact"
+    if memory_type not in {"fact", "decision", "constraint", "insight", "handoff", "risk", "preference"}:
+        memory_type = "fact"
+    memory_scope = _clean(payload.get("memory_scope"), 40).lower() or "tenant"
+    if memory_scope not in {"tenant", "channel", "workflow", "customer_segment"}:
+        memory_scope = "tenant"
+    visibility = _clean(payload.get("visibility"), 40).lower() or "agents"
+    if visibility not in {"agents", "admins", "advisor_only"}:
+        visibility = "agents"
+    confidence_score = max(0, min(100, int(payload.get("confidence_score") or 80)))
+    tags = payload.get("tags_json") if isinstance(payload.get("tags_json"), list) else []
+    row = conn.execute(
+        text(
+            """
+            INSERT INTO saas_ai_agent_collective_memory (
+                id, tenant_id, source_agent_id, source_agent_type, memory_scope, memory_type,
+                title, content, confidence_score, visibility, tags_json, created_by_user_id, updated_at
+            )
+            VALUES (
+                CAST(:id AS uuid),
+                CAST(:tenant_id AS uuid),
+                CAST(NULLIF(:source_agent_id, '') AS uuid),
+                :source_agent_type,
+                :memory_scope,
+                :memory_type,
+                :title,
+                :content,
+                :confidence_score,
+                :visibility,
+                CAST(:tags_json AS jsonb),
+                CAST(NULLIF(:user_id, '') AS uuid),
+                NOW()
+            )
+            RETURNING id::text, tenant_id::text, source_agent_id::text, source_agent_type,
+                      memory_scope, memory_type, title, content, confidence_score, visibility,
+                      tags_json, created_by_user_id::text, expires_at::text, created_at::text, updated_at::text
+            """
+        ),
+        {
+            "id": _uuid(),
+            "tenant_id": tenant_id,
+            "source_agent_id": source_agent_id,
+            "source_agent_type": source_agent_type,
+            "memory_scope": memory_scope,
+            "memory_type": memory_type,
+            "title": title,
+            "content": content,
+            "confidence_score": confidence_score,
+            "visibility": visibility,
+            "tags_json": _json([_clean(item, 40).lower() for item in tags if _clean(item, 40)]),
+            "user_id": user_id or "",
+        },
+    ).mappings().first()
+    memory = _collective_memory_row(dict(row))
+    _audit(
+        conn,
+        tenant_id=tenant_id,
+        agent_id=source_agent_id or None,
+        actor_user_id=user_id,
+        event_type="agent.collective_memory_created",
+        summary=f"Memoria colectiva registrada: {memory['title']}.",
+        details={"memory_id": memory["id"], "memory_type": memory_type, "memory_scope": memory_scope},
+    )
+    return memory
+
+
+def delete_collective_memory(conn: Connection, tenant_id: str, user_id: str, memory_id: str) -> dict[str, Any]:
+    _ensure_governance_tables(conn)
+    row = conn.execute(
+        text(
+            """
+            DELETE FROM saas_ai_agent_collective_memory
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND id = CAST(:memory_id AS uuid)
+            RETURNING id::text, tenant_id::text, source_agent_id::text, source_agent_type,
+                      memory_scope, memory_type, title, content, confidence_score, visibility,
+                      tags_json, created_by_user_id::text, expires_at::text, created_at::text, updated_at::text
+            """
+        ),
+        {"tenant_id": tenant_id, "memory_id": memory_id},
+    ).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="collective_memory_not_found")
+    memory = _collective_memory_row(dict(row))
+    _audit(
+        conn,
+        tenant_id=tenant_id,
+        agent_id=memory.get("source_agent_id") or None,
+        actor_user_id=user_id,
+        event_type="agent.collective_memory_deleted",
+        summary=f"Memoria colectiva eliminada: {memory['title']}.",
+        details={"memory_id": memory["id"]},
+    )
+    return memory
+
+
+def list_tool_approvals(conn: Connection, tenant_id: str, limit: int = 30) -> list[dict[str, Any]]:
+    _ensure_governance_tables(conn)
+    rows = conn.execute(
+        text(
+            """
+            SELECT id::text, tenant_id::text, agent_id::text, tool_code, action_type,
+                   target_module, requested_payload_json, risk_level, status,
+                   requested_by_user_id::text, decided_by_user_id::text, decision_note,
+                   decided_at::text, created_at::text, updated_at::text
+            FROM saas_ai_agent_tool_approvals
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+            ORDER BY updated_at DESC
+            LIMIT :limit
+            """
+        ),
+        {"tenant_id": tenant_id, "limit": max(1, min(int(limit or 30), 100))},
+    ).mappings().all()
+    return [
+        {
+            **dict(row),
+            "requested_payload_json": _json_value(row.get("requested_payload_json"), {}),
+        }
+        for row in rows
+    ]
+
+
+def list_prompt_versions(conn: Connection, tenant_id: str, limit: int = 30) -> list[dict[str, Any]]:
+    _ensure_governance_tables(conn)
+    rows = conn.execute(
+        text(
+            """
+            SELECT id::text, tenant_id::text, agent_id::text, agent_type, version_label,
+                   LEFT(prompt_text, 260) AS prompt_preview, variables_json, status, is_active,
+                   created_by_user_id::text, activated_at::text, created_at::text, updated_at::text
+            FROM saas_ai_agent_prompt_versions
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+            ORDER BY updated_at DESC
+            LIMIT :limit
+            """
+        ),
+        {"tenant_id": tenant_id, "limit": max(1, min(int(limit or 30), 100))},
+    ).mappings().all()
+    return [
+        {
+            **dict(row),
+            "variables_json": _json_value(row.get("variables_json"), {}),
+        }
+        for row in rows
+    ]
+
+
+def create_prompt_version(
+    conn: Connection,
+    tenant_id: str,
+    user_id: str,
+    agent_id: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    _ensure_governance_tables(conn)
+    agent = get_agent(conn, tenant_id, agent_id)
+    prompt_text = _clean(payload.get("prompt_text"), 12000)
+    if not prompt_text:
+        raise HTTPException(status_code=400, detail={"code": "prompt_text_required"})
+    row = conn.execute(
+        text(
+            """
+            INSERT INTO saas_ai_agent_prompt_versions (
+                id, tenant_id, agent_id, agent_type, version_label, prompt_text,
+                variables_json, status, is_active, created_by_user_id, updated_at
+            )
+            VALUES (
+                CAST(:id AS uuid), CAST(:tenant_id AS uuid), CAST(:agent_id AS uuid), :agent_type,
+                :version_label, :prompt_text, CAST(:variables_json AS jsonb), 'draft', FALSE,
+                CAST(NULLIF(:user_id, '') AS uuid), NOW()
+            )
+            RETURNING id::text, tenant_id::text, agent_id::text, agent_type, version_label,
+                      LEFT(prompt_text, 260) AS prompt_preview, variables_json, status, is_active,
+                      created_by_user_id::text, activated_at::text, created_at::text, updated_at::text
+            """
+        ),
+        {
+            "id": _uuid(),
+            "tenant_id": tenant_id,
+            "agent_id": agent_id,
+            "agent_type": agent.get("agent_type") or "",
+            "version_label": _clean(payload.get("version_label"), 120) or "Draft prompt",
+            "prompt_text": prompt_text,
+            "variables_json": _json(payload.get("variables_json") if isinstance(payload.get("variables_json"), dict) else {}),
+            "user_id": user_id or "",
+        },
+    ).mappings().first()
+    _audit(
+        conn,
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        actor_user_id=user_id,
+        event_type="agent.prompt_version_created",
+        summary=f"Version de prompt creada para {agent['name']}.",
+        details={"prompt_version_id": str(row.get("id") or "")},
+    )
+    return {**dict(row), "variables_json": _json_value(row.get("variables_json"), {})}
+
+
+def collective_memory_context(conn: Connection, tenant_id: str, agent_id: str = "", limit: int = 8) -> str:
+    _ensure_governance_tables(conn)
+    rows = conn.execute(
+        text(
+            """
+            SELECT source_agent_id::text, source_agent_type, memory_type, title, content,
+                   confidence_score, tags_json, updated_at::text
+            FROM saas_ai_agent_collective_memory
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND visibility IN ('agents', 'admins')
+              AND (expires_at IS NULL OR expires_at > NOW())
+            ORDER BY
+              CASE WHEN source_agent_id = CAST(NULLIF(:agent_id, '') AS uuid) THEN 0 ELSE 1 END,
+              confidence_score DESC,
+              updated_at DESC
+            LIMIT :limit
+            """
+        ),
+        {"tenant_id": tenant_id, "agent_id": agent_id or "", "limit": max(1, min(int(limit or 8), 20))},
+    ).mappings().all()
+    lines: list[str] = []
+    for row in rows:
+        title = _clean(row.get("title"), 160)
+        content = _clean(row.get("content"), 800)
+        if title or content:
+            prefix = f"- [{_clean(row.get('memory_type'), 40) or 'fact'} / {int(row.get('confidence_score') or 0)}]"
+            lines.append(f"{prefix} {title}: {content}".strip())
+    return "\n".join(lines)
+
+
+def agent_phase6_overview(conn: Connection, tenant_id: str) -> dict[str, Any]:
+    _ensure_governance_tables(conn)
+    counts = conn.execute(
+        text(
+            """
+            SELECT
+              (SELECT COUNT(*)::int FROM saas_ai_agent_collective_memory WHERE tenant_id = CAST(:tenant_id AS uuid)) AS collective_memories,
+              (SELECT COUNT(*)::int FROM saas_ai_agent_tool_approvals WHERE tenant_id = CAST(:tenant_id AS uuid) AND status = 'pending') AS pending_approvals,
+              (SELECT COUNT(*)::int FROM saas_ai_agent_prompt_versions WHERE tenant_id = CAST(:tenant_id AS uuid)) AS prompt_versions,
+              (SELECT COUNT(*)::int FROM saas_ai_agent_coordination_events WHERE tenant_id = CAST(:tenant_id AS uuid) AND created_at >= NOW() - INTERVAL '7 days') AS coordination_events_7d
+            """
+        ),
+        {"tenant_id": tenant_id},
+    ).mappings().first()
+    return {
+        "counts": {key: int(value or 0) for key, value in dict(counts or {}).items()},
+        "collective_memory": list_collective_memory(conn, tenant_id, limit=40),
+        "tool_approvals": list_tool_approvals(conn, tenant_id, limit=20),
+        "prompt_versions": list_prompt_versions(conn, tenant_id, limit=20),
+        "orchestrator": {
+            "status": "runtime_enabled",
+            "mode": "queue_locks_handoffs_collective_memory",
+            "next_phase": "conectar el runtime de cada agente para ejecutar acciones aprobadas y leer memoria colectiva con ranking",
+            "guardrails": [
+                "tenant_isolation",
+                "human_approval_for_sensitive_actions",
+                "source_agent_traceability",
+                "ttl_and_confidence_for_shared_memories",
+            ],
+        },
+    }
+
+
+def _agent_channel_match(agent: dict[str, Any], channel: str) -> bool:
+    channels = {str(value or "").strip().lower() for value in _json_value(agent.get("channels_json"), [])}
+    return not channels or channel in channels or "global" in channels
+
+
+def _runtime_agent_score(agent: dict[str, Any], channel: str, conversation: dict[str, Any] | None) -> int:
+    if not _agent_channel_match(agent, channel):
+        return -1
+    tools = {str(item or "").strip().lower() for item in _json_value(agent.get("tools_json"), [])}
+    if tools and "conversation.reply" not in tools:
+        return -1
+    agent_type = str(agent.get("agent_type") or "").lower()
+    text_value = " ".join(
+        str((conversation or {}).get(key) or "").lower()
+        for key in ("last_message_text", "tags", "interests", "crm_stage", "intent", "customer_type", "notes")
+    )
+    score = 20
+    score += {
+        "sales": 40,
+        "support": 36,
+        "restaurant_reservations": 34,
+        "restaurant_menu": 32,
+        "hotel_booking": 32,
+        "appointment_scheduler": 32,
+        "real_estate_leads": 32,
+        "education_admissions": 30,
+        "teacher": 30,
+        "beauty_booking": 30,
+        "custom": 28,
+        "retention": 24,
+    }.get(agent_type, 8)
+    if any(word in text_value for word in ("precio", "compr", "cotiz", "pago", "disponible", "reserva", "agenda", "cita")):
+        score += 12 if agent_type not in {"support", "knowledge"} else 4
+    if any(word in text_value for word in ("problema", "ayuda", "error", "queja", "no funciona", "soporte")):
+        score += 14 if agent_type in {"support", "operations", "custom"} else 2
+    if any(word in text_value for word in ("menu", "plato", "alerg", "mesa", "restaurante")):
+        score += 16 if agent_type.startswith("restaurant_") else 0
+    if any(word in text_value for word in ("habitacion", "hotel", "huesped", "check in", "reserva")):
+        score += 16 if agent_type.startswith("hotel_") else 0
+    if any(word in text_value for word in ("inmueble", "apartamento", "casa", "arriendo", "compra vivienda")):
+        score += 16 if agent_type == "real_estate_leads" else 0
+    if any(word in text_value for word in ("clase", "curso", "estudiante", "tarea", "admision")):
+        score += 16 if agent_type in {"teacher", "education_admissions"} else 0
+    if agent_type == "advisor":
+        score -= 15
+    return score
+
+
+def assign_conversation_ai_agent(
+    conn: Connection,
+    tenant_id: str,
+    conversation_id: str,
+    agent_id: str = "",
+    *,
+    source: str = "manual",
+    user_id: str = "",
+) -> dict[str, Any]:
     _ensure_tables(conn)
+    _ensure_conversation_agent_columns(conn)
+    clean_agent_id = _clean(agent_id, 80)
+    agent: dict[str, Any] | None = None
+    if clean_agent_id:
+        agent = get_agent(conn, tenant_id, clean_agent_id)
+        if agent.get("status") != "active":
+            raise HTTPException(status_code=409, detail={"code": "ai_agent_not_active", "agent_id": clean_agent_id})
+    row = conn.execute(
+        text(
+            """
+            UPDATE saas_conversations
+            SET assigned_ai_agent_id = CAST(NULLIF(:agent_id, '') AS uuid),
+                ai_owner_mode = CASE WHEN :agent_id = '' THEN 'general' ELSE 'agent' END,
+                ai_owner_locked_at = CASE WHEN :agent_id = '' THEN NULL ELSE NOW() END,
+                updated_at = NOW()
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND id = CAST(:conversation_id AS uuid)
+            RETURNING id::text, assigned_ai_agent_id::text, ai_owner_mode, ai_owner_locked_at::text
+            """
+        ),
+        {"tenant_id": tenant_id, "conversation_id": conversation_id, "agent_id": clean_agent_id},
+    ).mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="conversation_not_found")
+    _audit(
+        conn,
+        tenant_id=tenant_id,
+        agent_id=clean_agent_id or None,
+        actor_user_id=user_id or None,
+        event_type="agent.conversation_assigned" if clean_agent_id else "agent.conversation_released",
+        summary=(
+            f"{agent['name']} asumio la conversacion." if agent else "La conversacion volvio a la IA general."
+        ),
+        details={"conversation_id": conversation_id, "source": source},
+    )
+    return {**dict(row), "assigned_ai_agent_name": (agent or {}).get("name", ""), "assigned_ai_agent_type": (agent or {}).get("agent_type", "")}
+
+
+def runtime_agent_for_conversation(
+    conn: Connection,
+    tenant_id: str,
+    channel: str,
+    conversation: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    _ensure_tables(conn)
+    _ensure_conversation_agent_columns(conn)
     clean_channel = _clean(channel, 40).lower() or "whatsapp"
+    conversation_id = _clean((conversation or {}).get("id"), 80)
+    assigned_agent_id = _clean((conversation or {}).get("assigned_ai_agent_id"), 80)
+    if assigned_agent_id:
+        row = conn.execute(
+            text(
+                """
+                SELECT id::text, tenant_id::text, agent_type, name, description, status,
+                       provider_policy_json, personality_json, goals_json, rules_json, channels_json,
+                       tools_json, memory_policy_json, approval_policy_json, metrics_json,
+                       is_custom, base_template_type, system_prompt_template,
+                       system_prompt_variables_json, system_prompt_rendered,
+                       last_preflight_json, last_preflight_at::text,
+                       created_by_user_id::text, created_at::text, updated_at::text
+                FROM saas_ai_agents
+                WHERE tenant_id = CAST(:tenant_id AS uuid)
+                  AND id = CAST(:agent_id AS uuid)
+                  AND status = 'active'
+                LIMIT 1
+                """
+            ),
+            {"tenant_id": tenant_id, "agent_id": assigned_agent_id},
+        ).mappings().first()
+        return _agent_row_to_dict(dict(row)) if row else None
+
     rows = conn.execute(
         text(
             """
             SELECT id::text, tenant_id::text, agent_type, name, description, status,
                    provider_policy_json, personality_json, goals_json, rules_json, channels_json,
                    tools_json, memory_policy_json, approval_policy_json, metrics_json,
+                   is_custom, base_template_type, system_prompt_template,
+                   system_prompt_variables_json, system_prompt_rendered,
+                   last_preflight_json, last_preflight_at::text,
                    created_by_user_id::text, created_at::text, updated_at::text
             FROM saas_ai_agents
             WHERE tenant_id = CAST(:tenant_id AS uuid)
               AND status = 'active'
-              AND agent_type IN ('sales', 'support')
             ORDER BY
-              CASE agent_type WHEN 'sales' THEN 1 WHEN 'support' THEN 2 ELSE 9 END,
+              CASE WHEN tools_json ? 'conversation.reply' THEN 0 ELSE 1 END,
               updated_at DESC
             """
         ),
         {"tenant_id": tenant_id},
     ).mappings().all()
-    for row in rows:
-        item = _agent_row_to_dict(dict(row))
-        channels = {str(value or "").strip().lower() for value in _json_value(item.get("channels_json"), [])}
-        if clean_channel in channels or "global" in channels:
-            return item
-    return None
+    candidates = [_agent_row_to_dict(dict(row)) for row in rows]
+    scored = sorted(((item, _runtime_agent_score(item, clean_channel, conversation)) for item in candidates), key=lambda pair: pair[1], reverse=True)
+    selected = scored[0][0] if scored and scored[0][1] >= 0 else None
+    if selected and conversation_id and conversation_id != "00000000-0000-0000-0000-000000000000":
+        try:
+            assign_conversation_ai_agent(conn, tenant_id, conversation_id, selected["id"], source="auto_router")
+        except Exception:
+            pass
+    return selected
 
 
 def record_agent_runtime_event(
@@ -1505,7 +2329,7 @@ def create_agent_action_draft(
             )
             VALUES (
                 CAST(:tenant_id AS uuid),
-                CASE WHEN :user_id = '' THEN NULL ELSE CAST(:user_id AS uuid) END,
+                CAST(NULLIF(:user_id, '') AS uuid),
                 :action_type,
                 :title,
                 :description,
@@ -1780,11 +2604,61 @@ def preflight_agent(conn: Connection, tenant_id: str, agent_id: str) -> dict[str
     add("budget_tokens", "Presupuesto mensual de tokens", int(budget.get("monthly_token_limit") or 0) > 0, "medium", "Define limite mensual de tokens.")
     add("budget_cost", "Presupuesto mensual de costo", float(budget.get("monthly_cost_limit_usd") or 0) > 0, "medium", "Define limite mensual estimado en USD.")
     add("human_approval", "Capa de aprobacion humana", bool(approval.get("requires_human_approval", True)), "medium", "Mantiene aprobacion humana para acciones sensibles.")
+    add(
+        "system_prompt",
+        "System prompt operativo",
+        bool(_clean(item.get("system_prompt_rendered") or item.get("system_prompt_template"), 200)),
+        "high",
+        "Completa el prompt base y sus variables antes de activar.",
+    )
 
     failed_high = sum(1 for check in checks if not check["ok"] and check["severity"] == "high")
     failed_medium = sum(1 for check in checks if not check["ok"] and check["severity"] == "medium")
     score = max(0, 100 - failed_high * 22 - failed_medium * 11 - sum(1 for check in checks if not check["ok"] and check["severity"] == "low") * 5)
     ready = failed_high == 0 and score >= 70
+    preflight = {
+        "ready": ready,
+        "score": score,
+        "checks": checks,
+        "health_score": metrics.get("health_score", 0),
+        "budget": budget,
+        "recommendation": "Puedes activar el agente." if ready else "Ajusta los checks marcados antes de activar.",
+    }
+    conn.execute(
+        text(
+            """
+            UPDATE saas_ai_agents
+            SET last_preflight_json = CAST(:preflight AS jsonb),
+                last_preflight_at = NOW(),
+                updated_at = NOW()
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND id = CAST(:agent_id AS uuid)
+            """
+        ),
+        {"tenant_id": tenant_id, "agent_id": agent_id, "preflight": _json(preflight)},
+    )
+    conn.execute(
+        text(
+            """
+            INSERT INTO saas_ai_agent_evals (
+                id, tenant_id, agent_id, eval_type, source, score, status, checks_json, metadata_json
+            )
+            VALUES (
+                CAST(:id AS uuid), CAST(:tenant_id AS uuid), CAST(:agent_id AS uuid),
+                'preflight', 'system', :score, :status, CAST(:checks AS jsonb), CAST(:metadata AS jsonb)
+            )
+            """
+        ),
+        {
+            "id": _uuid(),
+            "tenant_id": tenant_id,
+            "agent_id": agent_id,
+            "score": score,
+            "status": "passed" if ready else "blocked",
+            "checks": _json(checks),
+            "metadata": _json({"health_score": metrics.get("health_score", 0), "budget": budget}),
+        },
+    )
     _audit(
         conn,
         tenant_id=tenant_id,
@@ -1794,22 +2668,19 @@ def preflight_agent(conn: Connection, tenant_id: str, agent_id: str) -> dict[str
         summary=f"Preflight de {item['name']}: {'listo' if ready else 'requiere ajustes'}.",
         details={"score": score, "ready": ready, "failed_high": failed_high, "failed_medium": failed_medium},
     )
-    return {
-        "ready": ready,
-        "score": score,
-        "checks": checks,
-        "health_score": metrics.get("health_score", 0),
-        "budget": budget,
-        "recommendation": "Puedes activar el agente." if ready else "Ajusta los checks marcados antes de activar.",
-    }
+    return preflight
 
 
 def _template_payload(agent_type: str) -> dict[str, Any]:
     template = dict(AGENT_TEMPLATES[_normalize_agent_type(agent_type)])
+    name = template["name"]
+    description = template["description"]
+    variables = _default_system_prompt_variables(template, name=name, description=description)
+    prompt_template = template.get("system_prompt_template") or _default_system_prompt_template(template)
     return {
         "agent_type": template["agent_type"],
-        "name": template["name"],
-        "description": template["description"],
+        "name": name,
+        "description": description,
         "status": "draft",
         "provider_policy_json": template.get("provider_policy", {}),
         "personality_json": template.get("personality", {}),
@@ -1819,12 +2690,26 @@ def _template_payload(agent_type: str) -> dict[str, Any]:
         "tools_json": template.get("tools", []),
         "memory_policy_json": template.get("memory_policy", {}),
         "approval_policy_json": template.get("approval_policy", {}),
+        "is_custom": bool(template.get("is_custom")) or template["agent_type"] == "custom",
+        "base_template_type": "" if template["agent_type"] == "custom" else template["agent_type"],
+        "system_prompt_template": prompt_template,
+        "system_prompt_variables_json": variables,
+        "system_prompt_rendered": _render_system_prompt(prompt_template, variables),
         "metrics_json": {"risk_level": template.get("risk_level", "medium"), "category": template.get("category", "")},
     }
 
 
 def _agent_row_to_dict(row: dict[str, Any]) -> dict[str, Any]:
     template = AGENT_TEMPLATES.get(str(row.get("agent_type") or ""), {})
+    prompt_template = str(row.get("system_prompt_template") or "") or (_default_system_prompt_template(template) if template else "")
+    prompt_variables = _json_value(row.get("system_prompt_variables_json"), {})
+    if not isinstance(prompt_variables, dict) or not prompt_variables:
+        prompt_variables = _default_system_prompt_variables(
+            template,
+            name=str(row.get("name") or ""),
+            description=str(row.get("description") or ""),
+        ) if template else {}
+    rendered_prompt = str(row.get("system_prompt_rendered") or "") or _render_system_prompt(prompt_template, prompt_variables)
     return {
         "id": str(row.get("id") or ""),
         "tenant_id": str(row.get("tenant_id") or ""),
@@ -1843,6 +2728,13 @@ def _agent_row_to_dict(row: dict[str, Any]) -> dict[str, Any]:
         "memory_policy_json": _json_value(row.get("memory_policy_json"), {}),
         "approval_policy_json": _json_value(row.get("approval_policy_json"), {}),
         "metrics_json": _json_value(row.get("metrics_json"), {}),
+        "is_custom": bool(row.get("is_custom")) or str(row.get("agent_type") or "") == "custom",
+        "base_template_type": str(row.get("base_template_type") or ""),
+        "system_prompt_template": prompt_template,
+        "system_prompt_variables_json": prompt_variables,
+        "system_prompt_rendered": rendered_prompt,
+        "last_preflight_json": _json_value(row.get("last_preflight_json"), {}),
+        "last_preflight_at": str(row.get("last_preflight_at") or ""),
         "created_by_user_id": str(row.get("created_by_user_id") or ""),
         "created_at": str(row.get("created_at") or ""),
         "updated_at": str(row.get("updated_at") or ""),
@@ -1869,8 +2761,8 @@ def _audit(
             VALUES (
                 CAST(:id AS uuid),
                 CAST(:tenant_id AS uuid),
-                CASE WHEN :agent_id = '' THEN NULL ELSE CAST(:agent_id AS uuid) END,
-                CASE WHEN :actor_user_id = '' THEN NULL ELSE CAST(:actor_user_id AS uuid) END,
+                CAST(NULLIF(:agent_id, '') AS uuid),
+                CAST(NULLIF(:actor_user_id, '') AS uuid),
                 :event_type,
                 :summary,
                 CAST(:details AS jsonb)
@@ -1897,6 +2789,9 @@ def ensure_default_advisor_agent(conn: Connection, tenant_id: str, user_id: str 
             SELECT id::text, tenant_id::text, agent_type, name, description, status,
                    provider_policy_json, personality_json, goals_json, rules_json, channels_json,
                    tools_json, memory_policy_json, approval_policy_json, metrics_json,
+                   is_custom, base_template_type, system_prompt_template,
+                   system_prompt_variables_json, system_prompt_rendered,
+                   last_preflight_json, last_preflight_at::text,
                    created_by_user_id::text, created_at::text, updated_at::text
             FROM saas_ai_agents
             WHERE tenant_id = CAST(:tenant_id AS uuid)
@@ -1967,6 +2862,15 @@ def _insert_agent(
     name = _clean(merged.get("name"), 160) or template["name"]
     description = _clean(merged.get("description"), 1200) or template["description"]
     status = _normalize_status(str(merged.get("status") or "draft"))
+    is_custom = bool(merged.get("is_custom")) or agent_type == "custom"
+    base_template_type = _clean(merged.get("base_template_type"), 80) or ("" if is_custom else agent_type)
+    prompt_template = _clean(merged.get("system_prompt_template") or template.get("system_prompt_template"), 12000)
+    if not prompt_template:
+        prompt_template = _default_system_prompt_template(AGENT_TEMPLATES[agent_type])
+    prompt_variables = _json_value(merged.get("system_prompt_variables_json"), {})
+    if not isinstance(prompt_variables, dict) or not prompt_variables:
+        prompt_variables = _default_system_prompt_variables(AGENT_TEMPLATES[agent_type], name=name, description=description)
+    rendered_prompt = _clean(merged.get("system_prompt_rendered"), 20000) or _render_system_prompt(prompt_template, prompt_variables)
     if status == "active":
         _assert_activation_allowed(conn, tenant_id, "")
     try:
@@ -1976,7 +2880,9 @@ def _insert_agent(
                 INSERT INTO saas_ai_agents (
                     id, tenant_id, agent_type, name, description, status, provider_policy_json,
                     personality_json, goals_json, rules_json, channels_json, tools_json,
-                    memory_policy_json, approval_policy_json, metrics_json, created_by_user_id, updated_at
+                    memory_policy_json, approval_policy_json, metrics_json, is_custom,
+                    base_template_type, system_prompt_template, system_prompt_variables_json,
+                    system_prompt_rendered, created_by_user_id, updated_at
                 )
                 VALUES (
                     CAST(:id AS uuid), CAST(:tenant_id AS uuid), :agent_type, :name, :description, :status,
@@ -1989,12 +2895,20 @@ def _insert_agent(
                     CAST(:memory_policy_json AS jsonb),
                     CAST(:approval_policy_json AS jsonb),
                     CAST(:metrics_json AS jsonb),
-                    CASE WHEN :user_id = '' THEN NULL ELSE CAST(:user_id AS uuid) END,
+                    :is_custom,
+                    :base_template_type,
+                    :system_prompt_template,
+                    CAST(:system_prompt_variables_json AS jsonb),
+                    :system_prompt_rendered,
+                    CAST(NULLIF(:user_id, '') AS uuid),
                     NOW()
                 )
                 RETURNING id::text, tenant_id::text, agent_type, name, description, status,
                           provider_policy_json, personality_json, goals_json, rules_json, channels_json,
                           tools_json, memory_policy_json, approval_policy_json, metrics_json,
+                          is_custom, base_template_type, system_prompt_template,
+                          system_prompt_variables_json, system_prompt_rendered,
+                          last_preflight_json, last_preflight_at::text,
                           created_by_user_id::text, created_at::text, updated_at::text
                 """
             ),
@@ -2014,6 +2928,11 @@ def _insert_agent(
                 "memory_policy_json": _json(merged.get("memory_policy_json") or merged.get("memory_policy") or {}),
                 "approval_policy_json": _json(merged.get("approval_policy_json") or merged.get("approval_policy") or {}),
                 "metrics_json": _json(merged.get("metrics_json") or {}),
+                "is_custom": is_custom,
+                "base_template_type": base_template_type,
+                "system_prompt_template": prompt_template,
+                "system_prompt_variables_json": _json(prompt_variables),
+                "system_prompt_rendered": rendered_prompt,
                 "user_id": user_id or "",
             },
         ).mappings().first()
@@ -2061,6 +2980,9 @@ def list_agents(conn: Connection, tenant_id: str, *, include_archived: bool = Fa
             SELECT id::text, tenant_id::text, agent_type, name, description, status,
                    provider_policy_json, personality_json, goals_json, rules_json, channels_json,
                    tools_json, memory_policy_json, approval_policy_json, metrics_json,
+                   is_custom, base_template_type, system_prompt_template,
+                   system_prompt_variables_json, system_prompt_rendered,
+                   last_preflight_json, last_preflight_at::text,
                    created_by_user_id::text, created_at::text, updated_at::text
             FROM saas_ai_agents
             WHERE tenant_id = CAST(:tenant_id AS uuid)
@@ -2083,6 +3005,9 @@ def get_agent(conn: Connection, tenant_id: str, agent_id: str) -> dict[str, Any]
             SELECT id::text, tenant_id::text, agent_type, name, description, status,
                    provider_policy_json, personality_json, goals_json, rules_json, channels_json,
                    tools_json, memory_policy_json, approval_policy_json, metrics_json,
+                   is_custom, base_template_type, system_prompt_template,
+                   system_prompt_variables_json, system_prompt_rendered,
+                   last_preflight_json, last_preflight_at::text,
                    created_by_user_id::text, created_at::text, updated_at::text
             FROM saas_ai_agents
             WHERE tenant_id = CAST(:tenant_id AS uuid)
@@ -2163,6 +3088,68 @@ def _assert_activation_allowed(conn: Connection, tenant_id: str, agent_id: str) 
     return limits
 
 
+def _assert_agent_can_activate(conn: Connection, tenant_id: str, agent_id: str) -> dict[str, Any]:
+    limits = _assert_activation_allowed(conn, tenant_id, agent_id)
+    preflight = preflight_agent(conn, tenant_id, agent_id)
+    if not preflight.get("ready"):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "agent_preflight_not_ready",
+                "agent_id": agent_id,
+                "score": preflight.get("score", 0),
+                "checks": preflight.get("checks", []),
+                "message": "El agente debe aprobar preflight antes de activarse.",
+            },
+        )
+    return limits
+
+
+def assert_agent_budget_available(conn: Connection, tenant_id: str, agent_id: str, requested_tokens: int = 0) -> dict[str, Any]:
+    item = get_agent(conn, tenant_id, agent_id)
+    metrics = _runtime_metrics(conn, item)
+    budget = _budget_policy(item)
+    current_tokens = int(metrics.get("tokens_30d") or 0)
+    projected_tokens = current_tokens + max(0, int(requested_tokens or 0))
+    token_limit = int(budget.get("monthly_token_limit") or 0)
+    current_cost = float(metrics.get("estimated_cost_30d_usd") or 0)
+    projected_cost = current_cost + _estimate_ai_cost_usd(max(0, int(requested_tokens or 0)), str(metrics.get("last_provider") or ""))
+    cost_limit = float(budget.get("monthly_cost_limit_usd") or 0)
+    blocked = bool(budget.get("hard_stop")) and (
+        (token_limit > 0 and projected_tokens > token_limit)
+        or (cost_limit > 0 and projected_cost > cost_limit)
+    )
+    if blocked:
+        _audit(
+            conn,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            actor_user_id=None,
+            event_type="agent.runtime_skipped",
+            summary=f"{item['name']} no ejecuto por presupuesto hard stop.",
+            details={
+                "requested_tokens": int(requested_tokens or 0),
+                "projected_tokens": projected_tokens,
+                "token_limit": token_limit,
+                "projected_cost": projected_cost,
+                "cost_limit": cost_limit,
+            },
+        )
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "code": "ai_agent_budget_exceeded",
+                "agent_id": agent_id,
+                "metric": "ai_agent_budget",
+                "projected_tokens": projected_tokens,
+                "token_limit": token_limit,
+                "projected_cost_usd": projected_cost,
+                "cost_limit_usd": cost_limit,
+            },
+        )
+    return {"ok": True, "budget": budget, "projected_tokens": projected_tokens, "projected_cost_usd": projected_cost}
+
+
 def update_agent(conn: Connection, tenant_id: str, user_id: str, agent_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     _ensure_tables(conn)
     current = get_agent(conn, tenant_id, agent_id)
@@ -2176,7 +3163,7 @@ def update_agent(conn: Connection, tenant_id: str, user_id: str, agent_id: str, 
     if "status" in payload and payload["status"] is not None:
         status = _normalize_status(str(payload["status"]))
         if status == "active" and current["status"] != "active":
-            _assert_activation_allowed(conn, tenant_id, agent_id)
+            _assert_agent_can_activate(conn, tenant_id, agent_id)
         params["status"] = status
         assignments.append("status = :status")
     json_fields = [
@@ -2188,11 +3175,27 @@ def update_agent(conn: Connection, tenant_id: str, user_id: str, agent_id: str, 
         "tools_json",
         "memory_policy_json",
         "approval_policy_json",
+        "system_prompt_variables_json",
     ]
     for field in json_fields:
         if field in payload and payload[field] is not None:
             params[field] = _json(payload[field])
             assignments.append(f"{field} = CAST(:{field} AS jsonb)")
+    if "is_custom" in payload and payload["is_custom"] is not None:
+        params["is_custom"] = bool(payload["is_custom"])
+        assignments.append("is_custom = :is_custom")
+    for field, limit in {"base_template_type": 80, "system_prompt_template": 12000, "system_prompt_rendered": 20000}.items():
+        if field in payload and payload[field] is not None:
+            if field == "system_prompt_rendered" and ("system_prompt_template" in payload or "system_prompt_variables_json" in payload):
+                continue
+            params[field] = _clean(payload[field], limit)
+            assignments.append(f"{field} = :{field}")
+    if "system_prompt_template" in payload or "system_prompt_variables_json" in payload:
+        prompt_template = _clean(payload.get("system_prompt_template") if payload.get("system_prompt_template") is not None else current.get("system_prompt_template"), 12000)
+        variables = payload.get("system_prompt_variables_json") if payload.get("system_prompt_variables_json") is not None else current.get("system_prompt_variables_json")
+        if isinstance(variables, dict):
+            params["system_prompt_rendered_auto"] = _render_system_prompt(prompt_template, variables)
+            assignments.append("system_prompt_rendered = :system_prompt_rendered_auto")
     if not assignments:
         return current
     sql = f"""
@@ -2203,6 +3206,9 @@ def update_agent(conn: Connection, tenant_id: str, user_id: str, agent_id: str, 
         RETURNING id::text, tenant_id::text, agent_type, name, description, status,
                   provider_policy_json, personality_json, goals_json, rules_json, channels_json,
                   tools_json, memory_policy_json, approval_policy_json, metrics_json,
+                  is_custom, base_template_type, system_prompt_template,
+                  system_prompt_variables_json, system_prompt_rendered,
+                  last_preflight_json, last_preflight_at::text,
                   created_by_user_id::text, created_at::text, updated_at::text
     """
     row = conn.execute(text(sql), params).mappings().first()
@@ -2242,6 +3248,11 @@ def _agent_archive_payload(agent: dict[str, Any]) -> dict[str, Any]:
         "tools_json": agent.get("tools_json") or [],
         "memory_policy_json": agent.get("memory_policy_json") or {},
         "approval_policy_json": agent.get("approval_policy_json") or {},
+        "is_custom": bool(agent.get("is_custom")),
+        "base_template_type": agent.get("base_template_type") or "",
+        "system_prompt_template": agent.get("system_prompt_template") or "",
+        "system_prompt_variables_json": agent.get("system_prompt_variables_json") or {},
+        "system_prompt_rendered": agent.get("system_prompt_rendered") or "",
         "metrics_json": {
             "restored_from_memory": True,
             "source_agent_type": agent.get("agent_type") or "",
@@ -2303,7 +3314,7 @@ def create_agent_memory_archive(
                 CAST(:id AS uuid), CAST(:tenant_id AS uuid), CAST(:agent_id AS uuid),
                 :agent_type, :agent_name, :title, :notes,
                 CAST(:snapshot AS jsonb), CAST(:reusable_payload AS jsonb),
-                CASE WHEN :user_id = '' THEN NULL ELSE CAST(:user_id AS uuid) END
+                CAST(NULLIF(:user_id, '') AS uuid)
             )
             RETURNING id::text, tenant_id::text, source_agent_id::text, source_agent_type,
                       source_agent_name, title, notes, snapshot_json, reusable_payload_json,
@@ -2467,7 +3478,7 @@ def import_agent_memory_archive(conn: Connection, tenant_id: str, user_id: str, 
                 CAST(:id AS uuid), CAST(:tenant_id AS uuid), NULL,
                 :source_agent_type, :source_agent_name, :title, :notes,
                 CAST(:snapshot AS jsonb), CAST(:reusable AS jsonb),
-                CASE WHEN :user_id = '' THEN NULL ELSE CAST(:user_id AS uuid) END
+                CAST(NULLIF(:user_id, '') AS uuid)
             )
             RETURNING id::text, tenant_id::text, source_agent_id::text, source_agent_type,
                       source_agent_name, title, notes, snapshot_json, reusable_payload_json,

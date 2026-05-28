@@ -12,6 +12,7 @@ from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 from fastapi import Depends, HTTPException, Request
 from pydantic import BaseModel
+from sqlalchemy import text
 
 from app_saas.config import settings
 
@@ -70,6 +71,54 @@ def verify_password(password: str, password_hash: str) -> bool:
         return False
 
 
+def login_lock_minutes() -> int:
+    return max(1, int(settings.saas_login_lock_minutes or 15))
+
+
+def login_lock_failed_attempts() -> int:
+    return max(1, int(settings.saas_login_lock_failed_attempts or 6))
+
+
+def increment_failed_login(conn, user_id: str) -> dict:
+    row = conn.execute(
+        text(
+            """
+            UPDATE saas_users
+            SET failed_login_count = COALESCE(failed_login_count, 0) + 1,
+                locked_until = CASE
+                    WHEN COALESCE(failed_login_count, 0) + 1 >= :max_attempts
+                    THEN NOW() + make_interval(mins => :lock_minutes)
+                    ELSE locked_until
+                END,
+                updated_at = NOW()
+            WHERE id = CAST(:user_id AS uuid)
+            RETURNING failed_login_count, locked_until::text
+            """
+        ),
+        {
+            "user_id": user_id,
+            "max_attempts": login_lock_failed_attempts(),
+            "lock_minutes": login_lock_minutes(),
+        },
+    ).mappings().first()
+    return dict(row or {})
+
+
+def clear_login_lock(conn, user_id: str) -> None:
+    conn.execute(
+        text(
+            """
+            UPDATE saas_users
+            SET failed_login_count = 0,
+                locked_until = NULL,
+                updated_at = NOW()
+            WHERE id = CAST(:user_id AS uuid)
+            """
+        ),
+        {"user_id": user_id},
+    )
+
+
 def new_secret(prefix: str = "whsec") -> str:
     clean_prefix = re.sub(r"[^a-zA-Z0-9_]+", "", str(prefix or "secret"))[:18] or "secret"
     return f"{clean_prefix}_{secrets.token_urlsafe(32)}"
@@ -111,6 +160,7 @@ def create_token(
     role: Optional[str] = None,
     platform_role: Optional[str] = None,
     expires_delta: Optional[timedelta] = None,
+    mfa_verified: bool = False,
 ) -> str:
     now = datetime.now(timezone.utc)
     if expires_delta is None:
@@ -133,6 +183,8 @@ def create_token(
         payload["role"] = str(role)
     if platform_role:
         payload["platform_role"] = str(platform_role)
+    if mfa_verified:
+        payload["mfa"] = True
     return jwt.encode(payload, settings.saas_jwt_secret, algorithm="HS256")
 
 

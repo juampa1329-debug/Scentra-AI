@@ -16,6 +16,11 @@ from app_saas.shared.secrets import decrypt_secret, encrypt_secret
 
 router = APIRouter(prefix="/api-credentials", tags=["saas-api-credentials"])
 
+PROVIDER_HTTP_HEADERS = {
+    "User-Agent": "ScentraAI/1.0 (+https://scentra-ai.online)",
+    "Accept": "application/json",
+}
+
 
 class ApiCredentialUpsertIn(BaseModel):
     category: str = Field(default="ai", max_length=40)
@@ -120,7 +125,7 @@ def _load_credential(conn, tenant_id: str, provider_code: str, credential_key: s
 
 
 def _request_json(url: str, *, token: str = "", headers: dict[str, str] | None = None, timeout: int = 20) -> dict[str, Any]:
-    request_headers = dict(headers or {})
+    request_headers = {**PROVIDER_HTTP_HEADERS, **(headers or {})}
     if token:
         request_headers.setdefault("Authorization", f"Bearer {token}")
     request = urllib.request.Request(url, headers=request_headers)
@@ -138,11 +143,11 @@ def _request_json(url: str, *, token: str = "", headers: dict[str, str] | None =
 
 def _static_models(provider_code: str) -> list[dict[str, str]]:
     defaults = {
-        "google": ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-1.5-flash", "gemini-1.5-pro"],
-        "groq": ["llama-3.1-8b-instant", "llama-3.1-70b-versatile", "llama-3.3-70b-versatile"],
+        "google": ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"],
+        "groq": ["llama-3.1-8b-instant", "llama-3.3-70b-versatile", "openai/gpt-oss-20b", "openai/gpt-oss-120b"],
         "mistral": ["mistral-small-latest", "mistral-medium-latest", "mistral-large-latest"],
-        "openrouter": ["google/gemini-2.5-flash", "openai/gpt-4o-mini", "meta-llama/llama-3.1-8b-instruct"],
-        "kimi": ["kimi-k2.6", "kimi-k2", "moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"],
+        "openrouter": ["google/gemini-2.5-flash", "google/gemini-2.5-flash-lite", "openai/gpt-4o-mini", "meta-llama/llama-3.1-8b-instruct"],
+        "kimi": ["kimi-k2.6", "kimi-k2", "moonshot-v1-8k-vision-preview", "moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"],
         "elevenlabs": ["eleven_v3", "eleven_multilingual_v2", "eleven_turbo_v2_5"],
         "google_tts": ["es-CO-Standard-A", "es-CO-Standard-B", "es-US-Standard-A"],
     }

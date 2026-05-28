@@ -9,6 +9,7 @@ from fastapi.responses import StreamingResponse
 from app_saas.advisor.schemas import AdvisorActionCreateIn, AdvisorChatIn, AdvisorChatOut, AdvisorFeedbackIn
 from app_saas.advisor.service import (
     approve_action,
+    advisor_briefing,
     advisor_metrics,
     advisor_chat,
     advisor_memory,
@@ -68,6 +69,13 @@ def get_advisor_metrics(ctx: AuthContext = Depends(get_current_user)):
     with db_session() as conn:
         set_tenant_context(conn, ctx.tenant_id)
         return {"ok": True, "metrics": advisor_metrics(conn, ctx.tenant_id)}
+
+
+@router.get("/briefing")
+def get_advisor_briefing(ctx: AuthContext = Depends(get_current_user)):
+    with db_session() as conn:
+        set_tenant_context(conn, ctx.tenant_id)
+        return {"ok": True, **advisor_briefing(conn, ctx.tenant_id, ctx.user_id)}
 
 
 @router.get("/activity")

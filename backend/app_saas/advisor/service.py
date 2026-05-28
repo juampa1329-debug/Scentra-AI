@@ -10,6 +10,9 @@ from sqlalchemy.engine import Connection
 
 from app_saas.ai_agent.service import get_settings
 from app_saas.ai_gateway.service import generate_with_gateway
+from app_saas.intelligence.service import list_predictions as list_intelligence_predictions
+from app_saas.intelligence.service import list_recommendations as list_intelligence_recommendations
+from app_saas.intelligence.service import predictive_business_overview
 
 
 ADVISOR_SYSTEM_PROMPT = """Eres Scentra Advisor, el AI Business Advisor persistente de Scentra.
@@ -716,6 +719,13 @@ def advisor_context(conn: Connection, tenant_id: str, *, module: str, context_ty
         ),
         {"tenant_id": tenant_id},
     ).mappings().first()
+    try:
+        intelligence = {
+            "predictions": list_intelligence_predictions(conn, tenant_id, limit=5),
+            "recommendations": list_intelligence_recommendations(conn, tenant_id, status="open", limit=5),
+        }
+    except Exception as exc:
+        intelligence = {"warning": f"intelligence_context_unavailable:{_clean(exc, 160)}"}
     return {
         "module": module,
         "context_type": context_type,
@@ -730,6 +740,7 @@ def advisor_context(conn: Connection, tenant_id: str, *, module: str, context_ty
             "whatsapp_signal": _row_dict(webhook_signal),
             "outbound": _row_dict(outbound_health),
         },
+        "intelligence": intelligence,
     }
 
 
@@ -964,6 +975,9 @@ def generate_seed_insights(conn: Connection, tenant_id: str) -> list[dict[str, A
     whatsapp_signal = health.get("whatsapp_signal") or {}
     statuses_7d = int(whatsapp_signal.get("status_events_7d") or 0)
     inbound_7d = int(whatsapp_signal.get("inbound_events_7d") or 0)
+    intelligence = context.get("intelligence") if isinstance(context.get("intelligence"), dict) else {}
+    predictive_predictions = intelligence.get("predictions") if isinstance(intelligence.get("predictions"), list) else []
+    predictive_recommendations = intelligence.get("recommendations") if isinstance(intelligence.get("recommendations"), list) else []
     if unread > 0:
         suggestions.append({
             "insight_type": "unread_followup",
@@ -995,6 +1009,42 @@ def generate_seed_insights(conn: Connection, tenant_id: str) -> list[dict[str, A
             "title": "WhatsApp reporta estados pero no mensajes entrantes",
             "description": "Esto suele indicar que el WABA no esta suscrito a la app o que el webhook no recibe el campo messages.",
             "recommended_action_json": {"type": "open_debug", "module": "settings", "tab": "debug"},
+        })
+    for prediction in predictive_predictions:
+        prediction_type = _clean(prediction.get("prediction_type"), 100)
+        score = float(prediction.get("score") or 0)
+        if prediction_type == "lead_scoring" and score >= 60:
+            suggestions.append({
+                "insight_type": "predictive_hot_leads",
+                "severity": "high" if score >= 75 else "medium",
+                "title": f"Lead scoring predictivo en {round(score)}",
+                "description": "Intelligence detecto probabilidad comercial alta. Prioriza conversaciones calientes antes de nuevas campanas.",
+                "recommended_action_json": {"type": "open_inbox", "module": "inbox", "queue": "hot"},
+            })
+        elif prediction_type == "churn_prediction" and score >= 45:
+            suggestions.append({
+                "insight_type": "predictive_churn_risk",
+                "severity": "high" if score >= 70 else "medium",
+                "title": f"Riesgo de abandono predictivo en {round(score)}",
+                "description": "Hay senales de inactividad o baja respuesta. Revisa recuperacion y follow-ups antes de perder clientes.",
+                "recommended_action_json": {"type": "open_campaigns", "module": "campaigns"},
+            })
+        elif prediction_type == "smart_remarketing" and score >= 40:
+            output = prediction.get("output_json") if isinstance(prediction.get("output_json"), dict) else {}
+            suggestions.append({
+                "insight_type": "predictive_smart_remarketing",
+                "severity": "medium",
+                "title": "Oportunidad de remarketing inteligente",
+                "description": f"Mejor ventana sugerida: {output.get('best_window') or '09:00-11:00 local'}. Simula la campana antes de activarla.",
+                "recommended_action_json": {"type": "open_campaigns", "module": "campaigns"},
+            })
+    for recommendation in predictive_recommendations[:3]:
+        suggestions.append({
+            "insight_type": f"predictive_recommendation_{_clean(recommendation.get('recommendation_type'), 60)}",
+            "severity": _clean(recommendation.get("severity"), 40) or "medium",
+            "title": _clean(recommendation.get("title"), 220) or "Recomendacion predictiva abierta",
+            "description": _clean(recommendation.get("description"), 1200) or "Intelligence genero una recomendacion accionable para revisar.",
+            "recommended_action_json": {"type": "open_intelligence", "module": "intelligence"},
         })
     for item in suggestions:
         conn.execute(
@@ -1288,6 +1338,43 @@ def advisor_metrics(conn: Connection, tenant_id: str) -> dict[str, Any]:
         "approved_actions": int(actions_by_status.get("approved", 0)),
         "executed_actions": int(actions_by_status.get("executed", 0)),
         "negative_feedback": int(feedback_by_rating.get("not_helpful", 0)) + int(feedback_by_rating.get("unsafe", 0)),
+    }
+
+
+def advisor_briefing(conn: Connection, tenant_id: str, user_id: str) -> dict[str, Any]:
+    """Single compact payload for the floating Advisor and proactive executive layer."""
+    ensure_advisor_tables(conn)
+    overview: dict[str, Any]
+    try:
+        overview = predictive_business_overview(conn, tenant_id, limit=20)
+    except Exception as exc:
+        overview = {"warning": f"predictive_overview_unavailable:{_clean(exc, 180)}"}
+    insights = generate_seed_insights(conn, tenant_id)[:8]
+    recommendations = list_recommendations(conn, tenant_id, limit=8)
+    actions = list_actions(conn, tenant_id, status="open", limit=8)
+    metrics = advisor_metrics(conn, tenant_id)
+    activity = list_advisor_events(conn, tenant_id, limit=6)
+    memory = advisor_memory(conn, tenant_id, user_id) if user_id else {}
+    summaries = (overview.get("executive_summaries") or {}) if isinstance(overview, dict) else {}
+    briefing_items: list[dict[str, Any]] = []
+    for key, title in (
+        ("daily", "Balance ejecutivo diario"),
+        ("weekly", "Lectura comercial semanal"),
+        ("operations", "Resumen operacional"),
+    ):
+        text_value = _clean(summaries.get(key), 1200)
+        if text_value:
+            briefing_items.append({"key": key, "title": title, "summary": text_value})
+    return {
+        "tenant_id": tenant_id,
+        "overview": overview,
+        "briefing": briefing_items,
+        "insights": insights,
+        "recommendations": recommendations,
+        "actions": actions,
+        "metrics": metrics,
+        "activity": activity,
+        "memory": memory,
     }
 
 
@@ -2014,7 +2101,14 @@ def advisor_chat(
             event_type="chat_fallback",
             severity="warning",
             summary="Advisor respondio con fallback por falta de modelo o credencial",
-            details={"reason": reason, "module": module, "context_type": context_type, "context_id": context_id},
+            details={
+                "reason": reason,
+                "retryable": bool(gateway.get("retryable")),
+                "attempts": gateway.get("attempts") or [],
+                "module": module,
+                "context_type": context_type,
+                "context_id": context_id,
+            },
         )
         memory = update_advisor_memory(
             conn,
@@ -2049,6 +2143,7 @@ def advisor_chat(
             "provider_code": gateway.get("provider_code"),
             "model": gateway.get("model"),
             "fallback_used": gateway.get("fallback_used"),
+            "model_fallback_used": gateway.get("model_fallback_used"),
             "latency_ms": gateway.get("latency_ms"),
             "context_type": context_type,
             "context_id": context_id,
@@ -2067,6 +2162,7 @@ def advisor_chat(
             "provider_code": gateway.get("provider_code"),
             "model": gateway.get("model"),
             "fallback_used": gateway.get("fallback_used"),
+            "model_fallback_used": gateway.get("model_fallback_used"),
             "latency_ms": gateway.get("latency_ms"),
             "module": module,
             "context_type": context_type,

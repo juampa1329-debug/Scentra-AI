@@ -1326,6 +1326,7 @@ def enqueue_broadcast(
                 template_body = _clean_text(broadcast["resolved_meta_template_body"], 1024) or str(broadcast["body"] or "")
                 template_payload = {
                     "message_type": "template",
+                    "meta_template_id": _clean_text(broadcast["meta_template_id"], 80),
                     "provider_meta_template_id": _clean_text(broadcast["provider_meta_template_id"], 240),
                     "meta_template_name": _clean_text(broadcast["resolved_meta_template_name"], 200),
                     "meta_template_language": _clean_text(broadcast["resolved_meta_template_language"], 20) or "es",

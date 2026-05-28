@@ -8,6 +8,7 @@ class TenantCreateIn(BaseModel):
     slug: Optional[str] = None
     timezone: str = "America/Bogota"
     locale: str = "es-CO"
+    industry_code: str = Field(default="general", max_length=80)
 
 
 class TenantOut(BaseModel):
@@ -17,6 +18,8 @@ class TenantOut(BaseModel):
     plan_code: str
     status: str
     role: str
+    industry_code: str = "general"
+    vertical_pack_applied_at: Optional[str] = None
 
 
 class TenantPatchIn(BaseModel):

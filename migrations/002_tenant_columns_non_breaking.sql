@@ -1,104 +1,135 @@
 -- 002_tenant_columns_non_breaking.sql
--- Tenantizacion inicial compatible con el sistema actual.
--- Esta fase NO rompe PK actual de conversations.
+-- Tenantizacion inicial compatible con tablas legacy si existen.
+-- En una instalacion SaaS limpia, estas tablas pueden no existir; en ese caso se omiten sin fallar.
 
 -- 1) Crear tenant legacy para mapear datos existentes
 INSERT INTO saas_tenants (id, slug, name, status, plan_code, timezone, locale)
 VALUES ('00000000-0000-0000-0000-000000000001', 'legacy', 'Legacy Tenant', 'active', 'legacy', 'America/Bogota', 'es-CO')
 ON CONFLICT (slug) DO NOTHING;
 
--- 2) Tablas core CRM
-ALTER TABLE conversations ADD COLUMN IF NOT EXISTS tenant_id UUID;
-UPDATE conversations
-SET tenant_id = '00000000-0000-0000-0000-000000000001'
-WHERE tenant_id IS NULL;
-ALTER TABLE conversations ALTER COLUMN tenant_id SET NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_conversations_tenant_updated ON conversations (tenant_id, updated_at DESC);
+CREATE OR REPLACE FUNCTION _saas_tenantize_legacy_table(p_table_name TEXT, p_index_sql TEXT[])
+RETURNS VOID
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    table_ref regclass;
+    index_sql TEXT;
+BEGIN
+    table_ref := to_regclass(format('public.%I', p_table_name));
+    IF table_ref IS NULL THEN
+        RETURN;
+    END IF;
 
-ALTER TABLE messages ADD COLUMN IF NOT EXISTS tenant_id UUID;
-UPDATE messages
-SET tenant_id = '00000000-0000-0000-0000-000000000001'
-WHERE tenant_id IS NULL;
-ALTER TABLE messages ALTER COLUMN tenant_id SET NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_messages_tenant_created ON messages (tenant_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_messages_tenant_phone_created ON messages (tenant_id, phone, created_at DESC);
+    EXECUTE format('ALTER TABLE %s ADD COLUMN IF NOT EXISTS tenant_id UUID', table_ref);
+    EXECUTE format(
+        'UPDATE %s SET tenant_id = %L WHERE tenant_id IS NULL',
+        table_ref,
+        '00000000-0000-0000-0000-000000000001'
+    );
+    EXECUTE format('ALTER TABLE %s ALTER COLUMN tenant_id SET NOT NULL', table_ref);
+
+    FOREACH index_sql IN ARRAY p_index_sql LOOP
+        IF COALESCE(index_sql, '') <> '' THEN
+            EXECUTE index_sql;
+        END IF;
+    END LOOP;
+END;
+$$;
+
+-- 2) Tablas core CRM
+SELECT _saas_tenantize_legacy_table(
+    'conversations',
+    ARRAY[
+        'CREATE INDEX IF NOT EXISTS idx_conversations_tenant_updated ON conversations (tenant_id, updated_at DESC)'
+    ]
+);
+
+SELECT _saas_tenantize_legacy_table(
+    'messages',
+    ARRAY[
+        'CREATE INDEX IF NOT EXISTS idx_messages_tenant_created ON messages (tenant_id, created_at DESC)',
+        'CREATE INDEX IF NOT EXISTS idx_messages_tenant_phone_created ON messages (tenant_id, phone, created_at DESC)'
+    ]
+);
 
 -- 3) Campanas y automatizaciones
-ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS tenant_id UUID;
-UPDATE campaigns
-SET tenant_id = '00000000-0000-0000-0000-000000000001'
-WHERE tenant_id IS NULL;
-ALTER TABLE campaigns ALTER COLUMN tenant_id SET NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_campaigns_tenant_created ON campaigns (tenant_id, created_at DESC);
+SELECT _saas_tenantize_legacy_table(
+    'campaigns',
+    ARRAY[
+        'CREATE INDEX IF NOT EXISTS idx_campaigns_tenant_created ON campaigns (tenant_id, created_at DESC)'
+    ]
+);
 
-ALTER TABLE campaign_recipients ADD COLUMN IF NOT EXISTS tenant_id UUID;
-UPDATE campaign_recipients
-SET tenant_id = '00000000-0000-0000-0000-000000000001'
-WHERE tenant_id IS NULL;
-ALTER TABLE campaign_recipients ALTER COLUMN tenant_id SET NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_campaign_recipients_tenant ON campaign_recipients (tenant_id);
+SELECT _saas_tenantize_legacy_table(
+    'campaign_recipients',
+    ARRAY[
+        'CREATE INDEX IF NOT EXISTS idx_campaign_recipients_tenant ON campaign_recipients (tenant_id)'
+    ]
+);
 
-ALTER TABLE automation_triggers ADD COLUMN IF NOT EXISTS tenant_id UUID;
-UPDATE automation_triggers
-SET tenant_id = '00000000-0000-0000-0000-000000000001'
-WHERE tenant_id IS NULL;
-ALTER TABLE automation_triggers ALTER COLUMN tenant_id SET NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_automation_triggers_tenant ON automation_triggers (tenant_id);
+SELECT _saas_tenantize_legacy_table(
+    'automation_triggers',
+    ARRAY[
+        'CREATE INDEX IF NOT EXISTS idx_automation_triggers_tenant ON automation_triggers (tenant_id)'
+    ]
+);
 
-ALTER TABLE trigger_executions ADD COLUMN IF NOT EXISTS tenant_id UUID;
-UPDATE trigger_executions
-SET tenant_id = '00000000-0000-0000-0000-000000000001'
-WHERE tenant_id IS NULL;
-ALTER TABLE trigger_executions ALTER COLUMN tenant_id SET NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_trigger_executions_tenant_created ON trigger_executions (tenant_id, created_at DESC);
+SELECT _saas_tenantize_legacy_table(
+    'trigger_executions',
+    ARRAY[
+        'CREATE INDEX IF NOT EXISTS idx_trigger_executions_tenant_created ON trigger_executions (tenant_id, created_at DESC)'
+    ]
+);
 
-ALTER TABLE trigger_scheduled_messages ADD COLUMN IF NOT EXISTS tenant_id UUID;
-UPDATE trigger_scheduled_messages
-SET tenant_id = '00000000-0000-0000-0000-000000000001'
-WHERE tenant_id IS NULL;
-ALTER TABLE trigger_scheduled_messages ALTER COLUMN tenant_id SET NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_trigger_scheduled_tenant_due ON trigger_scheduled_messages (tenant_id, send_at);
+SELECT _saas_tenantize_legacy_table(
+    'trigger_scheduled_messages',
+    ARRAY[
+        'CREATE INDEX IF NOT EXISTS idx_trigger_scheduled_tenant_due ON trigger_scheduled_messages (tenant_id, send_at)'
+    ]
+);
 
 -- 4) Remarketing
-ALTER TABLE remarketing_flows ADD COLUMN IF NOT EXISTS tenant_id UUID;
-UPDATE remarketing_flows
-SET tenant_id = '00000000-0000-0000-0000-000000000001'
-WHERE tenant_id IS NULL;
-ALTER TABLE remarketing_flows ALTER COLUMN tenant_id SET NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_remarketing_flows_tenant ON remarketing_flows (tenant_id);
+SELECT _saas_tenantize_legacy_table(
+    'remarketing_flows',
+    ARRAY[
+        'CREATE INDEX IF NOT EXISTS idx_remarketing_flows_tenant ON remarketing_flows (tenant_id)'
+    ]
+);
 
-ALTER TABLE remarketing_steps ADD COLUMN IF NOT EXISTS tenant_id UUID;
-UPDATE remarketing_steps
-SET tenant_id = '00000000-0000-0000-0000-000000000001'
-WHERE tenant_id IS NULL;
-ALTER TABLE remarketing_steps ALTER COLUMN tenant_id SET NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_remarketing_steps_tenant ON remarketing_steps (tenant_id);
+SELECT _saas_tenantize_legacy_table(
+    'remarketing_steps',
+    ARRAY[
+        'CREATE INDEX IF NOT EXISTS idx_remarketing_steps_tenant ON remarketing_steps (tenant_id)'
+    ]
+);
 
-ALTER TABLE remarketing_enrollments ADD COLUMN IF NOT EXISTS tenant_id UUID;
-UPDATE remarketing_enrollments
-SET tenant_id = '00000000-0000-0000-0000-000000000001'
-WHERE tenant_id IS NULL;
-ALTER TABLE remarketing_enrollments ALTER COLUMN tenant_id SET NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_remarketing_enrollments_tenant ON remarketing_enrollments (tenant_id);
+SELECT _saas_tenantize_legacy_table(
+    'remarketing_enrollments',
+    ARRAY[
+        'CREATE INDEX IF NOT EXISTS idx_remarketing_enrollments_tenant ON remarketing_enrollments (tenant_id)'
+    ]
+);
 
--- 5) Social routes tables
-ALTER TABLE social_webhook_events ADD COLUMN IF NOT EXISTS tenant_id UUID;
-UPDATE social_webhook_events
-SET tenant_id = '00000000-0000-0000-0000-000000000001'
-WHERE tenant_id IS NULL;
-ALTER TABLE social_webhook_events ALTER COLUMN tenant_id SET NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_social_webhook_events_tenant_created ON social_webhook_events (tenant_id, created_at DESC);
+-- 5) Social route tables
+SELECT _saas_tenantize_legacy_table(
+    'social_webhook_events',
+    ARRAY[
+        'CREATE INDEX IF NOT EXISTS idx_social_webhook_events_tenant_created ON social_webhook_events (tenant_id, created_at DESC)'
+    ]
+);
 
-ALTER TABLE social_comments ADD COLUMN IF NOT EXISTS tenant_id UUID;
-UPDATE social_comments
-SET tenant_id = '00000000-0000-0000-0000-000000000001'
-WHERE tenant_id IS NULL;
-ALTER TABLE social_comments ALTER COLUMN tenant_id SET NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_social_comments_tenant_created ON social_comments (tenant_id, created_at DESC);
+SELECT _saas_tenantize_legacy_table(
+    'social_comments',
+    ARRAY[
+        'CREATE INDEX IF NOT EXISTS idx_social_comments_tenant_created ON social_comments (tenant_id, created_at DESC)'
+    ]
+);
 
-ALTER TABLE meta_lead_events ADD COLUMN IF NOT EXISTS tenant_id UUID;
-UPDATE meta_lead_events
-SET tenant_id = '00000000-0000-0000-0000-000000000001'
-WHERE tenant_id IS NULL;
-ALTER TABLE meta_lead_events ALTER COLUMN tenant_id SET NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_meta_lead_events_tenant_created ON meta_lead_events (tenant_id, created_at DESC);
+SELECT _saas_tenantize_legacy_table(
+    'meta_lead_events',
+    ARRAY[
+        'CREATE INDEX IF NOT EXISTS idx_meta_lead_events_tenant_created ON meta_lead_events (tenant_id, created_at DESC)'
+    ]
+);
+
+DROP FUNCTION IF EXISTS _saas_tenantize_legacy_table(TEXT, TEXT[]);

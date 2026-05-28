@@ -62,16 +62,51 @@ def _mark_message_dispatch(conn, message_id: str | None, status: str, provider_m
         "provider_message_id": provider_message_id,
         "error": error,
     }
-    conn.execute(
+    row = conn.execute(
         text(
             """
             UPDATE saas_messages
             SET payload_json = payload_json || CAST(:dispatch_payload AS jsonb)
             WHERE id = CAST(:message_id AS uuid)
+            RETURNING tenant_id::text, conversation_id::text, id::text
             """
         ),
         {"message_id": message_id, "dispatch_payload": json.dumps(dispatch_payload)},
-    )
+    ).mappings().first()
+    if row:
+        conn.execute(
+            text(
+                """
+                INSERT INTO saas_message_status_events (
+                    tenant_id,
+                    conversation_id,
+                    message_id,
+                    provider_message_id,
+                    status,
+                    error,
+                    payload_json
+                )
+                VALUES (
+                    CAST(:tenant_id AS uuid),
+                    CAST(:conversation_id AS uuid),
+                    CAST(:message_id AS uuid),
+                    :provider_message_id,
+                    :status,
+                    :error,
+                    CAST(:payload_json AS jsonb)
+                )
+                """
+            ),
+            {
+                "tenant_id": row["tenant_id"],
+                "conversation_id": row["conversation_id"],
+                "message_id": row["id"],
+                "provider_message_id": provider_message_id,
+                "status": status,
+                "error": error[:500],
+                "payload_json": json.dumps({"source": "dispatch_worker"}),
+            },
+        )
 
 
 def _integration_config(integration: dict[str, Any]) -> dict[str, Any]:
@@ -737,6 +772,45 @@ def _job_feature_key(job: dict[str, Any]) -> str:
     return "inbox"
 
 
+def _meta_template_send_allowed(conn, job: dict[str, Any], payload: dict[str, Any]) -> tuple[bool, str]:
+    message_type = str(payload.get("message_type") or payload.get("type") or "").strip().lower()
+    if message_type != "template" and not (payload.get("meta_template_name") or payload.get("template_name")):
+        return True, ""
+    template_id = str(payload.get("meta_template_id") or "").strip()
+    broadcast_id = str(payload.get("broadcast_id") or "").strip()
+    row = None
+    if template_id:
+        row = conn.execute(
+            text(
+                """
+                SELECT status
+                FROM saas_meta_message_templates
+                WHERE tenant_id = CAST(:tenant_id AS uuid)
+                  AND id = CAST(:template_id AS uuid)
+                LIMIT 1
+                """
+            ),
+            {"tenant_id": job["tenant_id"], "template_id": template_id},
+        ).mappings().first()
+    elif broadcast_id:
+        row = conn.execute(
+            text(
+                """
+                SELECT COALESCE(mt.status, '') AS status
+                FROM saas_broadcasts b
+                LEFT JOIN saas_meta_message_templates mt ON mt.id = b.meta_template_id
+                WHERE b.tenant_id = CAST(:tenant_id AS uuid)
+                  AND b.id = CAST(:broadcast_id AS uuid)
+                LIMIT 1
+                """
+            ),
+            {"tenant_id": job["tenant_id"], "broadcast_id": broadcast_id},
+        ).mappings().first()
+    if row and str(row.get("status") or "").strip().lower() != "approved":
+        return False, "meta_template_must_be_approved_before_dispatch"
+    return True, ""
+
+
 def _block_dispatch(conn, job: dict[str, Any], error: str) -> str:
     _mark_outbound(conn, str(job["id"]), status="blocked", error=error)
     _mark_message_dispatch(conn, str(job.get("message_id") or ""), "blocked", error=error)
@@ -794,6 +868,9 @@ def _dispatch_one(conn, job: dict[str, Any]) -> str:
             if message_type in {"image", "video", "audio", "document", "file"} or payload_json.get("media_id"):
                 result = _send_meta_cloud_media(conn, integration, job)
             elif message_type == "template" or payload_json.get("meta_template_name") or payload_json.get("template_name"):
+                allowed, reason = _meta_template_send_allowed(conn, job, payload_json)
+                if not allowed:
+                    return _block_dispatch(conn, job, reason)
                 result = _send_meta_cloud_template(integration, job)
             else:
                 result = _send_meta_cloud_text(integration, job)

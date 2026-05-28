@@ -1,17 +1,15 @@
 -- 003_conversations_cutover.sql
--- Corte de conversations a modelo multi-tenant real.
--- Ejecutar solo despues de validar que toda la app consulta por tenant_id.
+-- Corte de conversations a modelo multi-tenant real si la tabla legacy existe.
+-- En una instalacion SaaS limpia, la tabla legacy no existe y esta migracion se omite sin fallar.
 
-BEGIN;
+DO $$
+BEGIN
+    IF to_regclass('public.conversations') IS NOT NULL THEN
+        EXECUTE 'ALTER TABLE conversations DROP CONSTRAINT IF EXISTS conversations_pkey';
+        EXECUTE 'ALTER TABLE conversations ADD CONSTRAINT conversations_pkey PRIMARY KEY (tenant_id, phone)';
+    END IF;
 
--- 1) Pre-chequeo rapido (opcional)
--- SELECT phone, COUNT(*) FROM conversations GROUP BY phone HAVING COUNT(*) > 1;
-
--- 2) Reemplazar PK global por PK compuesta tenant+phone
-ALTER TABLE conversations DROP CONSTRAINT IF EXISTS conversations_pkey;
-ALTER TABLE conversations ADD CONSTRAINT conversations_pkey PRIMARY KEY (tenant_id, phone);
-
--- 3) Compatibilidad para mensajes (join eficiente tenant+phone)
-CREATE INDEX IF NOT EXISTS idx_messages_tenant_phone ON messages (tenant_id, phone);
-
-COMMIT;
+    IF to_regclass('public.messages') IS NOT NULL THEN
+        EXECUTE 'CREATE INDEX IF NOT EXISTS idx_messages_tenant_phone ON messages (tenant_id, phone)';
+    END IF;
+END $$;

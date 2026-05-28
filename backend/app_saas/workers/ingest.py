@@ -11,6 +11,7 @@ from typing import Any
 from sqlalchemy import text
 
 from app_saas.ai_agent.service import schedule_conversation_ai
+from app_saas.agents.orchestrator import enqueue_conversation_orchestration, enqueue_social_comment_orchestration
 from app_saas.db import db_session, set_tenant_context
 from app_saas.shared.secrets import decrypt_secret
 from app_saas.social.service import normalize_social_comments, store_social_comment
@@ -408,6 +409,9 @@ def _upsert_message(conn, tenant_id: str, event_id: str, payload: dict[str, Any]
                 display_name,
                 last_message_text,
                 last_message_at,
+                last_customer_message_at,
+                sla_due_at,
+                first_response_due_at,
                 unread_count,
                 updated_at
             )
@@ -419,6 +423,9 @@ def _upsert_message(conn, tenant_id: str, event_id: str, payload: dict[str, Any]
                 :display_name,
                 :last_message_text,
                 NOW(),
+                NOW(),
+                NOW() + INTERVAL '30 minutes',
+                NOW() + INTERVAL '15 minutes',
                 1,
                 NOW()
             )
@@ -428,6 +435,15 @@ def _upsert_message(conn, tenant_id: str, event_id: str, payload: dict[str, Any]
                 display_name = COALESCE(NULLIF(EXCLUDED.display_name, ''), saas_conversations.display_name),
                 last_message_text = EXCLUDED.last_message_text,
                 last_message_at = NOW(),
+                last_customer_message_at = NOW(),
+                sla_due_at = CASE
+                    WHEN saas_conversations.takeover = TRUE OR saas_conversations.sla_due_at IS NOT NULL THEN saas_conversations.sla_due_at
+                    ELSE NOW() + INTERVAL '30 minutes'
+                END,
+                first_response_due_at = CASE
+                    WHEN saas_conversations.last_agent_message_at IS NULL THEN COALESCE(saas_conversations.first_response_due_at, NOW() + INTERVAL '15 minutes')
+                    ELSE saas_conversations.first_response_due_at
+                END,
                 unread_count = saas_conversations.unread_count + 1,
                 updated_at = NOW()
             RETURNING id::text
@@ -547,7 +563,7 @@ def _apply_delivery_status(conn, tenant_id: str, status_event: NormalizedStatus)
                   )
                 RETURNING id
             )
-            SELECT id::text FROM updated
+            SELECT id::text, conversation_id::text FROM updated
             """
         ),
         {
@@ -557,6 +573,40 @@ def _apply_delivery_status(conn, tenant_id: str, status_event: NormalizedStatus)
         },
     ).mappings().all()
     message_ids = [str(row["id"]) for row in rows]
+    for row in rows:
+        conn.execute(
+            text(
+                """
+                INSERT INTO saas_message_status_events (
+                    tenant_id,
+                    conversation_id,
+                    message_id,
+                    provider_message_id,
+                    status,
+                    error,
+                    payload_json
+                )
+                VALUES (
+                    CAST(:tenant_id AS uuid),
+                    CAST(:conversation_id AS uuid),
+                    CAST(:message_id AS uuid),
+                    :provider_message_id,
+                    :status,
+                    :error,
+                    CAST(:payload_json AS jsonb)
+                )
+                """
+            ),
+            {
+                "tenant_id": tenant_id,
+                "conversation_id": row["conversation_id"],
+                "message_id": row["id"],
+                "provider_message_id": status_event.provider_message_id,
+                "status": status,
+                "error": status_event.error[:500],
+                "payload_json": json.dumps(status_event.payload or {}),
+            },
+        )
 
     conn.execute(
         text(
@@ -658,9 +708,10 @@ def process_due_webhook_events(limit: int = 25, tenant_id: str | None = None) ->
             provider = row["provider"]
             source_event_id = row["event_id"]
             payload = _as_dict(row["payload_json"])
-            set_tenant_context(conn, tenant_id)
 
+            conn.execute(text("SAVEPOINT webhook_event_processing"))
             try:
+                set_tenant_context(conn, tenant_id)
                 social_comments = normalize_social_comments(provider, payload, source_event_id)
                 messages = normalize_event(provider, payload, source_event_id)
                 statuses = normalize_status_events(provider, payload)
@@ -675,6 +726,7 @@ def process_due_webhook_events(limit: int = 25, tenant_id: str | None = None) ->
                         ),
                         {"id": event_id},
                     )
+                    conn.execute(text("RELEASE SAVEPOINT webhook_event_processing"))
                     ignored += 1
                     continue
 
@@ -685,10 +737,29 @@ def process_due_webhook_events(limit: int = 25, tenant_id: str | None = None) ->
                     saved_comment = store_social_comment(conn, tenant_id, comment)
                     if saved_comment.get("id"):
                         comments_for_event += 1
+                        enqueue_social_comment_orchestration(
+                            conn,
+                            tenant_id=tenant_id,
+                            comment_id=saved_comment["id"],
+                            post_id=saved_comment.get("post_id") or comment.external_post_id,
+                            channel=comment.channel,
+                            message=comment.message,
+                            author_external_id=comment.author_external_id,
+                        )
                 for message in messages:
                     saved = _upsert_message(conn, tenant_id, source_event_id, payload, message)
                     if saved["inserted"]:
                         inserted_for_event += 1
+                        enqueue_conversation_orchestration(
+                            conn,
+                            tenant_id=tenant_id,
+                            conversation_id=saved["conversation_id"],
+                            message_id=saved["message_id"],
+                            channel=message.channel,
+                            text_value=message.text,
+                            external_contact_id=message.external_contact_id,
+                            msg_type=message.msg_type,
+                        )
                         trigger_result = execute_triggers_for_message(
                             conn,
                             tenant_id=tenant_id,
@@ -743,11 +814,14 @@ def process_due_webhook_events(limit: int = 25, tenant_id: str | None = None) ->
                         {"tenant_id": tenant_id, "period": _period_yyyymm(), "count": inserted_for_event},
                     )
 
+                conn.execute(text("RELEASE SAVEPOINT webhook_event_processing"))
                 processed += 1
                 messages_inserted += inserted_for_event
                 comments_inserted += comments_for_event
                 statuses_updated += updated_statuses_for_event
             except Exception as exc:
+                conn.execute(text("ROLLBACK TO SAVEPOINT webhook_event_processing"))
+                conn.execute(text("RELEASE SAVEPOINT webhook_event_processing"))
                 conn.execute(
                     text(
                         """

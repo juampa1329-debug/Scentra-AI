@@ -8,14 +8,44 @@ from app_saas.ai_gateway.providers.base import BaseProviderAdapter
 from app_saas.ai_gateway.providers.http import estimate_tokens, post_json
 
 
+def _attachment_parts(request: GatewayRequest) -> list[dict]:
+    parts: list[dict] = []
+    for attachment in request.attachments:
+        if attachment.text:
+            parts.append({"text": attachment.text})
+        if attachment.data_base64 and attachment.mime_type:
+            parts.append(
+                {
+                    "inline_data": {
+                        "mime_type": attachment.mime_type,
+                        "data": attachment.data_base64,
+                    }
+                }
+            )
+        elif attachment.uri and attachment.mime_type:
+            parts.append(
+                {
+                    "file_data": {
+                        "mime_type": attachment.mime_type,
+                        "file_uri": attachment.uri,
+                    }
+                }
+            )
+        elif attachment.name or attachment.mime_type:
+            label = attachment.name or attachment.mime_type or attachment.kind
+            parts.append({"text": f"[Adjunto {attachment.kind or 'file'} disponible para preprocesamiento: {label}]"})
+    return parts
+
+
 class GeminiAdapter(BaseProviderAdapter):
     def generate(self, request: GatewayRequest, token: str, model: str) -> ProviderResult:
         selected_model = model or self.definition.default_model
         query = urllib.parse.urlencode({"key": token})
         safe_model = urllib.parse.quote(selected_model, safe="")
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{safe_model}:generateContent?{query}"
+        user_parts = [{"text": request.user_prompt}, *_attachment_parts(request)]
         payload = {
-            "contents": [{"role": "user", "parts": [{"text": request.user_prompt}]}],
+            "contents": [{"role": "user", "parts": user_parts}],
             "systemInstruction": {"parts": [{"text": request.system_prompt}]},
             "generationConfig": {
                 "temperature": float(request.settings.get("temperature") or 0.5),
@@ -43,6 +73,5 @@ class GeminiAdapter(BaseProviderAdapter):
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             latency_ms=latency_ms,
-            metadata={"usage": usage},
+            metadata={"usage": usage, "attachment_count": len(request.attachments)},
         )
-

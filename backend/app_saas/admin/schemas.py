@@ -5,9 +5,20 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 
+class AiAgentPlanLimitsIn(BaseModel):
+    max_ai_agents: int = Field(default=1, ge=0, le=1000000)
+    max_active_ai_agents: int = Field(default=1, ge=0, le=1000000)
+    max_memory_archives: int = Field(default=1, ge=0, le=1000000)
+    allowed_agent_types_json: list[str] = Field(default_factory=list)
+    builder_enabled: bool = True
+    notes: str = Field(default="", max_length=1000)
+
+
 class AdminLoginIn(BaseModel):
     email: str = Field(min_length=3, max_length=240)
     password: str = Field(min_length=8, max_length=200)
+    captcha_token: str = Field(default="", max_length=5000)
+    captcha_provider: str = Field(default="turnstile", max_length=40)
 
 
 class AdminBootstrapIn(AdminLoginIn):
@@ -23,10 +34,32 @@ class PlatformTokenOut(BaseModel):
     platform_role: str
 
 
+class AdminMfaVerifyIn(BaseModel):
+    challenge_token: str = Field(min_length=20, max_length=500)
+    code: str = Field(min_length=4, max_length=20)
+
+
+class AdminMfaChallengeOut(BaseModel):
+    ok: bool = False
+    mfa_required: bool = True
+    challenge_token: str
+    method: str = "email_otp"
+    email_hint: str = ""
+    expires_at: str | None = None
+    email_sent: bool = False
+    dev_otp: str | None = None
+
+
+class AdminTwoFactorPatchIn(BaseModel):
+    enabled: bool = False
+    method: str = Field(default="email_otp", max_length=40)
+
+
 class TenantPatchIn(BaseModel):
     name: str | None = Field(default=None, min_length=2, max_length=160)
     status: str | None = Field(default=None, max_length=40)
     plan_code: str | None = Field(default=None, max_length=40)
+    industry_code: str | None = Field(default=None, max_length=80)
     subscription_status: str | None = Field(default=None, max_length=40)
     timezone: str | None = Field(default=None, max_length=80)
     locale: str | None = Field(default=None, max_length=20)
@@ -48,6 +81,7 @@ class PlanUpsertIn(BaseModel):
     is_active: bool = True
     sort_order: int = Field(default=100, ge=0, le=1000000)
     feature_flags_json: dict[str, Any] = Field(default_factory=dict)
+    ai_agent_limits: AiAgentPlanLimitsIn | None = None
 
 
 class PlanPatchIn(BaseModel):
@@ -65,6 +99,7 @@ class PlanPatchIn(BaseModel):
     is_active: bool | None = None
     sort_order: int | None = Field(default=None, ge=0, le=1000000)
     feature_flags_json: dict[str, Any] | None = None
+    ai_agent_limits: AiAgentPlanLimitsIn | None = None
 
 
 class FeatureFlagPatchIn(BaseModel):
@@ -81,6 +116,38 @@ class SubscriptionPatchIn(BaseModel):
     cancel_at_period_end: bool = False
 
 
+class BillingCreditCreateIn(BaseModel):
+    tenant_id: str = Field(min_length=20, max_length=80)
+    metric_code: str = Field(default="monthly_messages", max_length=80)
+    amount: int = Field(default=0, ge=1, le=1000000000)
+    reason: str = Field(default="", max_length=700)
+    expires_at: str = Field(default="", max_length=80)
+
+
+class BillingInvoiceCreateIn(BaseModel):
+    tenant_id: str = Field(min_length=20, max_length=80)
+    plan_code: str = Field(min_length=2, max_length=40)
+    status: str = Field(default="open", max_length=40)
+    total_cents: int | None = Field(default=None, ge=0, le=1000000000)
+    due_at: str = Field(default="", max_length=80)
+
+
 class TenantImpersonateIn(BaseModel):
     role: str = Field(default="admin", max_length=40)
     reason: str = Field(default="support", max_length=500)
+
+
+class ReliabilityRetentionPatchIn(BaseModel):
+    retention_days: int | None = Field(default=None, ge=1, le=3650)
+    batch_limit: int | None = Field(default=None, ge=1, le=10000)
+    enabled: bool | None = None
+    dry_run_default: bool | None = None
+    notes: str | None = Field(default=None, max_length=1000)
+
+
+class ReliabilityBackpressurePatchIn(BaseModel):
+    warn_backlog: int | None = Field(default=None, ge=0, le=10000000)
+    critical_backlog: int | None = Field(default=None, ge=1, le=10000000)
+    max_batch_size: int | None = Field(default=None, ge=1, le=10000)
+    is_active: bool | None = None
+    notes: str | None = Field(default=None, max_length=1000)

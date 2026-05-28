@@ -12,7 +12,7 @@ PROVIDER_DEFINITIONS: dict[str, ProviderDefinition] = {
         display_name="Google / Gemini",
         credential_key="GOOGLE_AI_API_KEY",
         default_model="gemini-2.5-flash",
-        static_models=("gemini-2.5-flash", "gemini-2.5-pro", "gemini-1.5-flash", "gemini-1.5-pro"),
+        static_models=("gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"),
         adapter="gemini",
         capabilities=("generate", "stream", "structured_outputs", "long_context", "multimodal"),
     ),
@@ -21,7 +21,7 @@ PROVIDER_DEFINITIONS: dict[str, ProviderDefinition] = {
         display_name="Groq",
         credential_key="GROQ_API_KEY",
         default_model="llama-3.1-8b-instant",
-        static_models=("llama-3.1-8b-instant", "llama-3.1-70b-versatile", "llama-3.3-70b-versatile"),
+        static_models=("llama-3.1-8b-instant", "llama-3.3-70b-versatile", "openai/gpt-oss-20b", "openai/gpt-oss-120b"),
         adapter="openai_compatible",
         base_url="https://api.groq.com/openai/v1",
         capabilities=("generate", "structured_outputs", "low_latency"),
@@ -41,7 +41,7 @@ PROVIDER_DEFINITIONS: dict[str, ProviderDefinition] = {
         display_name="OpenRouter",
         credential_key="OPENROUTER_API_KEY",
         default_model="google/gemini-2.5-flash",
-        static_models=("google/gemini-2.5-flash", "openai/gpt-4o-mini", "meta-llama/llama-3.1-8b-instruct"),
+        static_models=("google/gemini-2.5-flash", "google/gemini-2.5-flash-lite", "openai/gpt-4o-mini", "meta-llama/llama-3.1-8b-instruct"),
         adapter="openai_compatible",
         base_url="https://openrouter.ai/api/v1",
         capabilities=("generate", "structured_outputs", "fallback_gateway", "multi_model"),
@@ -51,10 +51,10 @@ PROVIDER_DEFINITIONS: dict[str, ProviderDefinition] = {
         display_name="Kimi / Moonshot AI",
         credential_key="KIMI_API_KEY",
         default_model="kimi-k2.6",
-        static_models=("kimi-k2.6", "kimi-k2", "moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"),
+        static_models=("kimi-k2.6", "kimi-k2", "moonshot-v1-8k-vision-preview", "moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"),
         adapter="openai_compatible",
         base_url="https://api.moonshot.ai/v1",
-        capabilities=("generate", "stream", "structured_outputs", "reasoning", "long_context", "tool_calling"),
+        capabilities=("generate", "stream", "structured_outputs", "reasoning", "long_context", "tool_calling", "multimodal"),
         metadata={"aliases": ["MOONSHOT_API_KEY"], "official": True},
     ),
 }
@@ -71,4 +71,3 @@ def provider_adapter(provider_code: str) -> BaseProviderAdapter:
     if definition.adapter == "gemini":
         return GeminiAdapter(definition)
     return OpenAICompatibleAdapter(definition)
-

@@ -30,10 +30,30 @@ services:
       SAAS_SECRET_KEY: ${SAAS_SECRET_KEY:-}
       SAAS_ACCESS_TOKEN_MINUTES: ${SAAS_ACCESS_TOKEN_MINUTES:-15}
       SAAS_REFRESH_TOKEN_DAYS: ${SAAS_REFRESH_TOKEN_DAYS:-15}
-      SAAS_CORS_ORIGINS: ${SAAS_CORS_ORIGINS:-http://localhost:5174,http://127.0.0.1:5174,http://localhost:5175,http://127.0.0.1:5175,http://localhost:3000,http://127.0.0.1:3000,https://app.scentra-ai.online,https://admin.scentra-ai.online,https://api.scentra-ai.online,https://scentra-ai.online,http://app.scentra-ai.online,http://admin.scentra-ai.online,http://api.scentra-ai.online,http://scentra-ai.online}
+      SAAS_CORS_ORIGINS: ${SAAS_CORS_ORIGINS:-http://localhost:5174,http://127.0.0.1:5174,http://localhost:5175,http://127.0.0.1:5175,http://localhost:8011,http://127.0.0.1:8011,http://localhost:3000,http://127.0.0.1:3000,https://app.scentra-ai.online,https://admin.scentra-ai.online,https://api.scentra-ai.online,https://scentra-ai.online,https://www.scentra-ai.online,http://app.scentra-ai.online,http://admin.scentra-ai.online,http://api.scentra-ai.online,http://scentra-ai.online,http://www.scentra-ai.online}
       SAAS_TRIAL_DAYS: ${SAAS_TRIAL_DAYS:-30}
       SAAS_TRIAL_PLAN_CODE: ${SAAS_TRIAL_PLAN_CODE:-starter}
       SAAS_MIGRATION_PROFILE: ${SAAS_MIGRATION_PROFILE:-core}
+      SAAS_CAPTCHA_ENABLED: ${SAAS_CAPTCHA_ENABLED:-false}
+      SAAS_CAPTCHA_PROVIDER: ${SAAS_CAPTCHA_PROVIDER:-turnstile}
+      SAAS_RATE_LIMIT_ENABLED: ${SAAS_RATE_LIMIT_ENABLED:-true}
+      SAAS_LOGIN_LOCK_FAILED_ATTEMPTS: ${SAAS_LOGIN_LOCK_FAILED_ATTEMPTS:-6}
+      SAAS_LOGIN_LOCK_MINUTES: ${SAAS_LOGIN_LOCK_MINUTES:-15}
+      SAAS_PASSWORD_RESET_MINUTES: ${SAAS_PASSWORD_RESET_MINUTES:-30}
+      SAAS_PASSWORD_RESET_PATH: ${SAAS_PASSWORD_RESET_PATH:-/?reset_token=}
+      SAAS_MFA_OTP_MINUTES: ${SAAS_MFA_OTP_MINUTES:-10}
+      SAAS_MFA_OTP_LENGTH: ${SAAS_MFA_OTP_LENGTH:-6}
+      SAAS_MFA_MAX_ATTEMPTS: ${SAAS_MFA_MAX_ATTEMPTS:-5}
+      SAAS_MFA_REQUIRED_ROLES: ${SAAS_MFA_REQUIRED_ROLES:-}
+      SAAS_ADMIN_MFA_REQUIRED_ROLES: ${SAAS_ADMIN_MFA_REQUIRED_ROLES:-}
+      SAAS_SECURITY_NOTIFY_ENABLED: ${SAAS_SECURITY_NOTIFY_ENABLED:-true}
+      TURNSTILE_SECRET_KEY: ${TURNSTILE_SECRET_KEY:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-}
+      SMTP_STARTTLS: ${SMTP_STARTTLS:-true}
       SCENTRA_META_ACCESS_TOKEN: ${SCENTRA_META_ACCESS_TOKEN:-}
       SCENTRA_WHATSAPP_BUSINESS_ACCOUNT_ID: ${SCENTRA_WHATSAPP_BUSINESS_ACCOUNT_ID:-}
       SCENTRA_META_GRAPH_VERSION: ${SCENTRA_META_GRAPH_VERSION:-v24.0}
@@ -43,6 +63,27 @@ services:
       SCENTRA_INSTAGRAM_WEBHOOK_VERIFY_TOKEN: ${SCENTRA_INSTAGRAM_WEBHOOK_VERIFY_TOKEN:-}
       SCENTRA_API_PUBLIC_URL: ${SCENTRA_API_PUBLIC_URL:-https://api.scentra-ai.online}
       SCENTRA_APP_PUBLIC_URL: ${SCENTRA_APP_PUBLIC_URL:-https://app.scentra-ai.online}
+      BILLING_DEFAULT_PROVIDER: ${BILLING_DEFAULT_PROVIDER:-wompi}
+      SAAS_BILLING_LIFECYCLE_INTERVAL_MINUTES: ${SAAS_BILLING_LIFECYCLE_INTERVAL_MINUTES:-30}
+      BILLING_PAST_DUE_GRACE_DAYS: ${BILLING_PAST_DUE_GRACE_DAYS:-7}
+      BILLING_SUCCESS_URL: ${BILLING_SUCCESS_URL:-https://app.scentra-ai.online/?billing=success}
+      BILLING_CANCEL_URL: ${BILLING_CANCEL_URL:-https://app.scentra-ai.online/?billing=cancelled}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      MERCADOPAGO_ACCESS_TOKEN: ${MERCADOPAGO_ACCESS_TOKEN:-}
+      MERCADOPAGO_WEBHOOK_SECRET: ${MERCADOPAGO_WEBHOOK_SECRET:-}
+      WOMPI_ENVIRONMENT: ${WOMPI_ENVIRONMENT:-production}
+      WOMPI_PUBLIC_KEY: ${WOMPI_PUBLIC_KEY:-}
+      WOMPI_PRIVATE_KEY: ${WOMPI_PRIVATE_KEY:-}
+      WOMPI_INTEGRITY_KEY: ${WOMPI_INTEGRITY_KEY:-}
+      WOMPI_EVENTS_KEY: ${WOMPI_EVENTS_KEY:-}
+      SAAS_ML_ENABLED: ${SAAS_ML_ENABLED:-false}
+      SAAS_ML_SHADOW_INFERENCE_ENABLED: ${SAAS_ML_SHADOW_INFERENCE_ENABLED:-false}
+      SAAS_ML_AUTO_TRAIN_ENABLED: ${SAAS_ML_AUTO_TRAIN_ENABLED:-false}
+      SAAS_ML_SERVICE_URL: ${SAAS_ML_SERVICE_URL:-http://ml-service:8090}
+      SAAS_ML_INFERENCE_TIMEOUT_SEC: ${SAAS_ML_INFERENCE_TIMEOUT_SEC:-3}
+      SAAS_MLFLOW_TRACKING_URI: ${SAAS_MLFLOW_TRACKING_URI:-http://mlflow:5000}
+      SAAS_QDRANT_URL: ${SAAS_QDRANT_URL:-http://qdrant:6333}
     command: ["bash", "-lc", "python -m app_saas.tools.migrate /app/migrations && uvicorn app_saas.main:app --host 0.0.0.0 --port 8000"]
     ports:
       - "127.0.0.1:${SAAS_API_HOST_PORT:-8010}:8000"
@@ -82,6 +123,26 @@ services:
       SAAS_WORKER_NAME: ${SAAS_WORKER_NAME:-worker-local}
       SAAS_WORKER_IDLE_SEC: ${SAAS_WORKER_IDLE_SEC:-5}
       SAAS_WORKER_BATCH_SIZE: ${SAAS_WORKER_BATCH_SIZE:-25}
+      SAAS_CAPTCHA_ENABLED: ${SAAS_CAPTCHA_ENABLED:-false}
+      SAAS_CAPTCHA_PROVIDER: ${SAAS_CAPTCHA_PROVIDER:-turnstile}
+      SAAS_RATE_LIMIT_ENABLED: ${SAAS_RATE_LIMIT_ENABLED:-true}
+      SAAS_LOGIN_LOCK_FAILED_ATTEMPTS: ${SAAS_LOGIN_LOCK_FAILED_ATTEMPTS:-6}
+      SAAS_LOGIN_LOCK_MINUTES: ${SAAS_LOGIN_LOCK_MINUTES:-15}
+      SAAS_PASSWORD_RESET_MINUTES: ${SAAS_PASSWORD_RESET_MINUTES:-30}
+      SAAS_PASSWORD_RESET_PATH: ${SAAS_PASSWORD_RESET_PATH:-/?reset_token=}
+      SAAS_MFA_OTP_MINUTES: ${SAAS_MFA_OTP_MINUTES:-10}
+      SAAS_MFA_OTP_LENGTH: ${SAAS_MFA_OTP_LENGTH:-6}
+      SAAS_MFA_MAX_ATTEMPTS: ${SAAS_MFA_MAX_ATTEMPTS:-5}
+      SAAS_MFA_REQUIRED_ROLES: ${SAAS_MFA_REQUIRED_ROLES:-}
+      SAAS_ADMIN_MFA_REQUIRED_ROLES: ${SAAS_ADMIN_MFA_REQUIRED_ROLES:-}
+      SAAS_SECURITY_NOTIFY_ENABLED: ${SAAS_SECURITY_NOTIFY_ENABLED:-true}
+      TURNSTILE_SECRET_KEY: ${TURNSTILE_SECRET_KEY:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-}
+      SMTP_STARTTLS: ${SMTP_STARTTLS:-true}
       SAAS_TRIAL_DAYS: ${SAAS_TRIAL_DAYS:-30}
       SAAS_TRIAL_PLAN_CODE: ${SAAS_TRIAL_PLAN_CODE:-starter}
       SCENTRA_META_ACCESS_TOKEN: ${SCENTRA_META_ACCESS_TOKEN:-}
@@ -93,7 +154,156 @@ services:
       SCENTRA_INSTAGRAM_WEBHOOK_VERIFY_TOKEN: ${SCENTRA_INSTAGRAM_WEBHOOK_VERIFY_TOKEN:-}
       SCENTRA_API_PUBLIC_URL: ${SCENTRA_API_PUBLIC_URL:-https://api.scentra-ai.online}
       SCENTRA_APP_PUBLIC_URL: ${SCENTRA_APP_PUBLIC_URL:-https://app.scentra-ai.online}
+      BILLING_DEFAULT_PROVIDER: ${BILLING_DEFAULT_PROVIDER:-wompi}
+      SAAS_BILLING_LIFECYCLE_INTERVAL_MINUTES: ${SAAS_BILLING_LIFECYCLE_INTERVAL_MINUTES:-30}
+      BILLING_PAST_DUE_GRACE_DAYS: ${BILLING_PAST_DUE_GRACE_DAYS:-7}
+      BILLING_SUCCESS_URL: ${BILLING_SUCCESS_URL:-https://app.scentra-ai.online/?billing=success}
+      BILLING_CANCEL_URL: ${BILLING_CANCEL_URL:-https://app.scentra-ai.online/?billing=cancelled}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      MERCADOPAGO_ACCESS_TOKEN: ${MERCADOPAGO_ACCESS_TOKEN:-}
+      MERCADOPAGO_WEBHOOK_SECRET: ${MERCADOPAGO_WEBHOOK_SECRET:-}
+      WOMPI_ENVIRONMENT: ${WOMPI_ENVIRONMENT:-production}
+      WOMPI_PUBLIC_KEY: ${WOMPI_PUBLIC_KEY:-}
+      WOMPI_PRIVATE_KEY: ${WOMPI_PRIVATE_KEY:-}
+      WOMPI_INTEGRITY_KEY: ${WOMPI_INTEGRITY_KEY:-}
+      WOMPI_EVENTS_KEY: ${WOMPI_EVENTS_KEY:-}
+      SAAS_ML_ENABLED: ${SAAS_ML_ENABLED:-false}
+      SAAS_ML_SHADOW_INFERENCE_ENABLED: ${SAAS_ML_SHADOW_INFERENCE_ENABLED:-false}
+      SAAS_ML_AUTO_TRAIN_ENABLED: ${SAAS_ML_AUTO_TRAIN_ENABLED:-false}
+      SAAS_ML_SERVICE_URL: ${SAAS_ML_SERVICE_URL:-http://ml-service:8090}
+      SAAS_ML_INFERENCE_TIMEOUT_SEC: ${SAAS_ML_INFERENCE_TIMEOUT_SEC:-3}
+      SAAS_MLFLOW_TRACKING_URI: ${SAAS_MLFLOW_TRACKING_URI:-http://mlflow:5000}
+      SAAS_QDRANT_URL: ${SAAS_QDRANT_URL:-http://qdrant:6333}
     command: ["python", "-m", "app_saas.workers.runner"]
+    networks:
+      - coolify
+
+  admin-frontend:
+    build:
+      context: ./admin-frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE: ${ADMIN_VITE_API_BASE:-https://api.scentra-ai.online}
+        VITE_CLIENT_APP_BASE: ${ADMIN_VITE_CLIENT_APP_BASE:-https://app.scentra-ai.online}
+        VITE_CAPTCHA_ENABLED: ${ADMIN_VITE_CAPTCHA_ENABLED:-false}
+        VITE_TURNSTILE_SITE_KEY: ${ADMIN_VITE_TURNSTILE_SITE_KEY:-}
+        VITE_ADMIN_BOOTSTRAP_ENABLED: ${ADMIN_VITE_BOOTSTRAP_ENABLED:-false}
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${SAAS_ADMIN_HOST_PORT:-8011}:80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/health | grep -q ok"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 10s
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.scentra_admin_http.rule=Host(`admin.scentra-ai.online`)
+      - traefik.http.routers.scentra_admin_http.entrypoints=http
+      - traefik.http.routers.scentra_admin_http.middlewares=scentra_admin_https_redirect
+      - traefik.http.middlewares.scentra_admin_https_redirect.redirectscheme.scheme=https
+      - traefik.http.routers.scentra_admin_https.rule=Host(`admin.scentra-ai.online`)
+      - traefik.http.routers.scentra_admin_https.entrypoints=https
+      - traefik.http.routers.scentra_admin_https.tls=true
+      - traefik.http.routers.scentra_admin_https.tls.certresolver=letsencrypt
+      - traefik.http.services.scentra_admin.loadbalancer.server.port=80
+    networks:
+      - coolify
+
+  platform-admin-seed:
+    profiles:
+      - admin-seed
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg2://scentra_saas:scentra_saas_dev@scentra-saas-db:5432/scentra_saas}
+      SAAS_ENV: ${SAAS_ENV:-local}
+      SAAS_JWT_SECRET: ${SAAS_JWT_SECRET:-change-me-local-saas-secret}
+      SAAS_JWT_ISSUER: ${SAAS_JWT_ISSUER:-scentra-ai}
+      SAAS_SECRET_KEY: ${SAAS_SECRET_KEY:-}
+      SAAS_ADMIN_EMAIL: ${SAAS_ADMIN_EMAIL:-}
+      SAAS_ADMIN_PASSWORD: ${SAAS_ADMIN_PASSWORD:-}
+      SAAS_ADMIN_FULL_NAME: ${SAAS_ADMIN_FULL_NAME:-Scentra Admin}
+      SAAS_ADMIN_ROLE: ${SAAS_ADMIN_ROLE:-superadmin}
+      SAAS_ADMIN_NOTES: ${SAAS_ADMIN_NOTES:-platform admin seed}
+    command: ["python", "-m", "app_saas.tools.create_platform_admin"]
+    networks:
+      - coolify
+
+  mlflow:
+    profiles:
+      - ml
+    build:
+      context: .
+      dockerfile: backend/Dockerfile.ml
+    environment:
+      MLFLOW_TRACKING_URI: ${SAAS_MLFLOW_TRACKING_URI:-http://mlflow:5000}
+    command: ["mlflow", "server", "--backend-store-uri", "sqlite:////mlflow/mlflow.db", "--default-artifact-root", "/mlflow/artifacts", "--host", "0.0.0.0", "--port", "5000"]
+    volumes:
+      - mlflow-data:/mlflow
+    ports:
+      - "127.0.0.1:${SAAS_MLFLOW_HOST_PORT:-5000}:5000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000', timeout=3).read()\""]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 20s
+    networks:
+      - coolify
+
+  ml-service:
+    profiles:
+      - ml
+    build:
+      context: .
+      dockerfile: backend/Dockerfile.ml
+    depends_on:
+      scentra-saas-db:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg2://scentra_saas:scentra_saas_dev@scentra-saas-db:5432/scentra_saas}
+      SAAS_ENV: ${SAAS_ENV:-local}
+      SAAS_ML_ENABLED: ${SAAS_ML_ENABLED:-true}
+      SAAS_ML_SHADOW_INFERENCE_ENABLED: ${SAAS_ML_SHADOW_INFERENCE_ENABLED:-true}
+      SAAS_ML_AUTO_TRAIN_ENABLED: ${SAAS_ML_AUTO_TRAIN_ENABLED:-false}
+      SAAS_MLFLOW_TRACKING_URI: ${SAAS_MLFLOW_TRACKING_URI:-http://mlflow:5000}
+      MLFLOW_TRACKING_URI: ${SAAS_MLFLOW_TRACKING_URI:-http://mlflow:5000}
+      SAAS_ML_MODEL_DIR: ${SAAS_ML_MODEL_DIR:-/models}
+      BENTOML_HOME: ${BENTOML_HOME:-/bentoml}
+      SAAS_QDRANT_URL: ${SAAS_QDRANT_URL:-http://qdrant:6333}
+    volumes:
+      - ml-models:/models
+      - bentoml-data:/bentoml
+    ports:
+      - "127.0.0.1:${SAAS_ML_HOST_PORT:-8090}:8090"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=3).read()\""]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 30s
+    networks:
+      - coolify
+
+  qdrant:
+    profiles:
+      - ml
+    image: qdrant/qdrant:v1.12.4
+    volumes:
+      - qdrant-data:/qdrant/storage
+    ports:
+      - "127.0.0.1:${SAAS_QDRANT_HOST_PORT:-6333}:6333"
     networks:
       - coolify
 
@@ -103,3 +313,7 @@ networks:
 
 volumes:
   pgdata-saas:
+  mlflow-data:
+  ml-models:
+  bentoml-data:
+  qdrant-data:

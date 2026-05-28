@@ -1,34 +1,50 @@
-﻿import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import CrmPanel from "./CrmPanel.jsx";
 import LabelsPanel from "./LabelsPanel.jsx";
 import CampaignsPanel from "./CampaignsPanel.jsx";
 import BroadcastPanel from "./BroadcastPanel.jsx";
 import AdsPanel from "./AdsPanel.jsx";
 import AiAgentsPanel from "./AiAgentsPanel.jsx";
+import IntelligencePanel from "./IntelligencePanel.jsx";
+import AiEcosystemPanel from "./AiEcosystemPanel.jsx";
+import WorkflowComposerPanel from "./WorkflowComposerPanel.jsx";
+import TrustCenterPanel from "./TrustCenterPanel.jsx";
+import { t } from "./i18n.js";
 
 const API_BASE = (import.meta.env.VITE_API_BASE || "").replace(/\/$/, "");
 const TOKEN_KEY = "scentra_ai_access_token";
 const REFRESH_KEY = "scentra_ai_refresh_token";
 const SEEN_MILESTONES_KEY = "scentra_seen_milestones_v1";
+const TURNSTILE_SITE_KEY = String(import.meta.env.VITE_TURNSTILE_SITE_KEY || "").trim();
+const CAPTCHA_ENABLED = ["1", "true", "yes", "on"].includes(String(import.meta.env.VITE_CAPTCHA_ENABLED || "").toLowerCase()) || Boolean(TURNSTILE_SITE_KEY);
+const CAPTCHA_PROVIDER = "turnstile";
+let turnstileScriptPromise = null;
 
 const AI_API_PROVIDERS = [
-  { code: "google", category: "ai", name: "Google / Gemini", env: "GOOGLE_AI_API_KEY", alt: "GEMINI_API_KEY", models: "gemini-2.5-flash, gemini-2.5-pro, gemma-3-*", supportsModels: true },
-  { code: "groq", category: "ai", name: "Groq", env: "GROQ_API_KEY", alt: "", models: "llama-3.1-8b-instant, llama-3.1-70b-versatile", supportsModels: true },
-  { code: "mistral", category: "ai", name: "Mistral", env: "MISTRAL_API_KEY", alt: "", models: "mistral-small-latest, mistral-medium-latest", supportsModels: true },
-  { code: "openrouter", category: "ai", name: "OpenRouter", env: "OPENROUTER_API_KEY", alt: "OPENROUTER_SITE / OPENROUTER_APP_NAME", models: "catalogo live de OpenRouter", supportsModels: true },
-  { code: "kimi", category: "ai", name: "Kimi / Moonshot AI", env: "KIMI_API_KEY", alt: "MOONSHOT_API_KEY", models: "kimi-k2.6, kimi-k2, moonshot-v1-*", supportsModels: true },
+  { code: "google", category: "ai", name: "Google / Gemini", env: "GOOGLE_AI_API_KEY", alt: "GEMINI_API_KEY", models: "gemini-2.5-flash, gemini-2.5-flash-lite, gemini-2.5-pro, gemini-2.0-flash", summary: "Multimodal, voz, imagen y bajo costo con Flash Lite.", supportsModels: true },
+  { code: "groq", category: "ai", name: "Groq", env: "GROQ_API_KEY", alt: "", models: "llama-3.1-8b-instant, llama-3.3-70b-versatile, openai/gpt-oss-20b, openai/gpt-oss-120b", summary: "Clasificacion rapida y baja latencia.", supportsModels: true },
+  { code: "mistral", category: "ai", name: "Mistral", env: "MISTRAL_API_KEY", alt: "", models: "mistral-small-latest, mistral-medium-latest, mistral-large-latest", summary: "Tareas cortas, clasificacion y costo controlado.", supportsModels: true },
+  { code: "openrouter", category: "ai", name: "OpenRouter", env: "OPENROUTER_API_KEY", alt: "OPENROUTER_SITE / OPENROUTER_APP_NAME", models: "google/gemini-2.5-flash, google/gemini-2.5-flash-lite, google/gemini-2.5-pro, openai/gpt-4o-mini", summary: "Fallback multi-modelo y pruebas por proveedor.", supportsModels: true },
+  { code: "kimi", category: "ai", name: "Kimi / Moonshot AI", env: "KIMI_API_KEY", alt: "MOONSHOT_API_KEY", models: "kimi-k2.6, kimi-k2, moonshot-v1-8k-vision-preview", summary: "Razonamiento largo, agentes y vision cuando el modelo lo soporte.", supportsModels: true },
 ];
+const VISION_API_PROVIDERS = AI_API_PROVIDERS.filter((provider) => ["google", "openrouter", "kimi"].includes(provider.code));
 
 const TTS_API_PROVIDERS = [
-  { code: "elevenlabs", category: "tts", name: "ElevenLabs", env: "ELEVENLABS_API_KEY", fields: "ELEVENLABS_VOICE_ID, ELEVENLABS_MODEL_ID", supportsModels: true },
-  { code: "google_tts", category: "tts", name: "Google Cloud TTS", env: "GOOGLE_CLOUD_TTS_API_KEY", fields: "GOOGLE_TTS_LANGUAGE_CODE, GOOGLE_TTS_VOICE_NAME", supportsModels: true },
-  { code: "piper", category: "tts", name: "Piper local", env: "PIPER_BIN", fields: "PIPER_MODEL_PATH", supportsModels: false },
+  { code: "elevenlabs", category: "tts", name: "ElevenLabs", env: "ELEVENLABS_API_KEY", fields: "ELEVENLABS_VOICE_ID, ELEVENLABS_MODEL_ID", summary: "Voces premium para agentes y mensajes de voz.", supportsModels: true },
+  { code: "google_tts", category: "tts", name: "Google Cloud TTS", env: "GOOGLE_CLOUD_TTS_API_KEY", fields: "GOOGLE_TTS_LANGUAGE_CODE, GOOGLE_TTS_VOICE_NAME", summary: "Voces cloud estables y catalogo por idioma.", supportsModels: true },
+  { code: "piper", category: "tts", name: "Piper local", env: "PIPER_BIN", fields: "PIPER_MODEL_PATH", summary: "Voz local futura; requiere binario/modelo.", supportsModels: false },
+];
+
+const SEARCH_API_PROVIDERS = [
+  { code: "tavily", category: "search", name: "Tavily Search", env: "TAVILY_API_KEY", summary: "Busqueda web optimizada para IA con imagenes de apoyo.", supportsModels: false },
+  { code: "brave_search", category: "search", name: "Brave Search API", env: "BRAVE_SEARCH_API_KEY", summary: "Busqueda web e imagenes con indice independiente y Safe Search.", supportsModels: false },
+  { code: "serpapi", category: "search", name: "SerpAPI", env: "SERPAPI_API_KEY", summary: "Resultados estructurados de Google web e imagenes.", supportsModels: false },
 ];
 
 const CHANNEL_API_PROVIDERS = [
-  { code: "whatsapp_cloud", category: "channel", name: "WhatsApp Cloud API", env: "WHATSAPP_PERMANENT_TOKEN", fields: ["WHATSAPP_TOKEN", "META_ACCESS_TOKEN", "WHATSAPP_PHONE_NUMBER_ID", "WHATSAPP_WABA_ID", "META_APP_ID", "WHATSAPP_GRAPH_VERSION"] },
-  { code: "instagram_business", category: "channel", name: "Instagram Business", env: "INSTAGRAM_PAGE_ACCESS_TOKEN", fields: ["INSTAGRAM_PAGE_ID", "INSTAGRAM_BUSINESS_ACCOUNT_ID", "META_APP_ID", "META_APP_SECRET"] },
-  { code: "woocommerce", category: "commerce", name: "WooCommerce", env: "WC_BASE_URL", fields: ["WC_CONSUMER_KEY", "WC_CONSUMER_SECRET"] },
+  { code: "whatsapp_cloud", category: "channel", name: "WhatsApp Cloud API", env: "WHATSAPP_PERMANENT_TOKEN", summary: "Runtime de WhatsApp y envio de media.", fields: ["WHATSAPP_TOKEN", "META_ACCESS_TOKEN", "WHATSAPP_PHONE_NUMBER_ID", "WHATSAPP_WABA_ID", "META_APP_ID", "WHATSAPP_GRAPH_VERSION"] },
+  { code: "instagram_business", category: "channel", name: "Instagram Business", env: "INSTAGRAM_PAGE_ACCESS_TOKEN", summary: "DMs, comentarios y activos Meta.", fields: ["INSTAGRAM_PAGE_ID", "INSTAGRAM_BUSINESS_ACCOUNT_ID", "META_APP_ID", "META_APP_SECRET"] },
+  { code: "woocommerce", category: "commerce", name: "WooCommerce", env: "WC_BASE_URL", summary: "Catalogo/productos para ventas asistidas.", fields: ["WC_CONSUMER_KEY", "WC_CONSUMER_SECRET"] },
 ];
 
 const FEATURE_LABELS = {
@@ -42,36 +58,75 @@ const FEATURE_LABELS = {
   elevenlabs_voice: "Voz ElevenLabs",
 };
 
-const NAV_ITEMS = [
-  { key: "dashboard", label: "Dashboard", icon: "▥" },
-  { key: "inbox", label: "Inbox", icon: "□" },
-  { key: "customers", label: "Clientes", icon: "◎" },
-  { key: "labels", label: "Etiquetas", icon: "◇" },
-  { key: "campaigns", label: "CRM", icon: "↯" },
-  { key: "broadcast", label: "Masiva", icon: "◁" },
-  { key: "ads", label: "Ads", icon: "▤" },
-  { key: "agents", label: "AI Agents", icon: "✦" },
-  { key: "settings", label: "Ajustes", icon: "⚙" },
+const FALLBACK_VERTICAL_PACKS = [
+  { code: "general", label: "General", description: "Pack base para empresas sin vertical definida.", counts: {} },
+  { code: "restaurant", label: "Restaurantes", description: "Reservas, menu, pedidos y no-shows.", counts: {} },
+  { code: "hotel", label: "Hoteles", description: "Reservas, cotizaciones, concierge y upsell.", counts: {} },
+  { code: "health", label: "Clinicas y salud", description: "Citas, intake administrativo y escalacion segura.", counts: {} },
+  { code: "education", label: "Academias", description: "Admisiones, programas, clases y seguimiento.", counts: {} },
+  { code: "real_estate", label: "Inmobiliarias", description: "Calificacion inmobiliaria, propiedades y visitas.", counts: {} },
+  { code: "legal", label: "Legal", description: "Intake legal, documentos y escalacion.", counts: {} },
+  { code: "insurance", label: "Seguros", description: "Siniestros, polizas, documentos y seguimiento.", counts: {} },
+  { code: "beauty", label: "Estetica y belleza", description: "Agenda, preferencias, paquetes y recordatorios.", counts: {} },
+  { code: "services", label: "Servicios", description: "Solicitudes, cotizaciones, agenda y despacho.", counts: {} },
 ];
 
-const defaultRegister = () => ({ email: "", password: "", full_name: "", tenant_name: "", tenant_slug: "" });
+const NAV_ITEMS = [
+  { key: "dashboard", label: t("nav.dashboard"), icon: "▥" },
+  { key: "inbox", label: t("nav.inbox"), icon: "□" },
+  { key: "customers", label: t("nav.customers"), icon: "◎" },
+  { key: "labels", label: t("nav.labels"), icon: "◇" },
+  { key: "campaigns", label: t("nav.campaigns"), icon: "↯" },
+  { key: "broadcast", label: t("nav.broadcast"), icon: "◁" },
+  { key: "ads", label: t("nav.ads"), icon: "▤" },
+  { key: "agents", label: t("nav.agents"), icon: "✦" },
+  { key: "intelligence", label: t("nav.intelligence"), icon: "AI" },
+  { key: "ecosystem", label: t("nav.ecosystem"), icon: "SDK" },
+  { key: "composer", label: t("nav.composer"), icon: "WF" },
+  { key: "trust", label: t("nav.trust"), icon: "AI" },
+  { key: "settings", label: t("nav.settings"), icon: "⚙" },
+];
+
+const SETTINGS_TABS = [
+  ["ia", t("settings.tab.ia")],
+  ["vertical", t("settings.tab.vertical")],
+  ["channels", t("settings.tab.channels")],
+  ["apis", t("settings.tab.apis")],
+  ["debug", t("settings.tab.debug")],
+  ["users", t("settings.tab.users")],
+  ["profile", t("settings.tab.profile")],
+  ["security", t("settings.tab.security")],
+  ["plan", t("settings.tab.plan")],
+];
+
+const defaultRegister = () => ({ email: "", password: "", full_name: "", tenant_name: "", tenant_slug: "", industry_code: "general" });
+const defaultPasswordRecovery = () => ({ email: "" });
+const defaultPasswordReset = () => ({ token: "", new_password: "", confirm_password: "" });
 const defaultAiConfig = () => ({
   enabled: true,
   provider: "google",
   model: "Gemini 2.5 Flash",
-  systemPrompt: "IDENTIDAD Y ROL: Scentra +AI\n\nEres una asesora comercial experta. Responde con tono humano, claro y orientado a convertir conversaciones en ventas.",
-  maxTokens: "2000",
+  systemPrompt: "IDENTIDAD Y ROL: Scentra +AI\n\nEres una asesora comercial experta. Responde con tono humano, claro, breve y orientado a convertir conversaciones en ventas sin perder contexto.",
+  maxTokens: "700",
   temperature: "0.5",
   fallbackProvider: "groq",
   fallbackModel: "llama-3.1-8b-instant",
-  chunks: "480",
-  delayBetween: "4000",
-  typingDelay: "4000",
+  humanReplyStyle: true,
+  humanReplySplitting: true,
+  replyMaxOutputTokens: "700",
+  chunks: "220",
+  delayBetween: "4200",
+  typingDelay: "3200",
   cooldown: "6",
+  recentMessageLimit: "16",
+  messageContextChars: "1200",
   typingIndicator: true,
   voiceEnabled: true,
   preferVoice: false,
   ttsProvider: "elevenlabs",
+  voiceAnalysisProvider: "google",
+  visionAnalysisProvider: "google",
+  webImageSearchProvider: "tavily",
   voiceName: "Linda Gomez - Energetic and Upbeat",
   voiceId: "TsKSGPuG26FpNj0JzQBq",
   voiceModel: "eleven_v3",
@@ -104,6 +159,73 @@ const defaultFacebookForm = () => ({
   graph_api_version: "v24.0",
 });
 
+function loadTurnstileScript() {
+  if (window.turnstile) return Promise.resolve(window.turnstile);
+  if (turnstileScriptPromise) return turnstileScriptPromise;
+  turnstileScriptPromise = new Promise((resolve, reject) => {
+    const existing = document.querySelector("script[data-scentra-turnstile]");
+    if (existing) {
+      existing.addEventListener("load", () => resolve(window.turnstile));
+      existing.addEventListener("error", reject);
+      return;
+    }
+    const script = document.createElement("script");
+    script.src = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";
+    script.async = true;
+    script.defer = true;
+    script.dataset.scentraTurnstile = "true";
+    script.onload = () => resolve(window.turnstile);
+    script.onerror = reject;
+    document.head.appendChild(script);
+  });
+  return turnstileScriptPromise;
+}
+
+function TurnstileChallenge({ onToken, resetKey = 0 }) {
+  const containerRef = useRef(null);
+  const widgetIdRef = useRef(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!CAPTCHA_ENABLED || !TURNSTILE_SITE_KEY) {
+      onToken("");
+      return undefined;
+    }
+    onToken("");
+    loadTurnstileScript()
+      .then((turnstile) => {
+        if (cancelled || !containerRef.current || !turnstile) return;
+        if (widgetIdRef.current !== null && turnstile.remove) {
+          try { turnstile.remove(widgetIdRef.current); } catch { /* widget may already be gone */ }
+        }
+        containerRef.current.innerHTML = "";
+        widgetIdRef.current = turnstile.render(containerRef.current, {
+          sitekey: TURNSTILE_SITE_KEY,
+          theme: "dark",
+          callback: (token) => onToken(token || ""),
+          "expired-callback": () => onToken(""),
+          "error-callback": () => onToken(""),
+        });
+      })
+      .catch(() => onToken(""));
+    return () => {
+      cancelled = true;
+      if (window.turnstile?.remove && widgetIdRef.current !== null) {
+        try { window.turnstile.remove(widgetIdRef.current); } catch { /* ignore cleanup race */ }
+      }
+      widgetIdRef.current = null;
+    };
+  }, [onToken, resetKey]);
+
+  if (!CAPTCHA_ENABLED || !TURNSTILE_SITE_KEY) return null;
+  return (
+    <div className="captcha-box">
+      <div ref={containerRef} />
+      <small>Proteccion anti-bots activa.</small>
+    </div>
+  );
+}
+
 function formatApiError(data, fallback) {
   const detail = data?.detail || data?.error;
   if (Array.isArray(detail)) {
@@ -116,6 +238,9 @@ function formatApiError(data, fallback) {
     if (detail.code === "plan_limit_reached") return `Limite de plan alcanzado: ${detail.metric} (${detail.used}/${detail.limit}).`;
     if (detail.code === "ai_agent_limit_reached") return `Limite de agentes AI alcanzado: ${detail.used}/${detail.limit}.`;
     if (detail.code === "active_ai_agent_limit_reached") return `Limite de agentes AI activos alcanzado: ${detail.used}/${detail.limit}. Pausa otro agente antes de activar este.`;
+    if (detail.code === "agent_preflight_not_ready") return `Preflight del agente no aprobado (${detail.score || 0}/100). Revisa los checks antes de activar.`;
+    if (detail.code === "ai_agent_budget_exceeded") return "Presupuesto del agente excedido. Ajusta limite o pausa hard stop.";
+    if (detail.code === "ai_agent_not_active") return "Solo puedes asignar conversaciones a agentes activos.";
     if (detail.code === "feature_not_enabled") return `Modulo no incluido o desactivado: ${FEATURE_LABELS[detail.feature] || detail.feature}.`;
     if (detail.code === "tenant_not_operational") return `Empresa no habilitada para operar. Estado: ${detail.status || "desconocido"}.`;
     return detail.message || detail.code || fallback;
@@ -248,6 +373,7 @@ function todayLabel() {
 }
 const pct = (used, limit) => (!Number(limit || 0) ? 0 : Math.min(100, Math.round((Number(used || 0) / Number(limit || 0)) * 100)));
 const number = (value) => Number(value || 0).toLocaleString("es-CO");
+const money = (cents, currency = "USD") => `${currency} ${(Number(cents || 0) / 100).toLocaleString("es-CO", { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
 const fullWebhookUrl = (path) => {
   const cleanPath = String(path || "").trim();
   if (!cleanPath) return "";
@@ -278,6 +404,47 @@ const compactDateTimeLabel = (value) => {
   if (date.toDateString() === yesterday.toDateString()) return `ayer ${chatTimeLabel(value)}`;
   return `${new Intl.DateTimeFormat("es-CO", { day: "2-digit", month: "short" }).format(date)} ${chatTimeLabel(value)}`;
 };
+const datetimeLocalValue = (value) => {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value).slice(0, 16);
+  const offsetMs = date.getTimezoneOffset() * 60000;
+  return new Date(date.getTime() - offsetMs).toISOString().slice(0, 16);
+};
+const isPastDate = (value) => {
+  if (!value) return false;
+  const date = new Date(value);
+  return !Number.isNaN(date.getTime()) && date.getTime() < Date.now();
+};
+const leadTemperatureLabel = (value, score = 0) => {
+  const key = String(value || "").toLowerCase() || (Number(score || 0) >= 75 ? "hot" : Number(score || 0) >= 40 ? "warm" : "cold");
+  return { hot: "Caliente", warm: "Tibio", cold: "Frio" }[key] || key;
+};
+const predictionTypeLabel = (value) => ({
+  lead_scoring: "Lead scoring",
+  churn_prediction: "Churn",
+  smart_remarketing: "Remarketing",
+  operational_anomaly: "Operacion",
+}[String(value || "").toLowerCase()] || "Prediccion");
+const priorityLabel = (value) => ({
+  urgent: "Urgente",
+  high: "Alta",
+  normal: "Normal",
+  low: "Baja",
+}[String(value || "normal").toLowerCase()] || "Normal");
+const customFieldOptions = (field) => {
+  const raw = field?.options_json;
+  if (Array.isArray(raw)) return raw.map((item) => String(item || "").trim()).filter(Boolean);
+  if (raw && typeof raw === "object" && Array.isArray(raw.options)) return raw.options.map((item) => String(item || "").trim()).filter(Boolean);
+  return [];
+};
+const customFieldInputType = (fieldType) => ({
+  number: "number",
+  date: "date",
+  url: "url",
+  email: "email",
+  phone: "tel",
+}[String(fieldType || "text").toLowerCase()] || "text");
 const lifecycleLabel = (status) => ({
   trial: "Demo",
   active: "Activo",
@@ -310,6 +477,7 @@ const EMOJI_SEARCH_TERMS = {
   "🛍️": "compra tienda bolsa", "🎁": "regalo promo", "📲": "celular whatsapp mensaje", "💬": "chat mensaje", "📍": "ubicacion direccion",
 };
 const RECENT_EMOJIS_KEY = "scentra_recent_emojis";
+const BROWSER_NOTIFICATIONS_KEY = "scentra_browser_notifications";
 const EMPTY_WAVEFORM = Array.from({ length: 32 }, (_, idx) => 8 + ((idx * 7) % 18));
 const formatDuration = (seconds) => {
   const safe = Math.max(0, Number(seconds || 0));
@@ -331,6 +499,18 @@ const channelLabel = (channel) => ({
   tiktok: "TikTok",
   meta: "Meta",
 }[String(channel || "").toLowerCase()] || String(channel || "Canal"));
+
+const agentTypeLabel = (type) => ({
+  advisor: "Advisor",
+  sales: "Ventas",
+  support: "Soporte",
+  custom: "Custom Agent",
+  teacher: "Profesor",
+  restaurant_reservations: "Restaurante Reservas",
+  hotel_booking: "Reservas Hotel",
+  real_estate_leads: "Inmobiliaria",
+  appointment_scheduler: "Agenda / Citas",
+}[String(type || "").toLowerCase()] || String(type || "Agente"));
 
 const fallbackProviderModels = (provider) => String(provider?.models || "")
   .split(",")
@@ -554,12 +734,28 @@ function App() {
   const audioContextRef = useRef(null);
   const attachmentSignatureRef = useRef("");
   const lastUnreadTotalRef = useRef(0);
+  const lastOpenCommentsRef = useRef(0);
+  const lastNotifiedInboxKeyRef = useRef("");
+  const inboxRequestRef = useRef(null);
+  const inboxRequestSeqRef = useRef(0);
   const refreshPromiseRef = useRef(null);
   const [accessToken, setAccessToken] = useState(() => localStorage.getItem(TOKEN_KEY) || "");
   const [refreshToken, setRefreshToken] = useState(() => localStorage.getItem(REFRESH_KEY) || "");
   const [mode, setMode] = useState("login");
   const [login, setLogin] = useState({ email: "", password: "" });
   const [register, setRegister] = useState(defaultRegister);
+  const [passwordRecovery, setPasswordRecovery] = useState(defaultPasswordRecovery);
+  const [passwordReset, setPasswordReset] = useState(defaultPasswordReset);
+  const [loginCaptchaToken, setLoginCaptchaToken] = useState("");
+  const [registerCaptchaToken, setRegisterCaptchaToken] = useState("");
+  const [recoveryCaptchaToken, setRecoveryCaptchaToken] = useState("");
+  const [resetCaptchaToken, setResetCaptchaToken] = useState("");
+  const [mfaChallenge, setMfaChallenge] = useState(null);
+  const [mfaCode, setMfaCode] = useState("");
+  const [loginCaptchaReset, setLoginCaptchaReset] = useState(0);
+  const [registerCaptchaReset, setRegisterCaptchaReset] = useState(0);
+  const [recoveryCaptchaReset, setRecoveryCaptchaReset] = useState(0);
+  const [resetCaptchaReset, setResetCaptchaReset] = useState(0);
   const [me, setMe] = useState(null);
   const [tenants, setTenants] = useState([]);
   const [activeView, setActiveView] = useState("dashboard");
@@ -573,6 +769,10 @@ function App() {
   const [integrations, setIntegrations] = useState([]);
   const [billingOverview, setBillingOverview] = useState(null);
   const [billingPlans, setBillingPlans] = useState([]);
+  const [billingCheckoutSessions, setBillingCheckoutSessions] = useState([]);
+  const [billingInvoices, setBillingInvoices] = useState([]);
+  const [billingCheckoutProvider, setBillingCheckoutProvider] = useState("wompi");
+  const [billingCheckoutBusy, setBillingCheckoutBusy] = useState("");
   const [dashboardOverview, setDashboardOverview] = useState(null);
   const [whatsappPhones, setWhatsappPhones] = useState([]);
   const [phoneRegisterForm, setPhoneRegisterForm] = useState({ phone_number_id: "", pin: "" });
@@ -586,11 +786,17 @@ function App() {
   const [aiTest, setAiTest] = useState({ phone: "", message: "" });
   const [aiTestResult, setAiTestResult] = useState("");
   const [profileForm, setProfileForm] = useState({ fullName: "", email: "", phone: "", role: "", avatarUrl: "" });
-  const [securityForm, setSecurityForm] = useState({ currentPassword: "", newPassword: "", confirmPassword: "", twoFactorEnabled: false });
+  const [securityForm, setSecurityForm] = useState({ currentPassword: "", newPassword: "", confirmPassword: "", twoFactorEnabled: false, twoFactorMethod: "email_otp", passwordChangedAt: "" });
   const [apiCredentials, setApiCredentials] = useState([]);
   const [knowledgeSources, setKnowledgeSources] = useState([]);
+  const [knowledgeHealth, setKnowledgeHealth] = useState(null);
+  const [knowledgeSearch, setKnowledgeSearch] = useState({ query: "", results: [], citations: [], confidence: 0, retrievalMode: "", searched: false });
+  const [knowledgeSearching, setKnowledgeSearching] = useState(false);
   const [knowledgeUrlForm, setKnowledgeUrlForm] = useState({ url: "", title: "", notes: "" });
   const [knowledgeUploading, setKnowledgeUploading] = useState(false);
+  const [knowledgeEvaluations, setKnowledgeEvaluations] = useState([]);
+  const [knowledgeEvalForm, setKnowledgeEvalForm] = useState({ query: "", expectedAnswer: "", expectedSources: "" });
+  const [knowledgeEvaluating, setKnowledgeEvaluating] = useState(false);
   const [diagnostics, setDiagnostics] = useState(null);
   const [diagnosticsRunning, setDiagnosticsRunning] = useState(false);
   const [aiGatewayProviders, setAiGatewayProviders] = useState([]);
@@ -602,6 +808,7 @@ function App() {
   const [advisorInsights, setAdvisorInsights] = useState([]);
   const [advisorRecommendations, setAdvisorRecommendations] = useState([]);
   const [advisorActions, setAdvisorActions] = useState([]);
+  const [advisorBriefing, setAdvisorBriefing] = useState([]);
   const [advisorMetrics, setAdvisorMetrics] = useState(null);
   const [advisorActivity, setAdvisorActivity] = useState([]);
   const [advisorMemory, setAdvisorMemory] = useState(null);
@@ -615,16 +822,24 @@ function App() {
   const [metaTokenHealth, setMetaTokenHealth] = useState({ instagram: null, facebook: null });
   const [instagramBusy, setInstagramBusy] = useState(false);
   const [facebookBusy, setFacebookBusy] = useState(false);
-  const [debugInboundForm, setDebugInboundForm] = useState({ from_phone: "573001112233", message: "Hola, prueba de webhook entrante", contact_name: "Cliente Debug" });
+  const [debugInboundForm, setDebugInboundForm] = useState({ from_phone: "573001112233", message: "Hola, prueba de webhook entrante", contact_name: "Cliente Diagnostico" });
   const [debugInboundResult, setDebugInboundResult] = useState(null);
   const [subscriptionCheck, setSubscriptionCheck] = useState(null);
   const [credentialModal, setCredentialModal] = useState(null);
   const [credentialSaving, setCredentialSaving] = useState(false);
   const [credentialModels, setCredentialModels] = useState({});
+  const [expandedCredentialCards, setExpandedCredentialCards] = useState({});
   const [conversations, setConversations] = useState([]);
+  const [inboxAiAgents, setInboxAiAgents] = useState([]);
   const [selectedConversation, setSelectedConversation] = useState(null);
   const [conversationMemory, setConversationMemory] = useState(null);
   const [messages, setMessages] = useState([]);
+  const [voiceAnalysisBusy, setVoiceAnalysisBusy] = useState("");
+  const [visionAnalysisBusy, setVisionAnalysisBusy] = useState("");
+  const [webSearchRuns, setWebSearchRuns] = useState([]);
+  const [webSearchForm, setWebSearchForm] = useState({ query: "", searchType: "mixed", providerCode: "tavily" });
+  const [webSearchBusy, setWebSearchBusy] = useState("");
+  const [multimodalMemoryEvents, setMultimodalMemoryEvents] = useState([]);
   const [inboxMode, setInboxMode] = useState("dms");
   const [socialComments, setSocialComments] = useState([]);
   const [selectedComment, setSelectedComment] = useState(null);
@@ -652,11 +867,31 @@ function App() {
   });
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
   const [inboxChannelFilter, setInboxChannelFilter] = useState("all");
+  const [inboxQueueFilter, setInboxQueueFilter] = useState("all");
+  const [inboxAgentFilter, setInboxAgentFilter] = useState("all");
   const [inboxSearch, setInboxSearch] = useState("");
   const [crmPanelOpen, setCrmPanelOpen] = useState(true);
+  const [crmConfig, setCrmConfig] = useState({ custom_fields: [], pipeline: { stages: [] }, industry_presets: [] });
+  const [publicVerticalPacks, setPublicVerticalPacks] = useState(FALLBACK_VERTICAL_PACKS);
+  const [verticalPacks, setVerticalPacks] = useState(FALLBACK_VERTICAL_PACKS);
+  const [verticalState, setVerticalState] = useState(null);
+  const [verticalApply, setVerticalApply] = useState({ industry_code: "general", create_agents: false });
+  const [verticalBusy, setVerticalBusy] = useState(false);
   const [crmDraft, setCrmDraft] = useState({});
+  const [conversationTasks, setConversationTasks] = useState([]);
+  const [messageStatusEvents, setMessageStatusEvents] = useState([]);
+  const [conversationTimeline, setConversationTimeline] = useState([]);
+  const [dedupeCandidates, setDedupeCandidates] = useState([]);
+  const [mergingCustomerId, setMergingCustomerId] = useState("");
+  const [taskDraft, setTaskDraft] = useState({ title: "", due_at: "", priority: "normal" });
   const [savingCrm, setSavingCrm] = useState(false);
+  const [predictiveBusy, setPredictiveBusy] = useState("");
   const [notificationSoundEnabled, setNotificationSoundEnabled] = useState(true);
+  const [browserNotificationsEnabled, setBrowserNotificationsEnabled] = useState(() => localStorage.getItem(BROWSER_NOTIFICATIONS_KEY) === "true");
+  const [notificationPermission, setNotificationPermission] = useState(() => (typeof window !== "undefined" && "Notification" in window ? window.Notification.permission : "unsupported"));
+  const [inboxRefreshing, setInboxRefreshing] = useState(false);
+  const [inboxLastSyncAt, setInboxLastSyncAt] = useState("");
+  const [inboxSyncError, setInboxSyncError] = useState("");
   const [isRecording, setIsRecording] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [recordingLevels, setRecordingLevels] = useState(EMPTY_WAVEFORM);
@@ -688,10 +923,18 @@ function App() {
     broadcast: hasFeature("broadcast"),
     ads: hasFeature("ads"),
     agents: hasFeature("ai"),
+    intelligence: true,
+    ecosystem: hasFeature("ai"),
+    composer: true,
+    trust: true,
     settings: true,
   };
   const activeViewAllowed = moduleAccess[activeView] !== false;
   const navItems = NAV_ITEMS.filter((item) => moduleAccess[item.key] !== false);
+  const activeCrmCustomFields = useMemo(() => (crmConfig.custom_fields || []).filter((field) => field.is_active !== false), [crmConfig.custom_fields]);
+  const activePipelineStages = useMemo(() => ((crmConfig.pipeline || {}).stages || []).filter((stage) => stage.is_active !== false), [crmConfig.pipeline]);
+  const currentIndustryCode = verticalState?.tenant?.industry_code || activeCompany?.industry_code || register.industry_code || "general";
+  const selectedVerticalPack = verticalPacks.find((pack) => pack.code === verticalApply.industry_code) || verticalPacks.find((pack) => pack.code === currentIndustryCode) || FALLBACK_VERTICAL_PACKS[0];
   const unreadTotal = conversations.reduce((sum, item) => sum + Number(item.unread_count || 0), 0);
   const connectedIntegrations = integrations.filter((item) => item.status !== "disconnected").length;
   const activeWebhooks = webhooks.filter((item) => item.is_active).length;
@@ -705,18 +948,82 @@ function App() {
   const selectedFallbackCredential = selectedFallbackProvider ? credentialByKey[selectedFallbackProvider.env] || {} : {};
   const selectedTtsProvider = TTS_API_PROVIDERS.find((provider) => provider.code === aiConfig.ttsProvider) || TTS_API_PROVIDERS[0];
   const selectedTtsCredential = credentialByKey[selectedTtsProvider?.env] || {};
+  const selectedVoiceAnalysisProvider = AI_API_PROVIDERS.find((provider) => provider.code === aiConfig.voiceAnalysisProvider) || AI_API_PROVIDERS[0];
+  const selectedVoiceAnalysisCredential = credentialByKey[selectedVoiceAnalysisProvider?.env] || {};
+  const selectedVisionAnalysisProvider = VISION_API_PROVIDERS.find((provider) => provider.code === aiConfig.visionAnalysisProvider) || VISION_API_PROVIDERS[0];
+  const selectedVisionAnalysisCredential = credentialByKey[selectedVisionAnalysisProvider?.env] || {};
+  const selectedWebSearchProvider = SEARCH_API_PROVIDERS.find((provider) => provider.code === (webSearchForm.providerCode || aiConfig.webImageSearchProvider)) || SEARCH_API_PROVIDERS[0];
+  const selectedWebSearchCredential = credentialByKey[selectedWebSearchProvider?.env] || {};
   const activeAiModel = selectedAiCredential.selected_model || "";
   const activeFallbackModel = selectedFallbackCredential.selected_model || "";
   const activeTtsModel = selectedTtsCredential.selected_model || "";
+  const activeVoiceAnalysisModel = selectedVoiceAnalysisCredential.selected_model || "";
+  const activeVisionAnalysisModel = selectedVisionAnalysisCredential.selected_model || "";
   const availableInboxChannels = Array.from(new Set([
     ...integrations.filter((item) => item.status === "connected").map((item) => String(item.channel || "").toLowerCase()),
     ...conversations.map((item) => String(item.channel || "").toLowerCase()),
     ...socialComments.map((item) => String(item.channel || "").toLowerCase()),
   ].filter(Boolean))).filter((channel) => !["billing"].includes(channel)).sort();
+  const activeInboxAiAgents = inboxAiAgents.filter((agent) => String(agent.status || "").toLowerCase() === "active");
+  const webSearchItems = useMemo(() => webSearchRuns.flatMap((run) => (run.results || []).map((result) => ({ run, result }))), [webSearchRuns]);
+  const approvedVisualReferences = useMemo(() => webSearchItems.filter(({ result }) => result.approval_status === "approved" && result.safety_status !== "blocked" && (result.thumbnail_url || result.image_url)).slice(0, 6), [webSearchItems]);
+  const pendingVisualReferences = useMemo(() => webSearchItems.filter(({ result }) => result.approval_status !== "approved" && result.safety_status !== "blocked" && (result.thumbnail_url || result.image_url)).slice(0, 6), [webSearchItems]);
+  const inboxVoiceInsights = useMemo(() => messages.slice().reverse().map((message) => {
+    const voice = asObject(asObject(message.payload_json).voice_intelligence);
+    if (!voice.transcript && !voice.summary && !voice.intent && !voice.sentiment) return null;
+    return {
+      message,
+      summary: cleanProductText(voice.summary || voice.transcript, 220),
+      intent: cleanProductText(voice.intent_label || voice.intent || "other", 80),
+      sentiment: cleanProductText(voice.sentiment || "neutral", 60),
+      urgency: cleanProductText(voice.urgency || "low", 40),
+      confidence: Math.round(Number(voice.confidence || 0) * 100),
+    };
+  }).filter(Boolean).slice(0, 4), [messages]);
+  const inboxVisionInsights = useMemo(() => messages.slice().reverse().map((message) => {
+    const vision = asObject(asObject(message.payload_json).vision_intelligence);
+    if (!vision.summary && !vision.visual_description && !vision.extracted_text && !vision.intent && !vision.document_type) return null;
+    return {
+      message,
+      summary: cleanProductText(vision.summary || vision.visual_description || vision.extracted_text, 220),
+      intent: cleanProductText(vision.intent_label || vision.intent || "other", 80),
+      type: cleanProductText(vision.document_type || vision.media_kind || message.msg_type || "media", 80),
+      urgency: cleanProductText(vision.urgency || "low", 40),
+      confidence: Math.round(Number(vision.confidence || 0) * 100),
+    };
+  }).filter(Boolean).slice(0, 4), [messages]);
+  const inboxMemoryHighlights = useMemo(() => multimodalMemoryEvents.slice(0, 5).map((event) => ({
+    id: event.id,
+    source: cleanProductText(event.source_kind || event.event_type || "multimodal", 80),
+    text: cleanProductText(event.memory_text || event.rag_text, 240),
+    training: Boolean(event.eligible_for_training),
+    rag: Boolean(event.eligible_for_rag),
+    status: cleanProductText(event.status || event.approval_status || "captured", 80),
+  })).filter((event) => event.text), [multimodalMemoryEvents]);
+  const inboxAnalysisCounts = {
+    voice: inboxVoiceInsights.length,
+    vision: inboxVisionInsights.length,
+    memory: multimodalMemoryEvents.length,
+    approvedReferences: webSearchItems.filter(({ result }) => result.approval_status === "approved").length,
+    pendingReferences: webSearchItems.filter(({ result }) => result.approval_status === "pending").length,
+  };
   const filteredConversations = conversations.filter((conversation) => {
     const channelOk = inboxChannelFilter === "all" || String(conversation.channel || "").toLowerCase() === inboxChannelFilter;
+    const agentOk = inboxAgentFilter === "all" || String(conversation.assigned_ai_agent_id || "") === inboxAgentFilter;
+    const queueOk = (() => {
+      if (inboxQueueFilter === "all") return true;
+      if (inboxQueueFilter === "unread") return Number(conversation.unread_count || 0) > 0;
+      if (inboxQueueFilter === "mine") return String(conversation.assigned_user_id || "") === String(me?.user_id || "");
+      if (inboxQueueFilter === "unassigned") return !conversation.assigned_user_id;
+      if (inboxQueueFilter === "sla") return isPastDate(conversation.sla_due_at || conversation.first_response_due_at);
+      if (inboxQueueFilter === "hot") return Number(conversation.lead_score || 0) >= 75 || String(conversation.lead_temperature || "").toLowerCase() === "hot";
+      if (inboxQueueFilter === "churn") return Number(conversation.predictive_intelligence?.churn_risk || 0) >= 70;
+      if (inboxQueueFilter === "human") return Boolean(conversation.takeover);
+      if (inboxQueueFilter === "ai") return !conversation.takeover;
+      return true;
+    })();
     const needle = inboxSearch.trim().toLowerCase();
-    if (!channelOk) return false;
+    if (!channelOk || !queueOk || !agentOk) return false;
     if (!needle) return true;
     return [
       conversation.display_name,
@@ -752,22 +1059,28 @@ function App() {
   const dashboardActivity = dashboardOverview?.activity || [];
   const dashboardRecent = dashboardOverview?.recent || [];
   const dashboardChannels = dashboardOverview?.channels || [];
+  const dashboardPredictive = dashboardOverview?.predictive || {};
   const dashboardActivityMax = Math.max(1, ...dashboardActivity.map((item) => Number(item.total || 0)));
   const dashboardConversations = Number(dashboardTotals.conversations ?? conversations.length);
   const dashboardUnread = Number(dashboardTotals.unread ?? unreadTotal);
+  const selectedPredictive = selectedConversation?.predictive_intelligence || {};
   const viewTitles = {
-    dashboard: ["Dashboard", "Vista ejecutiva de la empresa y operacion comercial."],
-    inbox: ["Inbox", "Conversaciones entrantes y respuestas asistidas."],
-    customers: ["Clientes", "CRM comercial, perfil del cliente y seguimiento."],
-    labels: ["Etiquetas", "Segmentacion visual para ventas, soporte y automatizaciones."],
-    campaigns: ["Campanas CRM", "Plantillas, triggers, remarketing y recorridos comerciales."],
-    broadcast: ["Mensajeria masiva", "Difusiones por audiencia con control de limites y canales."],
-    ads: ["Ads Manager", "Leads, comentarios y eventos de Meta conectados al inbox."],
-    agents: ["AI Agents", "Agentes empresariales para estrategia, ventas, soporte y operaciones."],
-    settings: ["Ajustes", "IA, canales, webhooks, APIs, usuarios y seguridad."],
+    dashboard: [t("page.dashboard.title"), t("page.dashboard.description")],
+    inbox: [t("page.inbox.title"), t("page.inbox.description")],
+    customers: [t("page.customers.title"), t("page.customers.description")],
+    labels: [t("page.labels.title"), t("page.labels.description")],
+    campaigns: [t("page.campaigns.title"), t("page.campaigns.description")],
+    broadcast: [t("page.broadcast.title"), t("page.broadcast.description")],
+    ads: [t("page.ads.title"), t("page.ads.description")],
+    agents: [t("page.agents.title"), t("page.agents.description")],
+    intelligence: [t("page.intelligence.title"), t("page.intelligence.description")],
+    ecosystem: [t("page.ecosystem.title"), t("page.ecosystem.description")],
+    composer: [t("page.composer.title"), t("page.composer.description")],
+    trust: [t("page.trust.title"), t("page.trust.description")],
+    settings: [t("page.settings.title"), t("page.settings.description")],
   };
   const advisorPendingActionCount = advisorActions.filter((item) => ["draft", "pending_approval", "approved"].includes(item.status)).length;
-  const advisorSignalCount = advisorInsights.length + advisorRecommendations.length + advisorPendingActionCount;
+  const advisorSignalCount = advisorBriefing.length + advisorInsights.length + advisorRecommendations.length + advisorPendingActionCount;
   const advisorQuickPrompts = [
     "Dame un resumen ejecutivo de la empresa hoy.",
     "Que oportunidades comerciales ves ahora?",
@@ -842,6 +1155,15 @@ function App() {
 
   const showStatus = (text, tone = "neutral") => { setStatus(text); setStatusTone(tone); };
 
+  useEffect(() => {
+    const token = new URLSearchParams(window.location.search).get("reset_token") || "";
+    if (!token) return;
+    setMode("reset");
+    setPasswordReset((prev) => ({ ...prev, token }));
+  }, []);
+
+  useEffect(() => { loadPublicVerticalPacks(); }, []);
+
   const showMilestoneOnce = (key, notice = {}) => {
     const cleanKey = String(key || "").trim();
     if (!cleanKey) return;
@@ -899,7 +1221,7 @@ function App() {
 
   const apiCall = async (path, options = {}) => {
     if (!API_BASE) throw new Error("VITE_API_BASE requerido");
-    const skipAuthRefreshPath = ["/saas/v1/auth/login", "/saas/v1/auth/register", "/saas/v1/auth/refresh"].some((prefix) => String(path || "").startsWith(prefix));
+    const skipAuthRefreshPath = ["/saas/v1/auth/login", "/saas/v1/auth/register", "/saas/v1/auth/refresh", "/saas/v1/auth/password/forgot", "/saas/v1/auth/password/reset"].some((prefix) => String(path || "").startsWith(prefix));
     const runFetch = async (tokenOverride = null) => {
       const requestHeaders = { "Content-Type": "application/json", ...(options.headers || {}) };
       const bearer = tokenOverride ?? accessToken;
@@ -949,6 +1271,41 @@ function App() {
     }
     return response;
   };
+  const downloadApiFile = async (path, filename = "scentra.pdf") => {
+    if (!API_BASE) throw new Error("VITE_API_BASE requerido");
+    const runFetch = async (tokenOverride = null) => {
+      const requestHeaders = {};
+      const bearer = tokenOverride ?? accessToken;
+      if (bearer) requestHeaders.Authorization = `Bearer ${bearer}`;
+      return fetch(`${API_BASE}${path}`, { headers: requestHeaders });
+    };
+    let response = await runFetch();
+    if (response.status === 401) {
+      try {
+        const nextAccessToken = await refreshAccessToken();
+        if (nextAccessToken) response = await runFetch(nextAccessToken);
+      } catch {
+        clearTokens();
+        throw new Error("Sesion vencida. Ingresa nuevamente para continuar.");
+      }
+    }
+    if (response.status === 401) clearTokens();
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error(formatApiError(data, `HTTP ${response.status}`));
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 60000);
+  };
   const setTokens = (data) => {
     const nextAccess = data?.access_token || "";
     const nextRefresh = data?.refresh_token || refreshToken || "";
@@ -989,11 +1346,11 @@ function App() {
   };
 
   const clearWorkspaceState = () => {
-    setConversations([]); setSelectedConversation(null); setConversationMemory(null); setMessages([]); setReplyText("");
+    setConversations([]); setSelectedConversation(null); setConversationMemory(null); setMessages([]); setMultimodalMemoryEvents([]); setReplyText("");
     clearComposerAttachment(); setCatalogDraft(null); setEmojiOpen(false); setAttachMenuOpen(false); setInboxChannelFilter("all"); setInboxSearch(""); setIsRecording(false); setRecordingSeconds(0); setRecordingLevels(EMPTY_WAVEFORM);
     recordingLevelsRef.current = EMPTY_WAVEFORM;
-    setIntegrations([]); setWebhooks([]); setWebhookEvents([]); setWebhookCheck(null); setBillingOverview(null); setBillingPlans([]); setLastWebhookSecret(null);
-    setApiCredentials([]); setCredentialModal(null); setCredentialModels({}); setKnowledgeSources([]); setDiagnostics(null); setAiGatewayProviders([]); setAiGatewayRuns([]);
+    setIntegrations([]); setWebhooks([]); setWebhookEvents([]); setWebhookCheck(null); setBillingOverview(null); setBillingPlans([]); setBillingCheckoutSessions([]); setBillingInvoices([]); setLastWebhookSecret(null);
+    setApiCredentials([]); setCredentialModal(null); setCredentialModels({}); setKnowledgeSources([]); setKnowledgeHealth(null); setKnowledgeSearch({ query: "", results: [], citations: [], confidence: 0, retrievalMode: "", searched: false }); setKnowledgeEvaluations([]); setKnowledgeEvalForm({ query: "", expectedAnswer: "", expectedSources: "" }); setDiagnostics(null); setAiGatewayProviders([]); setAiGatewayRuns([]);
     setAdvisorOpen(false); setAdvisorThreadId(""); setAdvisorMessages([]); setAdvisorInput(""); setAdvisorInsights([]); setAdvisorRecommendations([]); setAdvisorActions([]); setAdvisorMetrics(null); setAdvisorActivity([]); setAdvisorMemory(null); setAdvisorStreamStatus(""); setAdvisorLastSync(""); setAdvisorLoading(false);
     setInstagramDiagnostics(null); setFacebookDiagnostics(null); setInstagramOAuth({ state: "", assets: [], status: "", callbackUrl: "" });
     setInstagramForm(defaultInstagramForm());
@@ -1005,6 +1362,7 @@ function App() {
 
   const clearTokens = () => {
     setAccessToken(""); setRefreshToken(""); setMe(null); setTenants([]); clearWorkspaceState();
+    setMfaChallenge(null); setMfaCode(""); setMode("login");
     localStorage.removeItem(TOKEN_KEY); localStorage.removeItem(REFRESH_KEY);
   };
 
@@ -1014,6 +1372,19 @@ function App() {
       const data = await apiCall("/saas/v1/auth/me");
       setMe(data); setTenants(data?.tenants || []);
       setProfileForm((prev) => ({ ...prev, fullName: prev.fullName || data?.full_name || "", email: prev.email || data?.email || "" }));
+    } catch (err) { showStatus(String(err.message || err), "error"); }
+  };
+
+  const loadSecurityStatus = async () => {
+    if (!accessToken) return;
+    try {
+      const data = await apiCall("/saas/v1/auth/security");
+      setSecurityForm((prev) => ({
+        ...prev,
+        twoFactorEnabled: Boolean(data?.two_factor_enabled),
+        twoFactorMethod: data?.two_factor_method && data.two_factor_method !== "none" ? data.two_factor_method : "email_otp",
+        passwordChangedAt: data?.password_changed_at || "",
+      }));
     } catch (err) { showStatus(String(err.message || err), "error"); }
   };
 
@@ -1039,7 +1410,16 @@ function App() {
 
   const loadKnowledgeSources = async () => {
     if (!accessToken) return;
-    try { setKnowledgeSources((await apiCall("/saas/v1/knowledge/sources")) || []); }
+    try {
+      const [sourcesData, healthData, evalData] = await Promise.all([
+        apiCall("/saas/v1/knowledge/sources"),
+        apiCall("/saas/v1/knowledge/health"),
+        apiCall("/saas/v1/knowledge/evaluations?limit=8"),
+      ]);
+      setKnowledgeSources(sourcesData || []);
+      setKnowledgeHealth(healthData || null);
+      setKnowledgeEvaluations(evalData || []);
+    }
     catch (err) { showStatus(String(err.message || err), "error"); }
   };
 
@@ -1068,20 +1448,14 @@ function App() {
   const loadAdvisorSignals = async (silent = false) => {
     if (!accessToken) return;
     try {
-      const [insightsData, recommendationsData, actionsData, metricsData, activityData, memoryData] = await Promise.all([
-        apiCall("/saas/v1/advisor/insights?limit=8"),
-        apiCall("/saas/v1/advisor/recommendations?limit=8"),
-        apiCall("/saas/v1/advisor/actions?status=open&limit=8").catch(() => null),
-        apiCall("/saas/v1/advisor/metrics").catch(() => null),
-        apiCall("/saas/v1/advisor/activity?limit=5").catch(() => null),
-        apiCall("/saas/v1/advisor/memory").catch(() => null),
-      ]);
-      setAdvisorInsights(insightsData?.insights || []);
-      setAdvisorRecommendations(recommendationsData?.recommendations || []);
-      if (actionsData?.actions) setAdvisorActions(actionsData.actions);
-      if (metricsData?.metrics) setAdvisorMetrics(metricsData.metrics);
-      if (activityData?.events) setAdvisorActivity(activityData.events);
-      if (memoryData?.memory) setAdvisorMemory(memoryData.memory);
+      const data = await apiCall("/saas/v1/advisor/briefing");
+      setAdvisorBriefing(data?.briefing || []);
+      setAdvisorInsights(data?.insights || []);
+      setAdvisorRecommendations(data?.recommendations || []);
+      setAdvisorActions(data?.actions || []);
+      setAdvisorMetrics(data?.metrics || null);
+      setAdvisorActivity(data?.activity || []);
+      setAdvisorMemory(data?.memory || null);
       setAdvisorLastSync(new Date().toISOString());
       if (!silent) showStatus("Advisor actualizado", "ok");
     } catch (err) { if (!silent) showStatus(String(err.message || err), "error"); }
@@ -1114,18 +1488,29 @@ function App() {
         systemPrompt: data?.system_prompt || prev.systemPrompt,
         maxTokens: String(data?.max_tokens || prev.maxTokens),
         temperature: String(data?.temperature ?? prev.temperature),
+        humanReplyStyle: meta.human_reply_style_enabled !== false,
+        humanReplySplitting: meta.human_reply_splitting_enabled !== false,
+        replyMaxOutputTokens: String(meta.reply_max_output_tokens ?? data?.max_tokens ?? prev.replyMaxOutputTokens),
         chunks: String(meta.reply_chunk_chars ?? prev.chunks),
         delayBetween: String(meta.reply_chunk_delay_ms ?? prev.delayBetween),
         typingDelay: String(meta.reply_initial_delay_ms ?? prev.typingDelay),
         cooldown: String(meta.inbound_cooldown_seconds ?? prev.cooldown),
+        recentMessageLimit: String(meta.recent_message_limit ?? prev.recentMessageLimit),
+        messageContextChars: String(meta.message_context_chars ?? prev.messageContextChars),
         typingIndicator: meta.typing_indicator_enabled !== false,
         voiceEnabled: meta.voice_enabled ?? prev.voiceEnabled,
         preferVoice: meta.prefer_voice ?? prev.preferVoice,
         ttsProvider: meta.tts_provider || prev.ttsProvider,
+        voiceAnalysisProvider: meta.voice_analysis_provider || prev.voiceAnalysisProvider,
+        visionAnalysisProvider: meta.vision_analysis_provider || prev.visionAnalysisProvider,
+        webImageSearchProvider: meta.web_image_search_provider || prev.webImageSearchProvider,
         voiceId: meta.voice_id || prev.voiceId,
         voiceName: meta.voice_name || prev.voiceName,
         voicePrompt: meta.voice_prompt || prev.voicePrompt,
       }));
+      if (meta.web_image_search_provider) {
+        setWebSearchForm((prev) => ({ ...prev, providerCode: meta.web_image_search_provider }));
+      }
     } catch (err) { showStatus(String(err.message || err), "error"); }
   };
 
@@ -1142,34 +1527,120 @@ function App() {
   const loadBilling = async () => {
     if (!accessToken) return;
     try {
-      const [overviewData, plansData] = await Promise.all([apiCall("/saas/v1/billing/overview"), apiCall("/saas/v1/billing/plans")]);
-      setBillingOverview(overviewData); setBillingPlans(plansData?.plans || []);
+      const [overviewData, plansData, checkoutData, invoiceData] = await Promise.all([
+        apiCall("/saas/v1/billing/overview"),
+        apiCall("/saas/v1/billing/plans"),
+        apiCall("/saas/v1/billing/checkout-sessions?limit=8").catch(() => ({ checkout_sessions: [] })),
+        apiCall("/saas/v1/billing/invoices?limit=8").catch(() => ({ invoices: [] })),
+      ]);
+      setBillingOverview(overviewData); setBillingPlans(plansData?.plans || []); setBillingCheckoutSessions(checkoutData?.checkout_sessions || []); setBillingInvoices(invoiceData?.invoices || []);
     } catch (err) { showStatus(String(err.message || err), "error"); }
   };
 
   const loadDashboard = async (silent = false) => {
     if (!accessToken) return;
     try {
-      const [overviewData, dashboardData, inboxData, integrationData, endpointData, eventData, plansData] = await Promise.all([
+      const [overviewData, dashboardData, inboxData, integrationData, endpointData, eventData, plansData, checkoutData, invoiceData] = await Promise.all([
         apiCall("/saas/v1/billing/overview"), apiCall("/saas/v1/dashboard/overview"), apiCall("/saas/v1/conversations?limit=100"), apiCall("/saas/v1/integrations"),
         apiCall("/saas/v1/webhooks/endpoints"), apiCall("/saas/v1/webhooks/events?limit=20"), apiCall("/saas/v1/billing/plans"),
+        apiCall("/saas/v1/billing/checkout-sessions?limit=8").catch(() => ({ checkout_sessions: [] })),
+        apiCall("/saas/v1/billing/invoices?limit=8").catch(() => ({ invoices: [] })),
       ]);
       setBillingOverview(overviewData); setDashboardOverview(dashboardData); setConversations(inboxData?.conversations || []); setIntegrations(integrationData || []);
-      setWebhooks(endpointData || []); setWebhookEvents(eventData || []); setBillingPlans(plansData?.plans || []);
-      if (!silent) showStatus("Dashboard actualizado", "ok");
+      setWebhooks(endpointData || []); setWebhookEvents(eventData || []); setBillingPlans(plansData?.plans || []); setBillingCheckoutSessions(checkoutData?.checkout_sessions || []); setBillingInvoices(invoiceData?.invoices || []);
+      if (!silent) showStatus(t("status.dashboard.updated"), "ok");
     } catch (err) { showStatus(String(err.message || err), "error"); }
+  };
+
+  const loadCrmConfig = async (silent = true) => {
+    if (!accessToken) return null;
+    try {
+      const data = await apiCall("/saas/v1/crm/config");
+      setCrmConfig({
+        custom_fields: data?.custom_fields || [],
+        pipeline: data?.pipeline || { stages: [] },
+        industry_presets: data?.industry_presets || [],
+      });
+      if (!silent) showStatus("Configuracion CRM actualizada", "ok");
+      return data;
+    } catch (err) {
+      if (!silent) showStatus(String(err.message || err), "error");
+      return null;
+    }
+  };
+
+  const loadPublicVerticalPacks = async () => {
+    try {
+      const data = await apiCall("/saas/v1/verticals/public-packs", { skipAuthRefresh: true });
+      const packs = data?.packs?.length ? data.packs : FALLBACK_VERTICAL_PACKS;
+      setPublicVerticalPacks(packs);
+      if (!accessToken) setVerticalPacks(packs);
+      setRegister((prev) => ({ ...prev, industry_code: prev.industry_code || packs[0]?.code || "general" }));
+    } catch {
+      setPublicVerticalPacks(FALLBACK_VERTICAL_PACKS);
+    }
+  };
+
+  const loadVerticalState = async (silent = true) => {
+    if (!accessToken) return null;
+    try {
+      const [packsData, stateData] = await Promise.all([
+        apiCall("/saas/v1/verticals/packs"),
+        apiCall("/saas/v1/verticals/state"),
+      ]);
+      const packs = packsData?.packs?.length ? packsData.packs : FALLBACK_VERTICAL_PACKS;
+      setVerticalPacks(packs);
+      setVerticalState(stateData || null);
+      const activeCode = stateData?.tenant?.industry_code || packs[0]?.code || "general";
+      setVerticalApply((prev) => ({ ...prev, industry_code: activeCode }));
+      if (!silent) showStatus("Verticalizacion actualizada", "ok");
+      return stateData;
+    } catch (err) {
+      if (!silent) showStatus(String(err.message || err), "error");
+      return null;
+    }
+  };
+
+  const applyVerticalPack = async () => {
+    if (!verticalApply.industry_code) return showStatus("Elige una industria.", "error");
+    setVerticalBusy(true);
+    try {
+      const data = await apiCall("/saas/v1/verticals/apply", {
+        method: "POST",
+        body: JSON.stringify(verticalApply),
+      });
+      setVerticalState(data || null);
+      await Promise.all([loadCrmConfig(true), loadSession(), loadDashboard(true).catch(() => null)]);
+      showStatus(`Pack ${data?.pack?.label || verticalApply.industry_code} aplicado`, "ok");
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    } finally {
+      setVerticalBusy(false);
+    }
   };
 
   const loadMessages = async (conversation, options = {}) => {
     if (!conversation?.id) return;
     try {
-      const [data, memoryData] = await Promise.all([
+      const [data, memoryData, tasksData, statusData, timelineData, dedupeData, searchData, multimodalData] = await Promise.all([
         apiCall(`/saas/v1/conversations/${encodeURIComponent(conversation.id)}/messages`),
         apiCall(`/saas/v1/ai/conversations/${encodeURIComponent(conversation.id)}/memory`).catch(() => null),
+        apiCall(`/saas/v1/conversations/${encodeURIComponent(conversation.id)}/tasks`).catch(() => ({ tasks: [] })),
+        apiCall(`/saas/v1/conversations/${encodeURIComponent(conversation.id)}/status-events?limit=40`).catch(() => ({ events: [] })),
+        apiCall(`/saas/v1/conversations/${encodeURIComponent(conversation.id)}/timeline?limit=80`).catch(() => ({ events: [] })),
+        apiCall(`/saas/v1/customers/${encodeURIComponent(conversation.id)}/dedupe-candidates?limit=6`).catch(() => ({ candidates: [] })),
+        apiCall(`/saas/v1/media/search/runs?conversation_id=${encodeURIComponent(conversation.id)}&limit=8`).catch(() => ({ runs: [] })),
+        apiCall(`/saas/v1/agents/multimodal-memory/events?conversation_id=${encodeURIComponent(conversation.id)}&limit=24`).catch(() => ({ events: [] })),
       ]);
       const selected = { ...conversation, unread_count: 0 };
       setSelectedConversation(selected); setMessages(data?.messages || []);
       setConversationMemory(memoryData || null);
+      setConversationTasks(tasksData?.tasks || []);
+      setMessageStatusEvents(statusData?.events || []);
+      setConversationTimeline(timelineData?.events || []);
+      setDedupeCandidates(dedupeData?.candidates || []);
+      setWebSearchRuns(searchData?.runs || []);
+      setMultimodalMemoryEvents(multimodalData?.events || []);
       if (!options.preserveComposer) { setReplyText(""); clearComposerAttachment(); setCatalogDraft(null); setEmojiOpen(false); setAttachMenuOpen(false); }
       if (Number(conversation.unread_count || 0) > 0) markConversationRead(conversation.id, { silent: true });
     } catch (err) { showStatus(String(err.message || err), "error"); }
@@ -1178,8 +1649,10 @@ function App() {
   const loadSocialComments = async (options = {}) => {
     if (!accessToken) return;
     try {
+      const params = new URLSearchParams({ limit: "100" });
+      if (inboxChannelFilter !== "all") params.set("channel", inboxChannelFilter);
       const [commentsData, settingsData] = await Promise.all([
-        apiCall("/saas/v1/social/comments?limit=100"),
+        apiCall(`/saas/v1/social/comments?${params.toString()}`),
         apiCall("/saas/v1/social/comments/settings").catch(() => null),
       ]);
       const items = commentsData?.comments || [];
@@ -1190,18 +1663,79 @@ function App() {
     } catch (err) { showStatus(String(err.message || err), "error"); }
   };
 
-  const loadInbox = async () => {
-    if (!accessToken) return;
+  const buildInboxConversationPath = () => {
+    const params = new URLSearchParams({ limit: "200" });
+    const cleanSearch = inboxSearch.trim();
+    if (cleanSearch) params.set("search", cleanSearch);
+    if (inboxChannelFilter !== "all") params.set("channel", inboxChannelFilter);
+    if (inboxAgentFilter !== "all") params.set("agent_id", inboxAgentFilter);
+    if (inboxMode === "dms" && inboxQueueFilter !== "all") params.set("queue", inboxQueueFilter);
+    return `/saas/v1/conversations?${params.toString()}`;
+  };
+
+  const buildSocialCommentsPath = () => {
+    const params = new URLSearchParams({ limit: "100" });
+    if (inboxChannelFilter !== "all") params.set("channel", inboxChannelFilter);
+    return `/saas/v1/social/comments?${params.toString()}`;
+  };
+
+  const notifyInboxItem = (kind, item) => {
+    if (!browserNotificationsEnabled || notificationPermission !== "granted") return;
+    if (typeof window === "undefined" || !("Notification" in window)) return;
+    const key = kind === "comment"
+      ? `comment:${item?.id || ""}:${item?.updated_at || item?.created_at || ""}`
+      : `message:${item?.id || ""}:${item?.last_message_at || item?.updated_at || ""}:${item?.unread_count || 0}`;
+    if (!key.trim() || lastNotifiedInboxKeyRef.current === key) return;
+    lastNotifiedInboxKeyRef.current = key;
+    const title = kind === "comment" ? "Nuevo comentario" : "Nuevo mensaje";
+    const body = kind === "comment"
+      ? `${item?.author_name || item?.author_username || "Comentario"}: ${item?.message || ""}`.slice(0, 140)
+      : `${item?.display_name || item?.phone || item?.external_contact_id || "Cliente"}: ${item?.last_message_text || ""}`.slice(0, 140);
     try {
-      const [data, commentsData] = await Promise.all([
-        apiCall("/saas/v1/conversations?limit=100"),
-        apiCall("/saas/v1/social/comments?limit=100").catch(() => ({ comments: [] })),
+      const notification = new window.Notification(title, {
+        body,
+        tag: key,
+        silent: true,
+      });
+      notification.onclick = () => {
+        window.focus();
+        setActiveView("inbox");
+      };
+    } catch {
+      // Browser notification permissions can change outside the app.
+    }
+  };
+
+  const loadInbox = async (options = {}) => {
+    if (!accessToken) return;
+    if (inboxRequestRef.current && !options.force) return inboxRequestRef.current;
+    setInboxRefreshing(true);
+    const requestSeq = inboxRequestSeqRef.current + 1;
+    inboxRequestSeqRef.current = requestSeq;
+    const run = (async () => {
+      const [data, commentsData, agentsData] = await Promise.all([
+        apiCall(buildInboxConversationPath()),
+        apiCall(buildSocialCommentsPath()).catch(() => ({ comments: [] })),
+        apiCall("/saas/v1/agents").catch(() => ({ agents: [] })),
       ]);
+      if (requestSeq !== inboxRequestSeqRef.current) return;
       const items = data?.conversations || [];
       const comments = commentsData?.comments || [];
+      setInboxAiAgents(agentsData?.agents || []);
+      const previousUnread = Number(lastUnreadTotalRef.current || 0);
+      const previousOpenComments = Number(lastOpenCommentsRef.current || 0);
       const nextUnread = items.reduce((sum, item) => sum + Number(item.unread_count || 0), 0);
-      if (lastUnreadTotalRef.current && nextUnread > lastUnreadTotalRef.current && notificationSoundEnabled) playIncomingSound();
+      const nextOpenComments = comments.filter((item) => String(item.status || "open").toLowerCase() === "open").length;
+      if (previousUnread && nextUnread > previousUnread) {
+        if (notificationSoundEnabled) playIncomingSound();
+        notifyInboxItem("message", items.find((item) => Number(item.unread_count || 0) > 0) || items[0]);
+      }
+      if (previousOpenComments && nextOpenComments > previousOpenComments) {
+        if (notificationSoundEnabled) playIncomingSound();
+        notifyInboxItem("comment", comments.find((item) => String(item.status || "open").toLowerCase() === "open") || comments[0]);
+      }
       lastUnreadTotalRef.current = nextUnread;
+      lastOpenCommentsRef.current = nextOpenComments;
       setConversations(items);
       setSocialComments(comments);
       if (items.length && !selectedConversation) await loadMessages(items[0]);
@@ -1209,8 +1743,23 @@ function App() {
         const updatedSelected = items.find((item) => item.id === selectedConversation.id);
         if (updatedSelected) await loadMessages({ ...selectedConversation, ...updatedSelected }, { preserveComposer: true });
       }
-      if (!items.length) { setSelectedConversation(null); setConversationMemory(null); setMessages([]); setReplyText(""); clearComposerAttachment(); setCatalogDraft(null); }
-    } catch (err) { showStatus(String(err.message || err), "error"); }
+      if (!items.length) { setSelectedConversation(null); setConversationMemory(null); setConversationTasks([]); setMessageStatusEvents([]); setWebSearchRuns([]); setMultimodalMemoryEvents([]); setMessages([]); setReplyText(""); clearComposerAttachment(); setCatalogDraft(null); }
+      setInboxLastSyncAt(new Date().toISOString());
+      setInboxSyncError("");
+    })()
+      .catch((err) => {
+        const message = String(err.message || err);
+        setInboxSyncError(message);
+        showStatus(message, "error");
+      })
+      .finally(() => {
+        if (requestSeq === inboxRequestSeqRef.current) {
+          inboxRequestRef.current = null;
+          setInboxRefreshing(false);
+        }
+      });
+    inboxRequestRef.current = run;
+    return run;
   };
 
   useEffect(() => {
@@ -1228,9 +1777,15 @@ function App() {
 
   useEffect(() => { loadSession(); }, [accessToken]);
   useEffect(() => {
+    if (browserNotificationsEnabled && notificationPermission !== "granted") {
+      localStorage.setItem(BROWSER_NOTIFICATIONS_KEY, "false");
+      setBrowserNotificationsEnabled(false);
+    }
+  }, [browserNotificationsEnabled, notificationPermission]);
+  useEffect(() => {
     if (accessToken) loadAdvisorSignals(true);
     if (accessToken && ["dashboard", "customers", "labels", "campaigns", "broadcast", "ads"].includes(activeView)) loadDashboard(true);
-    if (accessToken && activeView === "settings") Promise.all([loadIntegrations(), loadWebhooks(), loadBilling(), loadApiCredentials(), loadAiSettings(), loadKnowledgeSources(), loadDiagnostics(true), loadAiGateway(true)]);
+    if (accessToken && activeView === "settings") Promise.all([loadIntegrations(), loadWebhooks(), loadBilling(), loadApiCredentials(), loadAiSettings(), loadKnowledgeSources(), loadDiagnostics(true), loadAiGateway(true), loadVerticalState(true)]);
     if (accessToken && activeView === "inbox") loadInbox();
   }, [accessToken, activeView]);
 
@@ -1241,6 +1796,10 @@ function App() {
     }, advisorOpen ? 30000 : 60000);
     return () => window.clearInterval(timer);
   }, [accessToken, advisorOpen]);
+
+  useEffect(() => {
+    if (accessToken && activeView === "settings" && settingsTab === "security") loadSecurityStatus();
+  }, [accessToken, activeView, settingsTab]);
 
   useEffect(() => {
     if (advisorOpen) {
@@ -1258,9 +1817,35 @@ function App() {
 
   useEffect(() => {
     if (!accessToken || activeView !== "inbox") return undefined;
-    const timer = window.setInterval(() => loadInbox(), 6000);
-    return () => window.clearInterval(timer);
-  }, [accessToken, activeView, selectedConversation?.id, notificationSoundEnabled]);
+    let stopped = false;
+    let timer = null;
+    const schedule = (delay) => {
+      timer = window.setTimeout(async () => {
+        if (stopped) return;
+        if (document.visibilityState === "visible") await loadInbox();
+        const nextDelay = document.visibilityState === "visible"
+          ? (selectedConversation?.id ? 5000 : 8000)
+          : 20000;
+        schedule(nextDelay);
+      }, delay);
+    };
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") loadInbox({ force: true });
+    };
+    document.addEventListener("visibilitychange", handleVisibility);
+    schedule(5000);
+    return () => {
+      stopped = true;
+      if (timer) window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", handleVisibility);
+    };
+  }, [accessToken, activeView, selectedConversation?.id, notificationSoundEnabled, browserNotificationsEnabled]);
+
+  useEffect(() => {
+    if (!accessToken || activeView !== "inbox") return undefined;
+    const timer = window.setTimeout(() => loadInbox({ force: true }), 350);
+    return () => window.clearTimeout(timer);
+  }, [accessToken, activeView, inboxChannelFilter, inboxQueueFilter, inboxAgentFilter, inboxSearch, inboxMode]);
 
   useEffect(() => {
     const metaWhatsapp = integrations.find((item) => item.provider === "meta" && item.channel === "whatsapp");
@@ -1303,11 +1888,24 @@ function App() {
   }, [featureLoaded, activeViewAllowed, activeView]);
 
   useEffect(() => {
+    if (!accessToken || !["inbox", "customers"].includes(activeView)) return;
+    loadCrmConfig(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accessToken, activeView]);
+
+  useEffect(() => {
     if (!selectedConversation?.id) {
       setCrmDraft({});
       setConversationMemory(null);
+      setConversationTasks([]);
+      setMessageStatusEvents([]);
+      setConversationTimeline([]);
+      setDedupeCandidates([]);
+      setWebSearchRuns([]);
+      setMultimodalMemoryEvents([]);
       return;
     }
+    const selectedProfile = selectedConversation.profile_json && typeof selectedConversation.profile_json === "object" ? selectedConversation.profile_json : {};
     setCrmDraft({
       display_name: selectedConversation.display_name || "",
       first_name: selectedConversation.first_name || "",
@@ -1321,14 +1919,53 @@ function App() {
       crm_stage: selectedConversation.crm_stage || "",
       intent: selectedConversation.intent || "",
       takeover: Boolean(selectedConversation.takeover),
+      assigned_user_id: selectedConversation.assigned_user_id || "",
+      priority: selectedConversation.priority || "normal",
+      sla_due_at: datetimeLocalValue(selectedConversation.sla_due_at),
+      first_response_due_at: datetimeLocalValue(selectedConversation.first_response_due_at),
+      lead_score: Number(selectedConversation.lead_score || 0),
+      lead_temperature: selectedConversation.lead_temperature || "cold",
+      custom_fields: { ...(selectedProfile.custom_fields || selectedConversation.custom_fields || {}) },
     });
   }, [selectedConversation?.id]);
 
   const submitLogin = async (event) => {
     event.preventDefault();
     try {
-      const data = await apiCall("/saas/v1/auth/login", { method: "POST", body: JSON.stringify(login) });
+      const data = await apiCall("/saas/v1/auth/login", { method: "POST", body: JSON.stringify({ ...login, captcha_token: loginCaptchaToken, captcha_provider: CAPTCHA_PROVIDER }) });
+      if (data?.mfa_required) {
+        setMfaChallenge(data);
+        setMfaCode(data?.dev_otp || "");
+        setMode("mfa");
+        showStatus(data?.email_sent ? "Codigo 2FA enviado a tu correo." : "Codigo 2FA requerido. Revisa tu correo configurado.", data?.email_sent || data?.dev_otp ? "ok" : "warn");
+        return;
+      }
       setTokens(data); setTenants(data?.tenants || []); setActiveView("dashboard"); showStatus("Ingreso correcto", "ok");
+    } catch (err) { showStatus(String(err.message || err), "error"); }
+    finally {
+      if (CAPTCHA_ENABLED) {
+        setLoginCaptchaToken("");
+        setLoginCaptchaReset((value) => value + 1);
+      }
+    }
+  };
+
+  const submitMfa = async (event) => {
+    event.preventDefault();
+    if (!mfaChallenge?.challenge_token) return showStatus("Desafio 2FA no disponible. Ingresa nuevamente.", "error");
+    if (!mfaCode.trim()) return showStatus("Ingresa el codigo de seguridad.", "error");
+    try {
+      const data = await apiCall("/saas/v1/auth/login/verify-otp", {
+        method: "POST",
+        body: JSON.stringify({ challenge_token: mfaChallenge.challenge_token, code: mfaCode }),
+      });
+      setTokens(data);
+      setTenants(data?.tenants || []);
+      setMfaChallenge(null);
+      setMfaCode("");
+      setMode("login");
+      setActiveView("dashboard");
+      showStatus("Ingreso protegido correcto", "ok");
     } catch (err) { showStatus(String(err.message || err), "error"); }
   };
 
@@ -1337,9 +1974,62 @@ function App() {
     if (register.password.length < 8) return showStatus("La clave debe tener al menos 8 caracteres.", "error");
     if (register.tenant_name.trim().length < 2) return showStatus("El nombre de la empresa debe tener al menos 2 caracteres.", "error");
     try {
-      const data = await apiCall("/saas/v1/auth/register", { method: "POST", body: JSON.stringify(register) });
+      const data = await apiCall("/saas/v1/auth/register", { method: "POST", body: JSON.stringify({ ...register, captcha_token: registerCaptchaToken, captcha_provider: CAPTCHA_PROVIDER }) });
       setTokens(data); setTenants(data?.tenants || []); setRegister(defaultRegister()); setActiveView("dashboard"); showStatus("Empresa creada", "ok");
     } catch (err) { showStatus(String(err.message || err), "error"); }
+    finally {
+      if (CAPTCHA_ENABLED) {
+        setRegisterCaptchaToken("");
+        setRegisterCaptchaReset((value) => value + 1);
+      }
+    }
+  };
+
+  const submitPasswordRecovery = async (event) => {
+    event.preventDefault();
+    if (!passwordRecovery.email.trim()) return showStatus("Ingresa tu correo.", "error");
+    try {
+      const data = await apiCall("/saas/v1/auth/password/forgot", {
+        method: "POST",
+        body: JSON.stringify({ ...passwordRecovery, captcha_token: recoveryCaptchaToken, captcha_provider: CAPTCHA_PROVIDER }),
+      });
+      if (data?.dev_reset_token) {
+        setPasswordReset((prev) => ({ ...prev, token: data.dev_reset_token }));
+        setMode("reset");
+        showStatus("Token local generado. Define tu nueva clave.", "ok");
+      } else {
+        showStatus("Si el correo existe, enviaremos instrucciones para recuperar la cuenta.", "ok");
+      }
+    } catch (err) { showStatus(String(err.message || err), "error"); }
+    finally {
+      if (CAPTCHA_ENABLED) {
+        setRecoveryCaptchaToken("");
+        setRecoveryCaptchaReset((value) => value + 1);
+      }
+    }
+  };
+
+  const submitPasswordReset = async (event) => {
+    event.preventDefault();
+    if (!passwordReset.token.trim()) return showStatus("Token requerido.", "error");
+    if (passwordReset.new_password.length < 8) return showStatus("La clave debe tener al menos 8 caracteres.", "error");
+    if (passwordReset.new_password !== passwordReset.confirm_password) return showStatus("Las claves no coinciden.", "error");
+    try {
+      await apiCall("/saas/v1/auth/password/reset", {
+        method: "POST",
+        body: JSON.stringify({ token: passwordReset.token, new_password: passwordReset.new_password, captcha_token: resetCaptchaToken, captcha_provider: CAPTCHA_PROVIDER }),
+      });
+      setPasswordReset(defaultPasswordReset());
+      setMode("login");
+      if (window.location.search.includes("reset_token=")) window.history.replaceState(null, "", window.location.pathname);
+      showStatus("Clave actualizada. Ingresa con tu nueva clave.", "ok");
+    } catch (err) { showStatus(String(err.message || err), "error"); }
+    finally {
+      if (CAPTCHA_ENABLED) {
+        setResetCaptchaToken("");
+        setResetCaptchaReset((value) => value + 1);
+      }
+    }
   };
 
   const switchCompany = async (companyId) => {
@@ -1383,7 +2073,7 @@ function App() {
       showMilestoneOnce(`integration:whatsapp:${savedIntegration?.id || phoneNumberId || "meta"}`, {
         eyebrow: "Canal conectado",
         title: dispatchMode === "stub" ? "WhatsApp quedó en modo prueba" : "WhatsApp Cloud quedó configurado",
-        body: "El siguiente paso recomendado es verificar webhook, token y eventos entrantes desde Debug antes de usar campañas reales.",
+        body: "El siguiente paso recomendado es verificar webhook, token y eventos entrantes desde Diagnostico antes de usar campanas reales.",
         cta: "Verificar canal",
         actionType: "settings-debug",
       });
@@ -1711,12 +2401,26 @@ function App() {
   };
 
   const startInstagramOAuth = async () => {
+    const tenantAppId = String(instagramForm.app_id || facebookForm.app_id || selectedInstagramConfig.app_id || selectedFacebookConfig.app_id || "").trim();
+    const tenantAppSecret = String(instagramAppSecretRef.current?.value || facebookAppSecretRef.current?.value || "").trim();
+    const graphApiVersion = String(instagramForm.graph_api_version || facebookForm.graph_api_version || selectedInstagramConfig.graph_api_version || selectedFacebookConfig.graph_api_version || "v24.0").trim();
+    if (!tenantAppId && !selectedInstagramConfig.has_app_secret && !selectedFacebookConfig.has_app_secret) {
+      return showStatus("Para OAuth por cliente, escribe Meta App ID y Meta App Secret o guarda primero la integracion.", "error");
+    }
     setInstagramBusy(true);
     try {
-      const data = await apiCall("/saas/v1/integrations/instagram/oauth/start", { method: "POST" });
+      const data = await apiCall("/saas/v1/integrations/instagram/oauth/start", {
+        method: "POST",
+        body: JSON.stringify({
+          app_id: tenantAppId,
+          app_secret: tenantAppSecret,
+          graph_api_version: graphApiVersion,
+          preferred_channel: instagramForm.app_id || instagramForm.instagram_business_account_id ? "instagram" : "facebook",
+        }),
+      });
       setInstagramOAuth((prev) => ({ ...prev, state: data.state || "", assets: [], status: "oauth_started", callbackUrl: data.callback_url || "" }));
       if (data.auth_url) window.open(data.auth_url, "_blank", "noopener,noreferrer");
-      showStatus("Facebook Login abierto. Al finalizar, vuelve y pulsa Cargar cuentas.", "ok");
+      showStatus(t("meta.facebook.opened"), "ok");
     } catch (err) {
       showStatus(String(err.message || err), "error");
     } finally {
@@ -1725,7 +2429,7 @@ function App() {
   };
 
   const loadInstagramAssets = async () => {
-    if (!instagramOAuth.state) return showStatus("Primero inicia Facebook Login.", "error");
+    if (!instagramOAuth.state) return showStatus(t("meta.facebook.start_first"), "error");
     setInstagramBusy(true);
     try {
       const data = await apiCall(`/saas/v1/integrations/instagram/oauth/assets?state=${encodeURIComponent(instagramOAuth.state)}`);
@@ -1739,7 +2443,7 @@ function App() {
   };
 
   const connectInstagramAsset = async (asset) => {
-    if (!instagramOAuth.state) return showStatus("Estado OAuth faltante. Inicia Facebook Login de nuevo.", "error");
+    if (!instagramOAuth.state) return showStatus(t("meta.facebook.missing_state"), "error");
     setInstagramBusy(true);
     try {
       const data = await apiCall("/saas/v1/integrations/instagram/connect", {
@@ -1751,6 +2455,7 @@ function App() {
         }),
       });
       showStatus(data?.subscription?.final_subscribed ? "Instagram conectado y suscrito a webhooks." : "Instagram conectado, revisa diagnostics para confirmar webhooks.", data?.subscription?.final_subscribed ? "ok" : "neutral");
+      if (data?.webhook?.verify_token_once) setLastWebhookSecret({ provider: "instagram", url_path: data.webhook.url_path, verify_token_once: data.webhook.verify_token_once });
       setInstagramForm((prev) => ({
         ...prev,
         page_id: asset.page_id || prev.page_id,
@@ -1767,6 +2472,37 @@ function App() {
       showStatus(String(err.message || err), "error");
     } finally {
       setInstagramBusy(false);
+    }
+  };
+
+  const connectFacebookAsset = async (asset) => {
+    if (!instagramOAuth.state) return showStatus(t("meta.facebook.missing_state"), "error");
+    setFacebookBusy(true);
+    try {
+      const data = await apiCall("/saas/v1/integrations/instagram/connect-facebook", {
+        method: "POST",
+        body: JSON.stringify({
+          state: instagramOAuth.state,
+          page_id: asset.page_id,
+        }),
+      });
+      showStatus(data?.subscription?.final_subscribed ? "Facebook conectado y suscrito a webhooks." : "Facebook conectado, revisa diagnostics para confirmar webhooks.", data?.subscription?.final_subscribed ? "ok" : "neutral");
+      if (data?.webhook?.verify_token_once) setLastWebhookSecret({ provider: "facebook", url_path: data.webhook.url_path, verify_token_once: data.webhook.verify_token_once });
+      setFacebookForm((prev) => ({
+        ...prev,
+        page_id: asset.page_id || prev.page_id,
+        page_name: asset.page_name || prev.page_name,
+        business_id: asset.business_id || prev.business_id,
+        business_name: asset.business_name || prev.business_name,
+        dispatch_mode: "facebook_graph",
+      }));
+      await loadIntegrations();
+      await loadFacebookDiagnostics();
+      await loadMetaTokenHealth("facebook");
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    } finally {
+      setFacebookBusy(false);
     }
   };
 
@@ -1925,6 +2661,32 @@ function App() {
       // Browsers may block audio until the first user interaction.
     }
   };
+  const toggleBrowserNotifications = async () => {
+    if (typeof window === "undefined" || !("Notification" in window)) {
+      setNotificationPermission("unsupported");
+      showStatus("Este navegador no soporta notificaciones.", "neutral");
+      return;
+    }
+    if (browserNotificationsEnabled) {
+      localStorage.setItem(BROWSER_NOTIFICATIONS_KEY, "false");
+      setBrowserNotificationsEnabled(false);
+      showStatus("Notificaciones del navegador desactivadas", "ok");
+      return;
+    }
+    if (window.Notification.permission === "denied") {
+      setNotificationPermission("denied");
+      showStatus("El navegador tiene bloqueadas las notificaciones para este sitio.", "neutral");
+      return;
+    }
+    const permission = window.Notification.permission === "granted"
+      ? "granted"
+      : await window.Notification.requestPermission();
+    setNotificationPermission(permission);
+    const enabled = permission === "granted";
+    localStorage.setItem(BROWSER_NOTIFICATIONS_KEY, enabled ? "true" : "false");
+    setBrowserNotificationsEnabled(enabled);
+    showStatus(enabled ? "Notificaciones del navegador activadas" : "No se activaron las notificaciones", enabled ? "ok" : "neutral");
+  };
   const appendEmoji = (emoji, target = "message") => {
     if (target === "comment") {
       setCommentReplyText((prev) => `${prev}${emoji}`);
@@ -1991,6 +2753,10 @@ function App() {
     }
   };
   const updateCrmDraft = (key, value) => setCrmDraft((prev) => ({ ...prev, [key]: value }));
+  const updateCrmCustomField = (key, value) => setCrmDraft((prev) => ({
+    ...prev,
+    custom_fields: { ...(prev.custom_fields || {}), [key]: value },
+  }));
   const saveSelectedCrm = async () => {
     if (!selectedConversation?.id || savingCrm) return;
     setSavingCrm(true);
@@ -2002,11 +2768,128 @@ function App() {
       const customer = data?.customer || {};
       setSelectedConversation((prev) => ({ ...(prev || {}), ...customer }));
       setConversations((prev) => prev.map((item) => item.id === selectedConversation.id ? { ...item, ...customer } : item));
+      setCrmDraft((prev) => ({ ...prev, ...customer, custom_fields: customer.custom_fields || prev.custom_fields || {}, sla_due_at: datetimeLocalValue(customer.sla_due_at), first_response_due_at: datetimeLocalValue(customer.first_response_due_at) }));
       showStatus("Ficha CRM guardada", "ok");
     } catch (err) {
       showStatus(String(err.message || err), "error");
     } finally {
       setSavingCrm(false);
+    }
+  };
+  const assignSelectedConversation = async (userId = "") => {
+    if (!selectedConversation?.id) return;
+    try {
+      const data = await apiCall(`/saas/v1/customers/${encodeURIComponent(selectedConversation.id)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ assigned_user_id: userId }),
+      });
+      const customer = data?.customer || {};
+      setSelectedConversation((prev) => ({ ...(prev || {}), ...customer }));
+      setConversations((prev) => prev.map((item) => item.id === selectedConversation.id ? { ...item, ...customer } : item));
+      setCrmDraft((prev) => ({ ...prev, ...customer, assigned_user_id: customer.assigned_user_id || "" }));
+      showStatus(userId ? "Conversacion asignada a ti" : "Conversacion sin asignacion", "ok");
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    }
+  };
+  const assignSelectedAiAgent = async (agentId = "") => {
+    if (!selectedConversation?.id) return;
+    try {
+      const query = agentId ? `?agent_id=${encodeURIComponent(agentId)}` : "";
+      const data = await apiCall(`/saas/v1/conversations/${encodeURIComponent(selectedConversation.id)}/ai-agent${query}`, {
+        method: "PATCH",
+      });
+      const customer = data?.customer || {};
+      setSelectedConversation((prev) => ({ ...(prev || {}), ...customer }));
+      setConversations((prev) => prev.map((item) => item.id === selectedConversation.id ? { ...item, ...customer } : item));
+      setCrmDraft((prev) => ({ ...prev, ...customer, assigned_ai_agent_id: customer.assigned_ai_agent_id || "" }));
+      showStatus(agentId ? "Agente IA asignado. La IA general queda desconectada de este chat." : "Conversacion devuelta a IA general.", "ok");
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    }
+  };
+  const recomputeSelectedScore = async () => {
+    if (!selectedConversation?.id) return;
+    try {
+      const data = await apiCall(`/saas/v1/conversations/${encodeURIComponent(selectedConversation.id)}/score`, { method: "POST" });
+      const customer = data?.customer || {};
+      setSelectedConversation((prev) => ({ ...(prev || {}), ...customer }));
+      setConversations((prev) => prev.map((item) => item.id === selectedConversation.id ? { ...item, ...customer } : item));
+      setCrmDraft((prev) => ({ ...prev, lead_score: Number(customer.lead_score || 0), lead_temperature: customer.lead_temperature || prev.lead_temperature }));
+      showStatus("Score comercial recalculado", "ok");
+    } catch (err) { showStatus(String(err.message || err), "error"); }
+  };
+  const runSelectedPredictiveInsight = async (predictionType) => {
+    if (!selectedConversation?.id || predictiveBusy) return;
+    setPredictiveBusy(predictionType);
+    try {
+      const data = await apiCall("/saas/v1/intelligence/predict", {
+        method: "POST",
+        body: JSON.stringify({
+          prediction_type: predictionType,
+          subject_type: "conversation",
+          subject_id: selectedConversation.id,
+          window_key: "latest",
+          persist_recommendations: true,
+        }),
+      });
+      const customerData = await apiCall(`/saas/v1/customers/${encodeURIComponent(selectedConversation.id)}`);
+      const customer = customerData?.customer || {};
+      if (customer.id) {
+        setSelectedConversation((prev) => ({ ...(prev || {}), ...customer }));
+        setConversations((prev) => prev.map((item) => item.id === selectedConversation.id ? { ...item, ...customer } : item));
+        setCrmDraft((prev) => ({ ...prev, ...customer, custom_fields: customer.custom_fields || prev.custom_fields || {} }));
+      }
+      showStatus(`${predictionTypeLabel(predictionType)} generado: ${data?.prediction?.label || "ready"}`, "ok");
+      await loadAdvisorSignals(true);
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    } finally {
+      setPredictiveBusy("");
+    }
+  };
+  const createConversationTask = async (event) => {
+    event.preventDefault();
+    if (!selectedConversation?.id || !taskDraft.title.trim()) return;
+    try {
+      const data = await apiCall(`/saas/v1/conversations/${encodeURIComponent(selectedConversation.id)}/tasks`, {
+        method: "POST",
+        body: JSON.stringify(taskDraft),
+      });
+      if (data?.task) setConversationTasks((prev) => [data.task, ...prev]);
+      setTaskDraft({ title: "", due_at: "", priority: "normal" });
+      showStatus("Tarea creada para seguimiento", "ok");
+    } catch (err) { showStatus(String(err.message || err), "error"); }
+  };
+  const patchConversationTask = async (taskId, patch) => {
+    if (!taskId) return;
+    try {
+      const data = await apiCall(`/saas/v1/crm/tasks/${encodeURIComponent(taskId)}`, { method: "PATCH", body: JSON.stringify(patch) });
+      const task = data?.task || {};
+      setConversationTasks((prev) => prev.map((item) => item.id === taskId ? { ...item, ...task } : item));
+      showStatus(patch.status === "done" ? "Tarea completada" : "Tarea actualizada", "ok");
+    } catch (err) { showStatus(String(err.message || err), "error"); }
+  };
+  const mergeDedupeCandidate = async (sourceConversationId) => {
+    if (!selectedConversation?.id || !sourceConversationId || mergingCustomerId) return;
+    setMergingCustomerId(sourceConversationId);
+    try {
+      const data = await apiCall(`/saas/v1/customers/${encodeURIComponent(selectedConversation.id)}/merge`, {
+        method: "POST",
+        body: JSON.stringify({ source_conversation_id: sourceConversationId, reason: "Merge desde Inbox CRM" }),
+      });
+      const customer = data?.customer || {};
+      setSelectedConversation((prev) => ({ ...(prev || {}), ...customer }));
+      setConversations((prev) => prev
+        .filter((item) => item.id !== sourceConversationId)
+        .map((item) => item.id === selectedConversation.id ? { ...item, ...customer } : item));
+      setCrmDraft((prev) => ({ ...prev, ...customer, custom_fields: customer.custom_fields || prev.custom_fields || {}, sla_due_at: datetimeLocalValue(customer.sla_due_at), first_response_due_at: datetimeLocalValue(customer.first_response_due_at) }));
+      await loadMessages({ ...selectedConversation, ...customer }, { preserveComposer: true });
+      showStatus("Clientes duplicados fusionados", "ok");
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    } finally {
+      setMergingCustomerId("");
     }
   };
   const localMediaUrl = (mediaId) => mediaId && accessToken ? `${API_BASE}/saas/v1/media/${encodeURIComponent(mediaId)}?token=${encodeURIComponent(accessToken)}` : "";
@@ -2030,6 +2913,207 @@ function App() {
     const fullName = [selectedConversation?.first_name, selectedConversation?.last_name].filter(Boolean).join(" ").trim();
     return fullName || selectedConversation?.display_name || "Cliente";
   };
+  const analyzeVoiceMessage = async (message, force = false) => {
+    const messageId = String(message?.id || "");
+    if (!messageId || voiceAnalysisBusy) return;
+    setVoiceAnalysisBusy(messageId);
+    try {
+      const query = new URLSearchParams();
+      if (force) query.set("force", "true");
+      if (aiConfig.voiceAnalysisProvider) query.set("provider_code", aiConfig.voiceAnalysisProvider);
+      const suffix = query.toString() ? `?${query.toString()}` : "";
+      const data = await apiCall(`/saas/v1/media/messages/${encodeURIComponent(messageId)}/voice/analyze${suffix}`, { method: "POST" });
+      const voice = data?.analysis?.voice_intelligence || data?.analysis || {};
+      setMessages((prev) => prev.map((item) => {
+        if (item.id !== messageId) return item;
+        const payload = asObject(item.payload_json);
+        return { ...item, payload_json: { ...payload, voice_intelligence: voice } };
+      }));
+      showStatus(data?.cached ? "Analisis de voz cargado" : "Audio analizado con Voice Intelligence", "ok");
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    } finally {
+      setVoiceAnalysisBusy("");
+    }
+  };
+  const analyzeVisionMessage = async (message, force = false) => {
+    const messageId = String(message?.id || "");
+    if (!messageId || visionAnalysisBusy) return;
+    setVisionAnalysisBusy(messageId);
+    try {
+      const query = new URLSearchParams();
+      if (force) query.set("force", "true");
+      if (aiConfig.visionAnalysisProvider) query.set("provider_code", aiConfig.visionAnalysisProvider);
+      const suffix = query.toString() ? `?${query.toString()}` : "";
+      const data = await apiCall(`/saas/v1/media/messages/${encodeURIComponent(messageId)}/vision/analyze${suffix}`, { method: "POST" });
+      const vision = data?.analysis?.vision_intelligence || data?.analysis || {};
+      setMessages((prev) => prev.map((item) => {
+        if (item.id !== messageId) return item;
+        const payload = asObject(item.payload_json);
+        return { ...item, payload_json: { ...payload, vision_intelligence: vision } };
+      }));
+      showStatus(data?.cached ? "Analisis visual cargado" : "Media analizada con Vision Intelligence", "ok");
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    } finally {
+      setVisionAnalysisBusy("");
+    }
+  };
+  const loadWebSearchRunsForConversation = async (conversationId = selectedConversation?.id) => {
+    if (!conversationId) return;
+    try {
+      const data = await apiCall(`/saas/v1/media/search/runs?conversation_id=${encodeURIComponent(conversationId)}&limit=8`);
+      setWebSearchRuns(data?.runs || []);
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    }
+  };
+  const loadConversationMultimodalEvents = async (conversationId = selectedConversation?.id) => {
+    if (!conversationId) return;
+    try {
+      const data = await apiCall(`/saas/v1/agents/multimodal-memory/events?conversation_id=${encodeURIComponent(conversationId)}&limit=24`);
+      setMultimodalMemoryEvents(data?.events || []);
+    } catch {
+      setMultimodalMemoryEvents([]);
+    }
+  };
+  const syncConversationMultimodalMemory = async () => {
+    if (!selectedConversation?.id) return showStatus("Selecciona una conversacion para sincronizar memoria multimodal.", "error");
+    setWebSearchBusy("memory-sync");
+    try {
+      const data = await apiCall("/saas/v1/agents/multimodal-memory/sync", {
+        method: "POST",
+        body: JSON.stringify({
+          conversation_id: selectedConversation.id,
+          include_voice: true,
+          include_vision: true,
+          include_search: true,
+          include_agent_runs: true,
+          limit: 40,
+        }),
+      });
+      setMultimodalMemoryEvents(data?.events || []);
+      showStatus(`Memoria multimodal sincronizada: ${number(data?.synced || 0)} eventos.`, "ok");
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    } finally {
+      setWebSearchBusy("");
+    }
+  };
+  const submitWebImageSearch = async (event) => {
+    event.preventDefault();
+    const query = webSearchForm.query.trim();
+    if (!query) return showStatus("Escribe una busqueda para consultar fuentes externas.", "error");
+    if (!selectedConversation?.id) return showStatus("Selecciona una conversacion para asociar la busqueda.", "error");
+    setWebSearchBusy("search");
+    try {
+      const data = await apiCall("/saas/v1/media/search", {
+        method: "POST",
+        body: JSON.stringify({
+          query,
+          search_type: webSearchForm.searchType || "mixed",
+          provider_code: webSearchForm.providerCode || aiConfig.webImageSearchProvider || "tavily",
+          conversation_id: selectedConversation.id,
+          limit: 6,
+        }),
+      });
+      const run = data?.run;
+      if (run?.id) setWebSearchRuns((prev) => [run, ...prev.filter((item) => item.id !== run.id)].slice(0, 8));
+      setWebSearchForm((prev) => ({ ...prev, query: "" }));
+      showStatus("Busqueda externa registrada. Revisa y aprueba fuentes antes de usarlas.", "ok");
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    } finally {
+      setWebSearchBusy("");
+    }
+  };
+  const reviewWebSearchResult = async (result, approvalStatus) => {
+    const resultId = String(result?.id || "");
+    if (!resultId) return;
+    setWebSearchBusy(`${approvalStatus}-${resultId}`);
+    try {
+      await apiCall(`/saas/v1/media/search/results/${encodeURIComponent(resultId)}/approval`, {
+        method: "POST",
+        body: JSON.stringify({
+          approval_status: approvalStatus,
+          reason: approvalStatus === "rejected" ? "Rechazado desde Inbox por revision humana" : "",
+        }),
+      });
+      await loadWebSearchRunsForConversation(selectedConversation?.id);
+      showStatus(approvalStatus === "approved" ? "Fuente aprobada para referencia humana" : "Fuente rechazada", approvalStatus === "approved" ? "ok" : "neutral");
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    } finally {
+      setWebSearchBusy("");
+    }
+  };
+  const showOutboundDispatchStatus = (data, sentLabel = "Mensaje enviado por WhatsApp", queuedLabel = "Mensaje encolado para envio") => {
+    const dispatch = data?.dispatch || {};
+    const outboundError = dispatch.last_error || data?.outbound_status?.error || "";
+    if (Number(dispatch.failed || 0) > 0 || Number(dispatch.blocked || 0) > 0) {
+      showStatus(outboundError ? `Meta no envio el mensaje: ${outboundError}` : "Mensaje guardado, pero Meta no lo envio. Revisa integracion, plan o logs de outbound.", "error");
+    } else if (Number(dispatch.sent || 0) > 0 && whatsappDispatchMode === "stub") {
+      showStatus("Mensaje procesado en modo prueba. Cambia Canales a Meta Cloud para enviarlo al telefono.", "neutral");
+    } else if (Number(dispatch.sent || 0) > 0) {
+      showStatus(sentLabel, "ok");
+    } else {
+      showStatus(queuedLabel, "ok");
+    }
+  };
+  const useWebSearchReference = async (result, action = "draft") => {
+    const resultId = String(result?.id || "");
+    if (!resultId || !selectedConversation?.id) return;
+    if (result.safety_status === "blocked") return showStatus("Esta fuente esta bloqueada por seguridad.", "error");
+    const busyKey = `${action}-reference-${resultId}`;
+    setWebSearchBusy(busyKey);
+    try {
+      if (result.approval_status !== "approved") {
+        await apiCall(`/saas/v1/media/search/results/${encodeURIComponent(resultId)}/approval`, {
+          method: "POST",
+          body: JSON.stringify({ approval_status: "approved", reason: "" }),
+        });
+      }
+      const data = await apiCall(`/saas/v1/media/search/results/${encodeURIComponent(resultId)}/reference`, {
+        method: "POST",
+        body: JSON.stringify({ conversation_id: selectedConversation.id, include_source_url: true, include_image_url: true }),
+      });
+      const reference = data?.reference || {};
+      const text = String(reference.message_text || "").trim();
+      if (!text) return showStatus("No se pudo preparar la referencia aprobada.", "error");
+      if (action === "send") {
+        const ok = window.confirm("Enviar esta referencia aprobada al cliente?");
+        if (!ok) return;
+        setComposerSending(true);
+        const sent = await apiCall(`/saas/v1/conversations/${encodeURIComponent(selectedConversation.id)}/messages`, {
+          method: "POST",
+          body: JSON.stringify({
+            text,
+            msg_type: "text",
+            payload_json: {
+              source: "inbox_multimodal_reference",
+              search_result_id: resultId,
+              reference_title: reference.title || result.title || "",
+              reference_url: reference.source_url || result.url || "",
+              visual_url: reference.visual_url || result.image_url || result.thumbnail_url || "",
+            },
+          }),
+        });
+        showOutboundDispatchStatus(sent, "Referencia aprobada enviada", "Referencia aprobada encolada para envio");
+        await loadMessages(selectedConversation, { preserveComposer: true });
+        await loadInbox();
+      } else {
+        setReplyText((prev) => (prev.trim() ? `${prev.trim()}\n\n${text}` : text));
+        showStatus(result.approval_status === "approved" ? "Referencia agregada al composer" : "Fuente aprobada y agregada al composer", "ok");
+      }
+      await loadWebSearchRunsForConversation(selectedConversation.id);
+      await loadConversationMultimodalEvents(selectedConversation.id);
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    } finally {
+      setComposerSending(false);
+      setWebSearchBusy("");
+    }
+  };
   const renderMessageContent = (message) => {
     const type = String(message?.msg_type || "text").toLowerCase();
     const url = messageMediaUrl(message);
@@ -2037,6 +3121,11 @@ function App() {
     const product = productCardFromMessage(message);
     const payload = asObject(message?.payload_json);
     const note = cleanProductText(payload.message_note, 900);
+    const voice = asObject(payload.voice_intelligence);
+    const vision = asObject(payload.vision_intelligence);
+    const hasVoiceAnalysis = Boolean(voice.transcript || voice.summary || voice.intent || voice.sentiment);
+    const hasVisionAnalysis = Boolean(vision.summary || vision.visual_description || vision.extracted_text || vision.intent || vision.document_type);
+    const canAnalyzeVision = ["image", "document", "file"].includes(type);
     return (
       <>
         {product ? <ProductMessageCard product={product} /> : null}
@@ -2047,6 +3136,58 @@ function App() {
           <div className="audio-message">
             <AudioWaveform src={url} seed={message.id || message.created_at || message.media_id} />
             <audio src={url} controls preload="metadata" />
+          </div>
+        ) : null}
+        {type === "audio" ? (
+          <div className={`voice-intel-card ${hasVoiceAnalysis ? "ready" : ""}`}>
+            <div className="voice-intel-head">
+              <strong>Voice Intelligence</strong>
+              <button type="button" onClick={() => analyzeVoiceMessage(message, hasVoiceAnalysis)} disabled={voiceAnalysisBusy === message.id}>
+                {voiceAnalysisBusy === message.id ? "Analizando..." : hasVoiceAnalysis ? "Reanalizar" : "Analizar voz"}
+              </button>
+            </div>
+            {hasVoiceAnalysis ? (
+              <>
+                <p>{voice.summary || voice.transcript}</p>
+                <div className="voice-intel-tags">
+                  <span>{voice.sentiment || "neutral"} {Math.round(Number(voice.sentiment_score || 0) * 100) / 100}</span>
+                  <span>{voice.intent_label || voice.intent || "other"}</span>
+                  <span>Urgencia {voice.urgency || "low"}</span>
+                  <span>{Math.round(Number(voice.confidence || 0) * 100)}% conf.</span>
+                </div>
+                {voice.transcript ? <details><summary>Transcripcion</summary><p>{voice.transcript}</p></details> : null}
+                {voice.recommended_action ? <small>{voice.recommended_action}</small> : null}
+              </>
+            ) : (
+              <small>Transcribe, resume y detecta sentimiento e intencion del audio.</small>
+            )}
+          </div>
+        ) : null}
+        {canAnalyzeVision ? (
+          <div className={`vision-intel-card ${hasVisionAnalysis ? "ready" : ""}`}>
+            <div className="voice-intel-head">
+              <strong>Vision Intelligence</strong>
+              <button type="button" onClick={() => analyzeVisionMessage(message, hasVisionAnalysis)} disabled={visionAnalysisBusy === message.id}>
+                {visionAnalysisBusy === message.id ? "Analizando..." : hasVisionAnalysis ? "Reanalizar" : "Analizar media"}
+              </button>
+            </div>
+            {hasVisionAnalysis ? (
+              <>
+                <p>{vision.summary || vision.visual_description || vision.extracted_text}</p>
+                <div className="voice-intel-tags">
+                  <span>{vision.document_type || vision.media_kind || "media"}</span>
+                  <span>{vision.intent_label || vision.intent || "other"}</span>
+                  <span>Urgencia {vision.urgency || "low"}</span>
+                  <span>{Math.round(Number(vision.confidence || 0) * 100)}% conf.</span>
+                </div>
+                {vision.visual_description ? <details><summary>Descripcion visual</summary><p>{vision.visual_description}</p></details> : null}
+                {vision.extracted_text ? <details><summary>Texto extraido</summary><p>{vision.extracted_text}</p></details> : null}
+                {Array.isArray(vision.topics) && vision.topics.length ? <small>Temas: {vision.topics.slice(0, 6).join(", ")}</small> : null}
+                {vision.recommended_action ? <small>{vision.recommended_action}</small> : null}
+              </>
+            ) : (
+              <small>Describe imagenes, extrae texto de documentos y detecta intencion sin modificar CRM ni enviar mensajes.</small>
+            )}
           </div>
         ) : null}
         {(type === "document" || type === "file") && url ? <a className="document-chip" href={url} target="_blank" rel="noreferrer">Abrir {label}</a> : null}
@@ -2177,17 +3318,7 @@ function App() {
         method: "POST",
         body: JSON.stringify({ text: outgoingText, msg_type: msgType, media_id: mediaId, mime_type: mimeType, filename, payload_json: payloadJson }),
       });
-      const dispatch = data?.dispatch || {};
-      const outboundError = dispatch.last_error || data?.outbound_status?.error || "";
-      if (Number(dispatch.failed || 0) > 0 || Number(dispatch.blocked || 0) > 0) {
-        showStatus(outboundError ? `Meta no envio el mensaje: ${outboundError}` : "Mensaje guardado, pero Meta no lo envio. Revisa integracion, plan o logs de outbound.", "error");
-      } else if (Number(dispatch.sent || 0) > 0 && whatsappDispatchMode === "stub") {
-        showStatus("Mensaje procesado en modo prueba. Cambia Canales a Meta Cloud para enviarlo al telefono.", "neutral");
-      } else if (Number(dispatch.sent || 0) > 0) {
-        showStatus("Mensaje enviado por WhatsApp", "ok");
-      } else {
-        showStatus("Mensaje encolado para envio", "ok");
-      }
+      showOutboundDispatchStatus(data);
       setReplyText("");
       clearComposerAttachment();
       setCatalogDraft(null);
@@ -2269,6 +3400,38 @@ function App() {
     }
   };
   const changePlanDev = async (planCode) => { try { const data = await apiCall("/saas/v1/billing/dev/change-plan", { method: "POST", body: JSON.stringify({ plan_code: planCode }) }); setBillingOverview(data); showStatus(`Plan actualizado a ${planCode}`, "ok"); await loadSession(); } catch (err) { showStatus(String(err.message || err), "error"); } };
+  const startPlanCheckout = async (planCode) => {
+    setBillingCheckoutBusy(planCode);
+    try {
+      const data = await apiCall("/saas/v1/billing/checkout", {
+        method: "POST",
+        body: JSON.stringify({ plan_code: planCode, provider: billingCheckoutProvider }),
+      });
+      const checkout = data?.checkout || {};
+      setBillingCheckoutSessions((prev) => [checkout, ...prev.filter((item) => item.id !== checkout.id)].slice(0, 8));
+      if (checkout.checkout_url) {
+        window.open(checkout.checkout_url, "_blank", "noopener,noreferrer");
+        showStatus(`Checkout ${checkout.provider || billingCheckoutProvider} abierto`, "ok");
+      } else {
+        showStatus(checkout.error || "Checkout creado sin URL. Revisa proveedor de pago.", "neutral");
+      }
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    } finally {
+      setBillingCheckoutBusy("");
+    }
+  };
+  const downloadBillingInvoice = async (invoice) => {
+    try {
+      const invoiceId = invoice?.id || "";
+      if (!invoiceId) return;
+      const name = invoice.invoice_number || invoice.provider_invoice_id || invoiceId;
+      await downloadApiFile(`/saas/v1/billing/invoices/${encodeURIComponent(invoiceId)}/pdf`, `${name}.pdf`);
+      showStatus("Factura PDF generada", "ok");
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    }
+  };
   const saveAiLocal = async () => {
     try {
       const data = await apiCall("/saas/v1/ai/settings", {
@@ -2278,20 +3441,28 @@ function App() {
           provider_code: aiConfig.provider,
           fallback_provider_code: aiConfig.fallbackProvider,
           system_prompt: aiConfig.systemPrompt,
-          max_tokens: Number(aiConfig.maxTokens || 1800),
+          max_tokens: Number(aiConfig.maxTokens || 700),
           temperature: Number(aiConfig.temperature || 0.5),
           metadata_json: {
             voice_enabled: Boolean(aiConfig.voiceEnabled),
             prefer_voice: Boolean(aiConfig.preferVoice),
             tts_provider: aiConfig.ttsProvider,
+            voice_analysis_provider: aiConfig.voiceAnalysisProvider,
+            vision_analysis_provider: aiConfig.visionAnalysisProvider,
+            web_image_search_provider: aiConfig.webImageSearchProvider,
             voice_id: aiConfig.voiceId,
             voice_name: aiConfig.voiceName,
             voice_prompt: aiConfig.voicePrompt,
+            human_reply_style_enabled: Boolean(aiConfig.humanReplyStyle),
+            human_reply_splitting_enabled: Boolean(aiConfig.humanReplySplitting),
+            reply_max_output_tokens: Number(aiConfig.replyMaxOutputTokens || aiConfig.maxTokens || 700),
             typing_indicator_enabled: Boolean(aiConfig.typingIndicator),
             inbound_cooldown_seconds: Number(aiConfig.cooldown || 6),
-            reply_initial_delay_ms: Number(aiConfig.typingDelay || 4000),
-            reply_chunk_delay_ms: Number(aiConfig.delayBetween || 4000),
-            reply_chunk_chars: Number(aiConfig.chunks || 480),
+            reply_initial_delay_ms: Number(aiConfig.typingDelay || 3200),
+            reply_chunk_delay_ms: Number(aiConfig.delayBetween || 4200),
+            reply_chunk_chars: Number(aiConfig.chunks || 220),
+            recent_message_limit: Number(aiConfig.recentMessageLimit || 16),
+            message_context_chars: Number(aiConfig.messageContextChars || 1200),
           },
         }),
       });
@@ -2303,11 +3474,25 @@ function App() {
         systemPrompt: data?.system_prompt || prev.systemPrompt,
         maxTokens: String(data?.max_tokens || prev.maxTokens),
         temperature: String(data?.temperature ?? prev.temperature),
+        humanReplyStyle: asObject(data?.metadata_json).human_reply_style_enabled !== false,
+        humanReplySplitting: asObject(data?.metadata_json).human_reply_splitting_enabled !== false,
+        replyMaxOutputTokens: String(asObject(data?.metadata_json).reply_max_output_tokens ?? data?.max_tokens ?? prev.replyMaxOutputTokens),
         chunks: String(asObject(data?.metadata_json).reply_chunk_chars ?? prev.chunks),
         delayBetween: String(asObject(data?.metadata_json).reply_chunk_delay_ms ?? prev.delayBetween),
         typingDelay: String(asObject(data?.metadata_json).reply_initial_delay_ms ?? prev.typingDelay),
         cooldown: String(asObject(data?.metadata_json).inbound_cooldown_seconds ?? prev.cooldown),
+        recentMessageLimit: String(asObject(data?.metadata_json).recent_message_limit ?? prev.recentMessageLimit),
+        messageContextChars: String(asObject(data?.metadata_json).message_context_chars ?? prev.messageContextChars),
         typingIndicator: asObject(data?.metadata_json).typing_indicator_enabled !== false,
+        voiceEnabled: asObject(data?.metadata_json).voice_enabled ?? prev.voiceEnabled,
+        preferVoice: asObject(data?.metadata_json).prefer_voice ?? prev.preferVoice,
+        ttsProvider: asObject(data?.metadata_json).tts_provider || prev.ttsProvider,
+        voiceAnalysisProvider: asObject(data?.metadata_json).voice_analysis_provider || prev.voiceAnalysisProvider,
+        visionAnalysisProvider: asObject(data?.metadata_json).vision_analysis_provider || prev.visionAnalysisProvider,
+        webImageSearchProvider: asObject(data?.metadata_json).web_image_search_provider || prev.webImageSearchProvider,
+        voiceId: asObject(data?.metadata_json).voice_id || prev.voiceId,
+        voiceName: asObject(data?.metadata_json).voice_name || prev.voiceName,
+        voicePrompt: asObject(data?.metadata_json).voice_prompt || prev.voicePrompt,
       }));
       showStatus("Ajustes IA guardados. El agente usara el modelo seleccionado en APIs.", "ok");
     } catch (err) {
@@ -2353,6 +3538,93 @@ function App() {
       await loadKnowledgeSources();
     } catch (err) {
       showStatus(String(err.message || err), "error");
+    }
+  };
+  const reindexKnowledgeSource = async (sourceId) => {
+    try {
+      const data = await apiCall(`/saas/v1/knowledge/sources/${encodeURIComponent(sourceId)}/reindex`, { method: "POST" });
+      showStatus(`Fuente reindexada: ${number(data?.chunk_count || 0)} fragmentos.`, "ok");
+      await loadKnowledgeSources();
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    }
+  };
+  const reindexAllKnowledge = async () => {
+    if (knowledgeUploading) return;
+    setKnowledgeUploading(true);
+    try {
+      const data = await apiCall("/saas/v1/knowledge/reindex?limit=100", { method: "POST" });
+      showStatus(`Knowledge Base reindexada: ${number(data?.indexed_sources || 0)} fuentes / ${number(data?.chunks || 0)} fragmentos.`, "ok");
+      await loadKnowledgeSources();
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    } finally {
+      setKnowledgeUploading(false);
+    }
+  };
+  const searchKnowledgeSources = async (event) => {
+    event.preventDefault();
+    const query = knowledgeSearch.query.trim();
+    if (!query) return showStatus("Escribe una pregunta para probar el RAG.", "neutral");
+    setKnowledgeSearching(true);
+    try {
+      const data = await apiCall("/saas/v1/knowledge/search", {
+        method: "POST",
+        body: JSON.stringify({ query, limit: 6, min_score: 1 }),
+      });
+      setKnowledgeSearch({
+        query,
+        results: data?.results || [],
+        citations: data?.citations || [],
+        confidence: data?.confidence || 0,
+        retrievalMode: data?.retrieval_mode || "",
+        searched: true,
+      });
+      showStatus(`RAG encontro ${number((data?.results || []).length)} fragmentos relevantes.`, "ok");
+      await loadKnowledgeSources();
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    } finally {
+      setKnowledgeSearching(false);
+    }
+  };
+  const runKnowledgeEvaluation = async (event) => {
+    event.preventDefault();
+    const query = (knowledgeEvalForm.query || knowledgeSearch.query).trim();
+    if (!query) return showStatus("Escribe una pregunta para evaluar el RAG.", "neutral");
+    const expectedSources = knowledgeEvalForm.expectedSources
+      .split(/[\n,]+/)
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .slice(0, 12);
+    setKnowledgeEvaluating(true);
+    try {
+      const data = await apiCall("/saas/v1/knowledge/evaluate", {
+        method: "POST",
+        body: JSON.stringify({
+          query,
+          expected_answer: knowledgeEvalForm.expectedAnswer,
+          expected_sources: expectedSources,
+          limit: 6,
+          min_quality_score: 55,
+        }),
+      });
+      const evaluation = data?.evaluation || {};
+      setKnowledgeSearch({
+        query,
+        results: data?.search?.results || [],
+        citations: data?.search?.citations || [],
+        confidence: evaluation.confidence || 0,
+        retrievalMode: data?.search?.retrieval_mode || "",
+        searched: true,
+      });
+      setKnowledgeEvalForm((prev) => ({ ...prev, query }));
+      showStatus(`Evaluacion RAG: ${number(evaluation.quality_score || 0)}% / ${evaluation.passed ? "aprobada" : "requiere ajuste"}.`, evaluation.passed ? "ok" : "neutral");
+      await loadKnowledgeSources();
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    } finally {
+      setKnowledgeEvaluating(false);
     }
   };
   const runDiagnostics = async () => {
@@ -2406,7 +3678,68 @@ function App() {
     }
   };
   const saveProfileLocal = () => showStatus("Perfil preparado. Falta conectar persistencia de usuario y foto.", "ok");
-  const saveSecurityLocal = () => showStatus("Seguridad preparada. Cambio de clave y 2FA requieren endpoints backend.", "neutral");
+  const savePasswordChange = async () => {
+    if (!securityForm.currentPassword) return showStatus("Ingresa tu clave actual.", "error");
+    if (securityForm.newPassword.length < 8) return showStatus("La nueva clave debe tener al menos 8 caracteres.", "error");
+    if (securityForm.newPassword !== securityForm.confirmPassword) return showStatus("Las claves no coinciden.", "error");
+    try {
+      await apiCall("/saas/v1/auth/password/change", {
+        method: "POST",
+        body: JSON.stringify({ current_password: securityForm.currentPassword, new_password: securityForm.newPassword }),
+      });
+      setSecurityForm((prev) => ({ ...prev, currentPassword: "", newPassword: "", confirmPassword: "" }));
+      await loadSecurityStatus();
+      showStatus("Clave actualizada.", "ok");
+    } catch (err) { showStatus(String(err.message || err), "error"); }
+  };
+  const saveTwoFactorPreference = async () => {
+    try {
+      const data = await apiCall("/saas/v1/auth/security/2fa", {
+        method: "PATCH",
+        body: JSON.stringify({ enabled: securityForm.twoFactorEnabled, method: securityForm.twoFactorMethod || "email_otp" }),
+      });
+      setSecurityForm((prev) => ({
+        ...prev,
+        twoFactorEnabled: Boolean(data?.two_factor_enabled),
+        twoFactorMethod: data?.two_factor_method && data.two_factor_method !== "none" ? data.two_factor_method : "email_otp",
+        passwordChangedAt: data?.password_changed_at || prev.passwordChangedAt,
+      }));
+      showStatus("Preferencia 2FA guardada.", "ok");
+    } catch (err) { showStatus(String(err.message || err), "error"); }
+  };
+  const downloadComplianceJson = (payload, filename) => {
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 60000);
+  };
+  const exportMyAccountData = async () => {
+    try {
+      const data = await apiCall("/saas/v1/compliance/me/export");
+      downloadComplianceJson(data, "scentra-account-export.json");
+      showStatus("Export de cuenta generado.", "ok");
+    } catch (err) { showStatus(String(err.message || err), "error"); }
+  };
+  const exportSelectedCustomerData = async () => {
+    if (!selectedConversation?.id) return showStatus("Selecciona una conversacion en Inbox para exportar datos del cliente.", "error");
+    try {
+      const data = await apiCall(`/saas/v1/compliance/customers/${encodeURIComponent(selectedConversation.id)}/export`);
+      downloadComplianceJson(data, `scentra-customer-${selectedConversation.id}.json`);
+      showStatus("Export de cliente generado.", "ok");
+    } catch (err) { showStatus(String(err.message || err), "error"); }
+  };
+  const requestSelectedCustomerDelete = async () => {
+    if (!selectedConversation?.id) return showStatus("Selecciona una conversacion en Inbox para solicitar borrado.", "error");
+    try {
+      await apiCall(`/saas/v1/compliance/customers/${encodeURIComponent(selectedConversation.id)}/delete-request?reason=${encodeURIComponent("Solicitud creada desde configuracion de seguridad")}`, { method: "POST" });
+      showStatus("Solicitud de borrado creada para revision.", "ok");
+    } catch (err) { showStatus(String(err.message || err), "error"); }
+  };
   const openCredentialModal = (provider, credentialKey = provider.env) => {
     setCredentialModal({
       ...provider,
@@ -2521,20 +3854,56 @@ function App() {
     }
   };
 
-  const renderCredentialCard = (provider, credentialKey = provider.env) => {
+  const credentialKeysForProvider = (provider) => [provider.env, ...((Array.isArray(provider.fields) ? provider.fields : []) || [])].filter(Boolean);
+  const credentialIsConfigured = (credentialKey) => Boolean(credentialByKey[credentialKey]?.has_secret || credentialByKey[credentialKey]?.selected_model);
+  const providerIsConfigured = (provider) => credentialKeysForProvider(provider).some((key) => credentialIsConfigured(key));
+  const cardIsExpanded = (provider, credentialKey = provider.env) => Boolean(
+    expandedCredentialCards[credentialKey] || credentialIsConfigured(credentialKey) || expandedCredentialCards[`provider:${provider.code}`]
+  );
+  const expandCredentialCard = (key) => setExpandedCredentialCards((prev) => ({ ...prev, [key]: true }));
+  const collapseCredentialCard = (key) => setExpandedCredentialCards((prev) => ({ ...prev, [key]: false }));
+
+  const renderProviderPicker = (providers, options = {}) => {
+    const items = providers.filter((provider) => {
+      const key = options.grouped ? `provider:${provider.code}` : provider.env;
+      return !expandedCredentialCards[key] && !(options.grouped ? providerIsConfigured(provider) : credentialIsConfigured(provider.env));
+    });
+    if (!items.length) return null;
+    return (
+      <div className="api-provider-picker">
+        {items.map((provider) => {
+          const key = options.grouped ? `provider:${provider.code}` : provider.env;
+          return (
+            <button type="button" className="api-provider-tile" key={key} onClick={() => expandCredentialCard(key)}>
+              <strong>{provider.name}</strong>
+              <span>{provider.summary || provider.models || provider.fields || provider.env}</span>
+              <small>Añadir</small>
+            </button>
+          );
+        })}
+      </div>
+    );
+  };
+
+  const renderCredentialCard = (provider, credentialKey = provider.env, options = {}) => {
+    if (!cardIsExpanded(provider, credentialKey) && !options.force) return null;
     const credential = credentialByKey[credentialKey] || {};
     const modelsState = credentialModels[credentialKey] || {};
     const modelOptions = modelsState.models || [];
     const selectedModel = modelsState.selected ?? credential.selected_model ?? "";
+    const canCollapse = !credentialIsConfigured(credentialKey) && options.collapsible !== false;
     return (
       <div className="api-card" key={`${provider.code}-${credentialKey}`}>
         <div className="api-card-headline">
-          <div><strong>{provider.name}</strong><span>{provider.models || provider.fields || `Principal: ${provider.env}`}</span></div>
+          <div><strong>{provider.name}</strong><span>{provider.summary || provider.models || provider.fields || `Principal: ${provider.env}`}</span></div>
           <span className={`secret-pill ${credential.has_secret ? "saved" : "missing"}`}>{credential.has_secret ? `Guardada ${credential.secret_hint || ""}` : "Sin guardar"}</span>
         </div>
         <div className="api-key-row">
           <span>{credentialKey}</span>
-          <button type="button" onClick={() => openCredentialModal(provider, credentialKey)}>{credential.has_secret ? "Actualizar" : "Agregar"}</button>
+          <div className="api-key-actions">
+            <button type="button" onClick={() => openCredentialModal(provider, credentialKey)}>{credential.has_secret ? "Actualizar" : "Agregar"}</button>
+            {canCollapse ? <button type="button" className="ghost-button small" onClick={() => collapseCredentialCard(credentialKey)}>Ocultar</button> : null}
+          </div>
         </div>
         {provider.alt ? <small>Alias / extra: {provider.alt}</small> : null}
         {provider.supportsModels ? (
@@ -2555,6 +3924,42 @@ function App() {
       </div>
     );
   };
+
+  const renderCredentialSection = (providers) => (
+    <>
+      {renderProviderPicker(providers)}
+      <div className="api-card-grid">
+        {providers.map((provider) => renderCredentialCard(provider)).filter(Boolean)}
+      </div>
+    </>
+  );
+
+  const renderChannelCredentialGroup = (provider) => {
+    const groupKey = `provider:${provider.code}`;
+    const expanded = expandedCredentialCards[groupKey] || providerIsConfigured(provider);
+    if (!expanded) return null;
+    return (
+      <div className="api-channel-group" key={provider.code}>
+        <div className="api-card-headline">
+          <div><strong>{provider.name}</strong><span>{provider.summary || `Principal: ${provider.env}`}</span></div>
+          <button type="button" className="ghost-button small" onClick={() => collapseCredentialCard(groupKey)} disabled={providerIsConfigured(provider)}>Ocultar</button>
+        </div>
+        <div className="api-field-list">
+          {renderCredentialCard(provider, provider.env, { force: true, collapsible: false })}
+          {provider.fields.map((field) => renderCredentialCard({ ...provider, name: field, env: field, supportsModels: false }, field, { force: true, collapsible: false }))}
+        </div>
+      </div>
+    );
+  };
+
+  const renderChannelCredentialSection = (providers) => (
+    <>
+      {renderProviderPicker(providers, { grouped: true })}
+      <div className="api-card-grid channel-api-grid">
+        {providers.map((provider) => renderChannelCredentialGroup(provider)).filter(Boolean)}
+      </div>
+    </>
+  );
 
   const advisorContextPayload = () => ({
     context_type: activeView === "inbox" && selectedConversation?.id ? "conversation" : activeView,
@@ -2742,24 +4147,52 @@ function App() {
     return (
       <main className="auth-page">
         <section className="auth-card glass-card">
-          <div className="auth-brand"><span className="auth-logo">S</span><h1>Scentra +AI</h1><p>{mode === "login" ? "Control de conversaciones, IA y ventas." : "Crea tu empresa y empieza a configurar."}</p></div>
+          <div className="auth-brand"><span className="auth-logo">S</span><h1>Scentra +AI</h1><p>{mode === "login" ? "Control de conversaciones, IA y ventas." : mode === "register" ? "Crea tu empresa y empieza a configurar." : mode === "forgot" ? "Recupera el acceso de forma segura." : mode === "mfa" ? "Confirma el segundo factor de seguridad." : "Define una nueva clave segura."}</p></div>
           {status ? <div className={`status ${statusTone}`}>{status}</div> : null}
           {mode === "login" ? (
             <form className="auth-form" onSubmit={submitLogin}>
-              <label>Email</label><div className="input-wrap"><span>@</span><input autoComplete="email" inputMode="email" value={login.email} onChange={(event) => setLogin((prev) => ({ ...prev, email: event.target.value }))} /></div>
-              <label>Password</label><div className="input-wrap"><span>key</span><input autoComplete="current-password" type="password" value={login.password} onChange={(event) => setLogin((prev) => ({ ...prev, password: event.target.value }))} /></div>
+              <label>Correo</label><div className="input-wrap"><span>@</span><input autoComplete="email" inputMode="email" value={login.email} onChange={(event) => setLogin((prev) => ({ ...prev, email: event.target.value }))} /></div>
+              <label>Clave</label><div className="input-wrap"><span>key</span><input autoComplete="current-password" type="password" value={login.password} onChange={(event) => setLogin((prev) => ({ ...prev, password: event.target.value }))} /></div>
+              <TurnstileChallenge onToken={setLoginCaptchaToken} resetKey={loginCaptchaReset} />
               <button className="primary auth-submit" type="submit">Entrar</button>
-              <div className="auth-links"><button type="button">Recuperar clave</button><button type="button" onClick={() => setMode("register")}>Crear cuenta</button></div>
+              <div className="auth-links"><button type="button" onClick={() => setMode("forgot")}>Recuperar clave</button><button type="button" onClick={() => setMode("register")}>Crear cuenta</button></div>
             </form>
-          ) : (
+          ) : mode === "mfa" ? (
+            <form className="auth-form" onSubmit={submitMfa}>
+              <label>Codigo 2FA</label><div className="input-wrap"><span>#</span><input autoComplete="one-time-code" inputMode="numeric" value={mfaCode} onChange={(event) => setMfaCode(event.target.value)} /></div>
+              <small className="field-hint">Enviado a {mfaChallenge?.email_hint || "tu correo"}. {mfaChallenge?.expires_at ? `Vence: ${dateLabel(mfaChallenge.expires_at)}.` : ""}</small>
+              {mfaChallenge?.dev_otp ? <small className="field-hint">Local dev OTP: {mfaChallenge.dev_otp}</small> : null}
+              <button className="primary auth-submit" type="submit">Verificar codigo</button>
+              <div className="auth-links"><button type="button" onClick={() => { setMfaChallenge(null); setMfaCode(""); setMode("login"); }}>Volver al login</button></div>
+            </form>
+          ) : mode === "register" ? (
             <form className="auth-form" onSubmit={submitRegister}>
-              <label>Email owner</label><div className="input-wrap"><span>@</span><input autoComplete="email" inputMode="email" value={register.email} onChange={(event) => setRegister((prev) => ({ ...prev, email: event.target.value }))} /></div>
-              <label>Password</label><div className="input-wrap"><span>key</span><input autoComplete="new-password" type="password" minLength={8} value={register.password} onChange={(event) => setRegister((prev) => ({ ...prev, password: event.target.value }))} /></div><small className="field-hint">Minimo 8 caracteres.</small>
+              <label>Correo propietario</label><div className="input-wrap"><span>@</span><input autoComplete="email" inputMode="email" value={register.email} onChange={(event) => setRegister((prev) => ({ ...prev, email: event.target.value }))} /></div>
+              <label>Clave</label><div className="input-wrap"><span>key</span><input autoComplete="new-password" type="password" minLength={8} value={register.password} onChange={(event) => setRegister((prev) => ({ ...prev, password: event.target.value }))} /></div><small className="field-hint">Minimo 8 caracteres.</small>
               <label>Nombre</label><div className="input-wrap"><span>id</span><input autoComplete="name" value={register.full_name} onChange={(event) => setRegister((prev) => ({ ...prev, full_name: event.target.value }))} /></div>
               <label>Empresa</label><div className="input-wrap"><span>co</span><input autoComplete="organization" value={register.tenant_name} onChange={(event) => setRegister((prev) => ({ ...prev, tenant_name: event.target.value }))} /></div>
               <label>Slug publico</label><div className="input-wrap"><span>#</span><input autoComplete="off" value={register.tenant_slug} onChange={(event) => setRegister((prev) => ({ ...prev, tenant_slug: event.target.value }))} /></div>
+              <label>Industria</label><div className="input-wrap"><span>in</span><select value={register.industry_code} onChange={(event) => setRegister((prev) => ({ ...prev, industry_code: event.target.value }))}>{publicVerticalPacks.map((pack) => <option key={pack.code} value={pack.code}>{pack.label}</option>)}</select></div>
               <small className="field-hint">Tu cuenta inicia con demo de 30 dias en el plan basico. Luego el admin puede activar el plan final.</small>
+              <TurnstileChallenge onToken={setRegisterCaptchaToken} resetKey={registerCaptchaReset} />
               <button className="primary auth-submit" type="submit">Crear demo 30 dias</button>
+              <div className="auth-links"><button type="button" onClick={() => setMode("login")}>Volver al login</button></div>
+            </form>
+          ) : mode === "forgot" ? (
+            <form className="auth-form" onSubmit={submitPasswordRecovery}>
+              <label>Correo</label><div className="input-wrap"><span>@</span><input autoComplete="email" inputMode="email" value={passwordRecovery.email} onChange={(event) => setPasswordRecovery((prev) => ({ ...prev, email: event.target.value }))} /></div>
+              <small className="field-hint">Si existe una cuenta activa, enviaremos un enlace de recuperacion.</small>
+              <TurnstileChallenge onToken={setRecoveryCaptchaToken} resetKey={recoveryCaptchaReset} />
+              <button className="primary auth-submit" type="submit">Enviar recuperacion</button>
+              <div className="auth-links"><button type="button" onClick={() => setMode("login")}>Volver al login</button><button type="button" onClick={() => setMode("reset")}>Ya tengo token</button></div>
+            </form>
+          ) : (
+            <form className="auth-form" onSubmit={submitPasswordReset}>
+              <label>Token de recuperacion</label><div className="input-wrap"><span>#</span><input autoComplete="one-time-code" value={passwordReset.token} onChange={(event) => setPasswordReset((prev) => ({ ...prev, token: event.target.value }))} /></div>
+              <label>Nueva clave</label><div className="input-wrap"><span>key</span><input autoComplete="new-password" type="password" minLength={8} value={passwordReset.new_password} onChange={(event) => setPasswordReset((prev) => ({ ...prev, new_password: event.target.value }))} /></div>
+              <label>Confirmar clave</label><div className="input-wrap"><span>key</span><input autoComplete="new-password" type="password" minLength={8} value={passwordReset.confirm_password} onChange={(event) => setPasswordReset((prev) => ({ ...prev, confirm_password: event.target.value }))} /></div>
+              <TurnstileChallenge onToken={setResetCaptchaToken} resetKey={resetCaptchaReset} />
+              <button className="primary auth-submit" type="submit">Actualizar clave</button>
               <div className="auth-links"><button type="button" onClick={() => setMode("login")}>Volver al login</button></div>
             </form>
           )}
@@ -2771,11 +4204,11 @@ function App() {
   return (
     <div className="app-shell">
       <aside className="sidebar glass-panel">
-        <div className="brand"><span className="brand-mark">S</span><div><strong>Scentra +AI</strong><small>Sales intelligence cockpit</small></div></div>
+        <div className="brand"><span className="brand-mark">S</span><div><strong>Scentra +AI</strong><small>{t("brand.subtitle")}</small></div></div>
         <nav>
           {navItems.map(({ key, label, icon }) => <button key={key} className={"nav-item " + (activeView === key ? "active" : "")} onClick={() => setActiveView(key)}><span className="nav-icon">{icon}</span><span>{label}</span></button>)}
         </nav>
-        <div className="company-card"><span>Empresa activa</span><strong>{activeCompany?.tenant_name || activeCompany?.name || me.tenant_id}</strong><small>{me.role} / plan {billingPlan.display_name || billingPlan.plan_code || activeCompany?.plan_code || "starter"}</small></div>
+        <div className="company-card"><span>Empresa activa</span><strong>{activeCompany?.tenant_name || activeCompany?.name || me.tenant_id}</strong><small>{me.role} / plan {billingPlan.display_name || billingPlan.plan_code || activeCompany?.plan_code || "starter"} / {selectedVerticalPack?.label || currentIndustryCode}</small></div>
       </aside>
 
       <main className={`content ${activeView === "inbox" ? "content-inbox" : ""}`}>
@@ -2796,7 +4229,24 @@ function App() {
               <article className="metric-card amber"><span>Mensajes 30d</span><strong>{number(dashboardTotals.messages_30d || 0)}</strong><small>{number(dashboardTotals.inbound_30d || 0)} IN / {number(dashboardTotals.outbound_30d || 0)} OUT</small></article>
               <article className="metric-card rose"><span>Clientes nuevos</span><strong>{number(dashboardTotals.new_customers_30d || 0)}</strong><small>Ultimos 30 dias</small></article>
               <article className="metric-card violet"><span>Integraciones</span><strong>{number(connectedIntegrations)} / {number(billingLimits.max_integrations)}</strong><small>{number(activeWebhooks)} webhooks activos</small></article>
+              <article className="metric-card rose"><span>SLA vencido</span><strong>{number(dashboardTotals.sla_overdue || 0)}</strong><small>{number(dashboardTotals.open_tasks || 0)} tareas abiertas</small></article>
+              <article className="metric-card amber"><span>Leads calientes</span><strong>{number(dashboardTotals.hot_leads || 0)}</strong><small>{number(dashboardTotals.tasks_due_today || 0)} follow-ups hoy</small></article>
             </div>
+            {dashboardPredictive.latest?.length || Number(dashboardPredictive.open_recommendations || 0) ? (
+              <section className="dashboard-predictive-strip glass-card">
+                <div>
+                  <span>Predictive Intelligence</span>
+                  <strong>{number(dashboardPredictive.open_recommendations || 0)} recomendaciones abiertas</strong>
+                </div>
+                {(dashboardPredictive.latest || []).slice(0, 4).map((item) => (
+                  <button type="button" key={`${item.prediction_type}-${item.created_at}`} onClick={() => setActiveView("intelligence")}>
+                    <span>{predictionTypeLabel(item.prediction_type)}</span>
+                    <strong>{number(item.score)}</strong>
+                    <small>{item.label || item.status}</small>
+                  </button>
+                ))}
+              </section>
+            ) : null}
             <section className="dashboard-layout">
               <article className="panel glass-card wide-panel"><div className="panel-head"><h2>Funnel comercial</h2><span>CRM real por etapa</span></div>{dashboardFunnel.length ? dashboardFunnel.map((item) => <div className="funnel-line" key={item.stage}><div><span>{item.label}</span><small>{number(item.count)} / {number(item.pct)}%</small></div><div className="meter"><span style={{ width: `${Math.max(2, Number(item.pct || 0))}%` }} /></div></div>) : <div className="empty">Aun no hay clientes para calcular funnel.</div>}</article>
               <article className="panel glass-card"><div className="panel-head"><h2>Uso del plan</h2><span>{billingOverview?.period_yyyymm || "periodo"}</span></div><div className="usage-bars"><div className="usage-line"><div><strong>Mensajes</strong><span>{number(billingRemaining.monthly_messages)} disponibles</span></div><div className="meter"><span style={{ width: `${pct(billingUsage.used_monthly_messages, billingLimits.max_monthly_messages)}%` }} /></div></div><div className="usage-line"><div><strong>Integraciones</strong><span>{number(billingRemaining.integrations)} disponibles</span></div><div className="meter"><span style={{ width: `${pct(billingUsage.used_integrations, billingLimits.max_integrations)}%` }} /></div></div><div className="usage-line"><div><strong>Usuarios</strong><span>{number(billingRemaining.agents)} disponibles</span></div><div className="meter"><span style={{ width: `${pct(billingUsage.used_agents, billingLimits.max_agents)}%` }} /></div></div></div></article>
@@ -2813,17 +4263,42 @@ function App() {
                 <button type="button" className={inboxMode === "dms" ? "active" : ""} onClick={() => setInboxMode("dms")}>Mensajes</button>
                 <button type="button" className={inboxMode === "comments" ? "active" : ""} onClick={() => { setInboxMode("comments"); loadSocialComments({ keepSelection: true }); }}>Comentarios</button>
               </div>
+              <div className={`inbox-sync ${inboxRefreshing ? "active" : ""} ${inboxSyncError ? "error" : ""}`}>
+                <span>{inboxRefreshing ? "Sincronizando" : inboxLastSyncAt ? `Actualizado ${compactDateTimeLabel(inboxLastSyncAt)}` : "Sincronizacion pendiente"}</span>
+                {inboxSyncError ? <small>{inboxSyncError}</small> : <small>Polling visible con pausa en segundo plano</small>}
+              </div>
               <div className="inbox-filters">
                 <button type="button" className={inboxChannelFilter === "all" ? "active" : ""} onClick={() => setInboxChannelFilter("all")}>Todos</button>
                 {availableInboxChannels.map((channel) => <button type="button" key={channel} className={inboxChannelFilter === channel ? "active" : ""} onClick={() => setInboxChannelFilter(channel)}>{channelLabel(channel)}</button>)}
                 <input value={inboxSearch} onChange={(event) => setInboxSearch(event.target.value)} placeholder="Buscar telefono, nombre o preview..." />
-                <button type="button" onClick={() => { setInboxSearch(""); setInboxChannelFilter("all"); }}>Limpiar</button>
+                <button type="button" onClick={() => { setInboxSearch(""); setInboxChannelFilter("all"); setInboxQueueFilter("all"); setInboxAgentFilter("all"); }}>Limpiar</button>
+              </div>
+              <div className="inbox-agent-filter">
+                <label>Agente IA
+                  <select value={inboxAgentFilter} onChange={(event) => setInboxAgentFilter(event.target.value)}>
+                    <option value="all">Todos los agentes</option>
+                    {activeInboxAiAgents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name || agentTypeLabel(agent.agent_type)}</option>)}
+                  </select>
+                </label>
+              </div>
+              <div className="inbox-smart-filters">
+                {[["all","Todos"],["unread","Sin leer"],["mine","Mios"],["unassigned","Sin asignar"],["sla","SLA"],["hot","Hot"],["churn","Churn"],["human","Humano"],["ai","IA"]].map(([key, label]) => (
+                  <button key={key} type="button" className={inboxQueueFilter === key ? "active" : ""} onClick={() => setInboxQueueFilter(key)}>{label}</button>
+                ))}
               </div>
               <div className="conversation-list">
                 {inboxMode === "dms" ? filteredConversations.map((conversation) => (
                   <button type="button" className={`conversation-item ${selectedConversation?.id === conversation.id ? "active" : ""}`} key={conversation.id} onClick={() => loadMessages(conversation)}>
                     <span className="conversation-title"><strong>{conversation.display_name || conversation.phone || conversation.external_contact_id}</strong>{Number(conversation.unread_count || 0) > 0 ? <em>{number(conversation.unread_count)}</em> : null}</span>
                     <span className="conversation-meta"><b>{channelLabel(conversation.channel)}</b>{Number(conversation.unread_count || 0) > 0 ? <small>Sin leer</small> : <small>Leido</small>}</span>
+                    <span className="conversation-badges">
+                      {Number(conversation.lead_score || 0) > 0 ? <mark className={`lead-${conversation.lead_temperature || "cold"}`}>{leadTemperatureLabel(conversation.lead_temperature, conversation.lead_score)} {number(conversation.lead_score)}</mark> : null}
+                      {conversation.predictive_intelligence?.source === "intelligence_prediction" ? <mark>ML {number(conversation.predictive_intelligence?.conversion_probability || 0)}%</mark> : null}
+                      {Number(conversation.predictive_intelligence?.churn_risk || 0) >= 40 ? <mark className={Number(conversation.predictive_intelligence?.churn_risk || 0) >= 70 ? "danger" : ""}>Churn {number(conversation.predictive_intelligence?.churn_risk || 0)}</mark> : null}
+                      {conversation.assigned_user_name ? <mark>{conversation.assigned_user_name}</mark> : <mark>Sin asignar</mark>}
+                      {conversation.assigned_ai_agent_name ? <mark>IA: {conversation.assigned_ai_agent_name}</mark> : null}
+                      {conversation.sla_due_at || conversation.first_response_due_at ? <mark className={isPastDate(conversation.sla_due_at || conversation.first_response_due_at) ? "danger" : ""}>SLA {compactDateTimeLabel(conversation.sla_due_at || conversation.first_response_due_at)}</mark> : null}
+                    </span>
                     <small>{conversation.last_message_text || "-"}</small>
                   </button>
                 )) : filteredSocialComments.map((comment) => (
@@ -2926,6 +4401,7 @@ function App() {
                   {selectedConversation ? <button type="button" className={`takeover-toggle ${selectedConversation.takeover ? "active" : ""}`} onClick={toggleSelectedTakeover}>{selectedConversation.takeover ? "Takeover ON" : "Takeover OFF"}</button> : null}
                   {selectedConversation ? <button type="button" onClick={markSelectedConversationRead}>Leido</button> : null}
                   <button type="button" onClick={() => setNotificationSoundEnabled((prev) => !prev)}>{notificationSoundEnabled ? "Sonido ON" : "Sonido OFF"}</button>
+                  <button type="button" onClick={toggleBrowserNotifications} disabled={notificationPermission === "unsupported"}>{browserNotificationsEnabled ? "Notifs ON" : "Notifs OFF"}</button>
                   <button type="button" onClick={() => setCrmPanelOpen((prev) => !prev)}>{crmPanelOpen ? "Ocultar CRM" : "CRM"}</button>
                 </div>
               </div>
@@ -3016,15 +4492,210 @@ function App() {
                 {selectedConversation ? (
                   <div className="crm-mini-form">
                     <div className="crm-snapshot"><span>Telefono</span><strong>{selectedConversation.phone || selectedConversation.external_contact_id}</strong><span>Canal</span><strong>{channelLabel(selectedConversation.channel)}</strong></div>
+                    <div className="assignment-actions">
+                      <span>Asignacion</span>
+                      <strong>{selectedConversation.assigned_user_name || selectedConversation.assigned_user_email || "Sin asignar"}</strong>
+                      <button type="button" onClick={() => assignSelectedConversation(me?.user_id || "")} disabled={!me?.user_id || selectedConversation.assigned_user_id === me?.user_id}>Asignarme</button>
+                      <button type="button" onClick={() => assignSelectedConversation("")} disabled={!selectedConversation.assigned_user_id}>Liberar</button>
+                    </div>
+                    <div className="assignment-actions ai-owner-actions">
+                      <span>Agente IA responsable</span>
+                      <strong>{selectedConversation.assigned_ai_agent_name || "IA general"}</strong>
+                      <select value={selectedConversation.assigned_ai_agent_id || ""} onChange={(event) => assignSelectedAiAgent(event.target.value)}>
+                        <option value="">IA general</option>
+                        {activeInboxAiAgents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name || agentTypeLabel(agent.agent_type)}</option>)}
+                      </select>
+                      <button type="button" onClick={() => assignSelectedAiAgent("")} disabled={!selectedConversation.assigned_ai_agent_id}>Liberar IA</button>
+                    </div>
+                    <div className="crm-ops-card">
+                      <div className="crm-ops-head">
+                        <strong>Operacion</strong>
+                        <span className={`lead-pill lead-${crmDraft.lead_temperature || "cold"}`}>{leadTemperatureLabel(crmDraft.lead_temperature, crmDraft.lead_score)} {number(crmDraft.lead_score)}</span>
+                      </div>
+                      <label>Prioridad<select value={crmDraft.priority || "normal"} onChange={(event) => updateCrmDraft("priority", event.target.value)}><option value="low">Baja</option><option value="normal">Normal</option><option value="high">Alta</option><option value="urgent">Urgente</option></select></label>
+                      <label>Score<input type="number" min="0" max="100" value={crmDraft.lead_score ?? 0} onChange={(event) => updateCrmDraft("lead_score", Number(event.target.value || 0))} /></label>
+                      <label>Temperatura<select value={crmDraft.lead_temperature || "cold"} onChange={(event) => updateCrmDraft("lead_temperature", event.target.value)}><option value="cold">Frio</option><option value="warm">Tibio</option><option value="hot">Caliente</option></select></label>
+                      <label>SLA<input type="datetime-local" value={crmDraft.sla_due_at || ""} onChange={(event) => updateCrmDraft("sla_due_at", event.target.value)} /></label>
+                      <button type="button" onClick={recomputeSelectedScore}>Recalcular score</button>
+                    </div>
+                    <div className="crm-predictive-card">
+                      <div className="ai-context-head"><strong>Inteligencia predictiva</strong><small>{selectedPredictive.source || "crm_baseline"}</small></div>
+                      <div className="predictive-mini-grid">
+                        <span><b>{number(selectedPredictive.conversion_probability || selectedPredictive.lead_score || 0)}%</b>Conversion</span>
+                        <span><b>{number(selectedPredictive.engagement_score || 0)}</b>Engagement</span>
+                        <span className={Number(selectedPredictive.churn_risk || 0) >= 70 ? "danger" : ""}><b>{number(selectedPredictive.churn_risk || 0)}</b>Churn</span>
+                      </div>
+                      <p>{selectedPredictive.recommended_action || "Genera predicciones para obtener accion recomendada."}</p>
+                      <small>{selectedPredictive.best_channel || selectedConversation.channel || "canal"} / {selectedPredictive.best_window || "09:00-11:00 local"} / {selectedPredictive.frequency || "frecuencia sugerida"}</small>
+                      <div className="predictive-buttons">
+                        {["lead_scoring", "churn_prediction", "smart_remarketing"].map((type) => (
+                          <button type="button" key={type} onClick={() => runSelectedPredictiveInsight(type)} disabled={Boolean(predictiveBusy)}>
+                            {predictiveBusy === type ? "..." : predictionTypeLabel(type)}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="inbox-analysis-card">
+                      <div className="ai-context-head">
+                        <strong>Panel de analisis Inbox</strong>
+                        <div className="mini-action-row">
+                          <button type="button" onClick={() => loadConversationMultimodalEvents(selectedConversation.id)}>Refrescar</button>
+                          <button type="button" onClick={syncConversationMultimodalMemory} disabled={webSearchBusy === "memory-sync"}>{webSearchBusy === "memory-sync" ? "..." : "Sincronizar"}</button>
+                        </div>
+                      </div>
+                      <div className="inbox-analysis-metrics">
+                        <span><b>{number(inboxAnalysisCounts.voice)}</b>Voz</span>
+                        <span><b>{number(inboxAnalysisCounts.vision)}</b>Visual</span>
+                        <span><b>{number(inboxAnalysisCounts.memory)}</b>Memoria</span>
+                        <span><b>{number(inboxAnalysisCounts.approvedReferences)}</b>Aprobadas</span>
+                      </div>
+                      <div className="inbox-analysis-stream">
+                        {inboxVoiceInsights.map((item) => (
+                          <div className="analysis-signal voice" key={`voice-${item.message.id}`}>
+                            <strong>Voz: {item.intent}</strong>
+                            <span>{item.sentiment} / urgencia {item.urgency} / {item.confidence}% conf.</span>
+                            <p>{item.summary}</p>
+                          </div>
+                        ))}
+                        {inboxVisionInsights.map((item) => (
+                          <div className="analysis-signal vision" key={`vision-${item.message.id}`}>
+                            <strong>Visual: {item.type}</strong>
+                            <span>{item.intent} / urgencia {item.urgency} / {item.confidence}% conf.</span>
+                            <p>{item.summary}</p>
+                          </div>
+                        ))}
+                        {inboxMemoryHighlights.map((event) => (
+                          <div className="analysis-signal memory" key={event.id}>
+                            <strong>{event.source}</strong>
+                            <span>{event.status}{event.training ? " / training" : ""}{event.rag ? " / RAG" : ""}</span>
+                            <p>{event.text}</p>
+                          </div>
+                        ))}
+                        {!inboxVoiceInsights.length && !inboxVisionInsights.length && !inboxMemoryHighlights.length ? <p className="muted-note">Sin analisis multimodal aun. Analiza audios, imagenes o sincroniza memoria para activar señales.</p> : null}
+                      </div>
+                      <div className="visual-reference-strip">
+                        <div className="ai-context-head"><strong>Referencias visuales aprobadas</strong><small>{approvedVisualReferences.length} listas / {pendingVisualReferences.length} pendientes</small></div>
+                        {approvedVisualReferences.map(({ result }) => (
+                          <div className="visual-reference-item" key={`approved-ref-${result.id}`}>
+                            <img src={result.thumbnail_url || result.image_url} alt={result.title || "Referencia visual"} loading="lazy" />
+                            <div>
+                              <strong>{result.title || "Referencia visual"}</strong>
+                              <span>{result.source_name || result.display_url || "fuente externa"}</span>
+                              <div className="web-search-actions">
+                                <button type="button" onClick={() => useWebSearchReference(result, "draft")} disabled={Boolean(webSearchBusy)}>Usar</button>
+                                <button type="button" onClick={() => useWebSearchReference(result, "send")} disabled={Boolean(webSearchBusy) || composerSending}>Enviar</button>
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                        {!approvedVisualReferences.length ? <p className="muted-note">Aprueba una imagen segura para poder usarla como referencia visual.</p> : null}
+                      </div>
+                    </div>
+                    <div className="web-search-card">
+                      <div className="ai-context-head">
+                        <strong>Web/Image Search Intelligence</strong>
+                        <button type="button" onClick={() => loadWebSearchRunsForConversation(selectedConversation.id)}>Refrescar</button>
+                      </div>
+                      <form className="web-search-form" onSubmit={submitWebImageSearch}>
+                        <input value={webSearchForm.query} onChange={(event) => setWebSearchForm((prev) => ({ ...prev, query: event.target.value }))} placeholder="Buscar fuente o imagen de referencia..." />
+                        <select value={webSearchForm.searchType} onChange={(event) => setWebSearchForm((prev) => ({ ...prev, searchType: event.target.value }))}>
+                          <option value="mixed">Web + imagen</option>
+                          <option value="web">Solo web</option>
+                          <option value="image">Solo imagen</option>
+                        </select>
+                        <select value={webSearchForm.providerCode} onChange={(event) => setWebSearchForm((prev) => ({ ...prev, providerCode: event.target.value }))}>
+                          {SEARCH_API_PROVIDERS.map((provider) => <option key={provider.code} value={provider.code}>{provider.name}</option>)}
+                        </select>
+                        <button type="submit" className="primary" disabled={webSearchBusy === "search"}>{webSearchBusy === "search" ? "Buscando..." : "Buscar"}</button>
+                      </form>
+                      <small>{selectedWebSearchCredential.has_secret ? `Proveedor listo: ${selectedWebSearchProvider.name} ${selectedWebSearchCredential.secret_hint || ""}` : `Agrega ${selectedWebSearchProvider.name} en Ajustes > APIs. No se envian resultados automaticamente.`}</small>
+                      <div className="web-search-results">
+                        {webSearchItems.slice(0, 20).map(({ run, result }) => (
+                          <div className={`web-search-result ${result.approval_status || "pending"} ${result.safety_status || ""}`} key={result.id}>
+                            {result.thumbnail_url || result.image_url ? <img src={result.thumbnail_url || result.image_url} alt={result.title || "Referencia"} loading="lazy" /> : null}
+                            <div>
+                              <strong>{result.title || "Fuente externa"}</strong>
+                              <span>{result.source_name || result.display_url || run.provider_code} / {result.result_type}</span>
+                              {result.snippet ? <p>{result.snippet}</p> : null}
+                              {result.url ? <a href={result.url} target="_blank" rel="noreferrer">Abrir fuente</a> : <small>Fuente bloqueada por seguridad: {result.rejected_reason || result.safety_status}</small>}
+                              {result.license_label ? <small>Licencia: {result.license_label}</small> : null}
+                              <div className="web-search-actions">
+                                <span>{result.approval_status === "approved" ? "Aprobada" : result.approval_status === "rejected" ? "Rechazada" : "Pendiente"}</span>
+                                <button type="button" onClick={() => reviewWebSearchResult(result, "approved")} disabled={Boolean(webSearchBusy) || result.safety_status === "blocked" || result.approval_status === "approved"}>Aprobar</button>
+                                <button type="button" onClick={() => reviewWebSearchResult(result, "rejected")} disabled={Boolean(webSearchBusy) || result.approval_status === "rejected"}>Rechazar</button>
+                                <button type="button" onClick={() => useWebSearchReference(result, "draft")} disabled={Boolean(webSearchBusy) || result.safety_status === "blocked"}>{result.approval_status === "approved" ? "Usar" : "Aprobar y usar"}</button>
+                                <button type="button" onClick={() => useWebSearchReference(result, "send")} disabled={Boolean(webSearchBusy) || composerSending || result.safety_status === "blocked"}>{result.approval_status === "approved" ? "Enviar" : "Aprobar y enviar"}</button>
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                        {webSearchRuns.length === 0 ? <p className="muted-note">Sin busquedas externas para esta conversacion.</p> : null}
+                      </div>
+                    </div>
                     <label>Nombre<input value={crmDraft.first_name || ""} onChange={(event) => updateCrmDraft("first_name", event.target.value)} placeholder="Ej: Juan" /></label>
                     <label>Apellido<input value={crmDraft.last_name || ""} onChange={(event) => updateCrmDraft("last_name", event.target.value)} placeholder="Ej: Perez" /></label>
                     <label>Ciudad<input value={crmDraft.city || ""} onChange={(event) => updateCrmDraft("city", event.target.value)} /></label>
                     <label>Tipo<select value={crmDraft.customer_type || ""} onChange={(event) => updateCrmDraft("customer_type", event.target.value)}><option value="">Sin definir</option><option value="minorista">Minorista</option><option value="mayorista">Mayorista</option><option value="vip">VIP</option></select></label>
-                    <label>Etapa<select value={crmDraft.crm_stage || ""} onChange={(event) => updateCrmDraft("crm_stage", event.target.value)}><option value="">Sin etapa</option><option value="contactado">Contactado</option><option value="interes">Interes</option><option value="intencion_compra">Intencion compra</option><option value="pago_pendiente">Pago pendiente</option><option value="pago_confirmado">Pago confirmado</option></select></label>
+                    <label>Etapa<select value={crmDraft.crm_stage || ""} onChange={(event) => updateCrmDraft("crm_stage", event.target.value)}><option value="">Sin etapa</option>{activePipelineStages.length ? activePipelineStages.map((stage) => <option value={stage.stage_key} key={stage.id || stage.stage_key}>{stage.label}</option>) : <><option value="contactado">Contactado</option><option value="interes">Interes</option><option value="intencion_compra">Intencion compra</option><option value="pago_pendiente">Pago pendiente</option><option value="pago_confirmado">Pago confirmado</option></>}</select></label>
                     <label>Pago<select value={crmDraft.payment_status || ""} onChange={(event) => updateCrmDraft("payment_status", event.target.value)}><option value="">Sin estado</option><option value="pending">Pendiente</option><option value="paid">Pagado</option><option value="failed">Fallido</option></select></label>
                     <label>Intereses<input value={crmDraft.interests || ""} onChange={(event) => updateCrmDraft("interests", event.target.value)} placeholder="dulces, frescos..." /></label>
                     <label>Etiquetas<input value={crmDraft.tags || ""} onChange={(event) => updateCrmDraft("tags", event.target.value)} placeholder="vip, pago pendiente..." /></label>
                     <label>Notas<textarea rows={4} value={crmDraft.notes || ""} onChange={(event) => updateCrmDraft("notes", event.target.value)} /></label>
+                    {activeCrmCustomFields.length ? (
+                      <div className="crm-custom-card">
+                        <div className="ai-context-head"><strong>Campos personalizados</strong><small>{activeCrmCustomFields.length}</small></div>
+                        {activeCrmCustomFields.map((field) => {
+                          const value = (crmDraft.custom_fields || {})[field.field_key] ?? "";
+                          const options = customFieldOptions(field);
+                          if (String(field.field_type).toLowerCase() === "boolean") {
+                            return <label className="check-row" key={field.id || field.field_key}><input type="checkbox" checked={Boolean(value)} onChange={(event) => updateCrmCustomField(field.field_key, event.target.checked)} /> {field.label}</label>;
+                          }
+                          if (["select", "multiselect"].includes(String(field.field_type).toLowerCase())) {
+                            return <label key={field.id || field.field_key}>{field.label}<select value={Array.isArray(value) ? value[0] || "" : value} onChange={(event) => updateCrmCustomField(field.field_key, event.target.value)}><option value="">Sin valor</option>{options.map((option) => <option value={option} key={option}>{option}</option>)}</select></label>;
+                          }
+                          return <label key={field.id || field.field_key}>{field.label}<input type={customFieldInputType(field.field_type)} value={value} onChange={(event) => updateCrmCustomField(field.field_key, event.target.value)} /></label>;
+                        })}
+                      </div>
+                    ) : null}
+                    <div className="crm-tasks-card">
+                      <div className="ai-context-head"><strong>Tareas y follow-up</strong><small>{conversationTasks.filter((task) => ["open", "in_progress"].includes(String(task.status))).length} abiertas</small></div>
+                      <form onSubmit={createConversationTask} className="task-mini-form">
+                        <input value={taskDraft.title} onChange={(event) => setTaskDraft((prev) => ({ ...prev, title: event.target.value }))} placeholder="Ej: llamar mañana..." />
+                        <input type="datetime-local" value={taskDraft.due_at} onChange={(event) => setTaskDraft((prev) => ({ ...prev, due_at: event.target.value }))} />
+                        <select value={taskDraft.priority} onChange={(event) => setTaskDraft((prev) => ({ ...prev, priority: event.target.value }))}><option value="normal">Normal</option><option value="high">Alta</option><option value="urgent">Urgente</option><option value="low">Baja</option></select>
+                        <button type="submit" disabled={!taskDraft.title.trim()}>Crear</button>
+                      </form>
+                      <div className="task-list-mini">
+                        {conversationTasks.slice(0, 5).map((task) => (
+                          <div key={task.id} className={`task-mini ${task.is_overdue ? "overdue" : ""}`}>
+                            <div><strong>{task.title}</strong><span>{priorityLabel(task.priority)}{task.due_at ? ` / ${compactDateTimeLabel(task.due_at)}` : ""}</span></div>
+                            {task.status !== "done" ? <button type="button" onClick={() => patchConversationTask(task.id, { status: "done" })}>✓</button> : <small>Lista</small>}
+                          </div>
+                        ))}
+                        {conversationTasks.length === 0 ? <p className="muted-note">Sin tareas para esta conversacion.</p> : null}
+                      </div>
+                    </div>
+                    <div className="crm-dedupe-card">
+                      <div className="ai-context-head"><strong>Duplicados posibles</strong><small>{dedupeCandidates.length}</small></div>
+                      {dedupeCandidates.slice(0, 4).map((candidate) => (
+                        <div className="dedupe-row" key={candidate.id}>
+                          <div><strong>{candidate.display_name || candidate.phone || candidate.external_contact_id}</strong><span>{candidate.channel} / score {number(candidate.match_score)} / {(candidate.reasons || []).join(", ")}</span></div>
+                          <button type="button" onClick={() => mergeDedupeCandidate(candidate.id)} disabled={mergingCustomerId === candidate.id}>{mergingCustomerId === candidate.id ? "..." : "Fusionar"}</button>
+                        </div>
+                      ))}
+                      {dedupeCandidates.length === 0 ? <p className="muted-note">Sin duplicados evidentes por telefono, nombre o email.</p> : null}
+                    </div>
+                    <div className="crm-timeline-card">
+                      <div className="ai-context-head"><strong>Timeline completo</strong><small>{conversationTimeline.length}</small></div>
+                      {conversationTimeline.slice(0, 8).map((event) => (
+                        <div className={`timeline-event ${event.event_type || ""}`} key={`${event.event_type}-${event.id}-${event.occurred_at}`}>
+                          <strong>{event.title || event.event_type}</strong>
+                          <span>{compactDateTimeLabel(event.occurred_at || event.created_at)}</span>
+                          {event.description ? <small>{event.description}</small> : null}
+                        </div>
+                      ))}
+                      {conversationTimeline.length === 0 ? <p className="muted-note">Aun no hay actividad historica para esta conversacion.</p> : null}
+                    </div>
                     <div className="ai-context-card">
                       <div className="ai-context-head"><strong>Contexto IA</strong><button type="button" onClick={() => loadConversationMemory(selectedConversation.id)}>Refrescar</button></div>
                       <p>{conversationMemory?.summary || "La IA aun no ha construido memoria para esta conversacion."}</p>
@@ -3032,6 +4703,17 @@ function App() {
                         {Object.entries(conversationMemory?.facts_json || {}).filter(([, value]) => String(value || "").trim()).slice(0, 8).map(([key, value]) => <span key={key}><b>{key}</b>{String(value)}</span>)}
                       </div>
                       <button type="button" onClick={processSelectedWithAi}>Procesar con IA ahora</button>
+                    </div>
+                    <div className="message-status-card">
+                      <div className="ai-context-head"><strong>Estados Meta</strong><span>{messageStatusEvents.length}</span></div>
+                      {messageStatusEvents.slice(0, 6).map((event) => (
+                        <div className={`status-event ${event.status || ""}`} key={event.id}>
+                          <strong>{event.status}</strong>
+                          <span>{compactDateTimeLabel(event.occurred_at || event.created_at)}</span>
+                          {event.error ? <small>{event.error}</small> : null}
+                        </div>
+                      ))}
+                      {messageStatusEvents.length === 0 ? <p className="muted-note">Aun no hay eventos de estado para esta conversacion.</p> : null}
                     </div>
                     <label className="check-row"><input type="checkbox" checked={Boolean(crmDraft.takeover)} onChange={(event) => updateCrmDraft("takeover", event.target.checked)} /> Takeover humano</label>
                     <button type="button" className="primary" onClick={saveSelectedCrm} disabled={savingCrm}>{savingCrm ? "Guardando..." : "Guardar ficha"}</button>
@@ -3041,7 +4723,7 @@ function App() {
             ) : null}
           </section>
         ) : activeView === "customers" ? (
-          <CrmPanel apiCall={apiCall} showStatus={showStatus} onOpenInbox={(customer) => { setActiveView("inbox"); loadMessages(customer); }} />
+          <CrmPanel apiCall={apiCall} showStatus={showStatus} crmConfig={crmConfig} onConfigChange={() => loadCrmConfig(true)} onOpenInbox={(customer) => { setActiveView("inbox"); loadMessages(customer); }} />
         ) : activeView === "labels" ? (
           <LabelsPanel apiCall={apiCall} showStatus={showStatus} onGoCampaigns={() => setActiveView("campaigns")} />
         ) : activeView === "campaigns" ? (
@@ -3058,9 +4740,17 @@ function App() {
             onOpenSettings={() => { setActiveView("settings"); setSettingsTab("apis"); }}
             onMilestone={showMilestoneOnce}
           />
+        ) : activeView === "intelligence" ? (
+          <IntelligencePanel apiCall={apiCall} showStatus={showStatus} tenantId={me.tenant_id || ""} />
+        ) : activeView === "ecosystem" ? (
+          <AiEcosystemPanel apiCall={apiCall} showStatus={showStatus} />
+        ) : activeView === "composer" ? (
+          <WorkflowComposerPanel apiCall={apiCall} showStatus={showStatus} />
+        ) : activeView === "trust" ? (
+          <TrustCenterPanel apiCall={apiCall} showStatus={showStatus} />
         ) : (
           <section className="settings-page">
-            <div className="settings-tabs glass-card">{[["ia","IA"],["channels","Canales"],["apis","APIs"],["debug","Debug"],["users","Usuarios"],["profile","Perfil"],["security","Seguridad"],["plan","Plan"]].map(([key,label]) => <button key={key} type="button" className={settingsTab === key ? "active" : ""} onClick={() => setSettingsTab(key)}>{label}</button>)}</div>
+            <div className="settings-tabs glass-card">{SETTINGS_TABS.map(([key,label]) => <button key={key} type="button" className={settingsTab === key ? "active" : ""} onClick={() => setSettingsTab(key)}>{label}</button>)}</div>
             {settingsTab === "ia" ? (
               <div className="settings-grid">
                 <article className="panel glass-card">
@@ -3095,11 +4785,16 @@ function App() {
                   </div>
                   <p className="soft-copy">Los modelos se eligen en Ajustes &gt; APIs con Cargar modelos y Guardar modelo. Aqui solo se selecciona el proveedor y el comportamiento.</p>
                   <h3>Ritmo humano</h3>
+                  <label className="check-row"><input type="checkbox" checked={Boolean(aiConfig.humanReplyStyle)} onChange={(event) => setAiConfig((prev) => ({ ...prev, humanReplyStyle: event.target.checked }))} /> Respuestas breves sin perder contexto</label>
+                  <label className="check-row"><input type="checkbox" checked={Boolean(aiConfig.humanReplySplitting)} onChange={(event) => setAiConfig((prev) => ({ ...prev, humanReplySplitting: event.target.checked }))} /> Fragmentar respuestas largas en mensajes naturales</label>
                   <div className="form-grid four">
                     <label>Espera antes de responder (seg)<input type="number" min="0" value={aiConfig.cooldown} onChange={(event) => setAiConfig((prev) => ({ ...prev, cooldown: event.target.value }))} /></label>
                     <label>Typing antes del primer envio (ms)<input type="number" min="0" value={aiConfig.typingDelay} onChange={(event) => setAiConfig((prev) => ({ ...prev, typingDelay: event.target.value }))} /></label>
-                    <label>Chars por fragmento<input type="number" min="0" value={aiConfig.chunks} onChange={(event) => setAiConfig((prev) => ({ ...prev, chunks: event.target.value }))} /></label>
+                    <label>Chars por mensaje<input type="number" min="0" value={aiConfig.chunks} onChange={(event) => setAiConfig((prev) => ({ ...prev, chunks: event.target.value }))} /></label>
                     <label>Delay entre fragmentos (ms)<input type="number" min="0" value={aiConfig.delayBetween} onChange={(event) => setAiConfig((prev) => ({ ...prev, delayBetween: event.target.value }))} /></label>
+                    <label>Max tokens salida<input type="number" min="200" value={aiConfig.replyMaxOutputTokens} onChange={(event) => setAiConfig((prev) => ({ ...prev, replyMaxOutputTokens: event.target.value, maxTokens: event.target.value }))} /></label>
+                    <label>Mensajes recientes<input type="number" min="4" max="24" value={aiConfig.recentMessageLimit} onChange={(event) => setAiConfig((prev) => ({ ...prev, recentMessageLimit: event.target.value }))} /></label>
+                    <label>Chars por mensaje historico<input type="number" min="200" value={aiConfig.messageContextChars} onChange={(event) => setAiConfig((prev) => ({ ...prev, messageContextChars: event.target.value }))} /></label>
                   </div>
                   <label className="check-row"><input type="checkbox" checked={Boolean(aiConfig.typingIndicator)} onChange={(event) => setAiConfig((prev) => ({ ...prev, typingIndicator: event.target.checked }))} /> Mostrar “escribiendo...” en WhatsApp cuando Meta lo permita</label>
                   <div className="panel-actions"><button type="button" className="primary" onClick={saveAiLocal}>Guardar ajustes</button><button type="button" onClick={() => setAiTesterOpen(true)}>Probar IA</button></div>
@@ -3119,6 +4814,36 @@ function App() {
                       <strong>{activeTtsModel || "Sin voz seleccionada"}</strong>
                       <small>{selectedTtsCredential.has_secret ? `Credencial guardada ${selectedTtsCredential.secret_hint || "cifrada"}` : `Agrega ${selectedTtsProvider?.name || "TTS"} en Ajustes > APIs`}</small>
                     </div>
+                    <label>Analisis de audios
+                      <select value={aiConfig.voiceAnalysisProvider} onChange={(event) => setAiConfig((prev) => ({ ...prev, voiceAnalysisProvider: event.target.value }))}>
+                        {AI_API_PROVIDERS.filter((provider) => provider.code === "google").map((provider) => <option key={provider.code} value={provider.code}>{provider.name}</option>)}
+                      </select>
+                    </label>
+                    <div className={`linked-model-card ${activeVoiceAnalysisModel ? "ready" : "missing"}`}>
+                      <span>Modelo Voice Intelligence</span>
+                      <strong>{activeVoiceAnalysisModel || "Gemini recomendado"}</strong>
+                      <small>{selectedVoiceAnalysisCredential.has_secret ? `API guardada ${selectedVoiceAnalysisCredential.secret_hint || "cifrada"}` : "Configura Google / Gemini en APIs para transcribir audio real."}</small>
+                    </div>
+                    <label>Vision Intelligence
+                      <select value={aiConfig.visionAnalysisProvider} onChange={(event) => setAiConfig((prev) => ({ ...prev, visionAnalysisProvider: event.target.value }))}>
+                        {VISION_API_PROVIDERS.map((provider) => <option key={provider.code} value={provider.code}>{provider.name}</option>)}
+                      </select>
+                    </label>
+                    <div className={`linked-model-card ${activeVisionAnalysisModel ? "ready" : "missing"}`}>
+                      <span>Modelo imagen/documento</span>
+                      <strong>{activeVisionAnalysisModel || "Gemini recomendado"}</strong>
+                      <small>{selectedVisionAnalysisCredential.has_secret ? `API guardada ${selectedVisionAnalysisCredential.secret_hint || "cifrada"}` : "Agrega Google, OpenRouter o Kimi en APIs. Los documentos usan Gemini como ruta segura."}</small>
+                    </div>
+                    <label>Busqueda web/imagen
+                      <select value={aiConfig.webImageSearchProvider} onChange={(event) => { setAiConfig((prev) => ({ ...prev, webImageSearchProvider: event.target.value })); setWebSearchForm((prev) => ({ ...prev, providerCode: event.target.value })); }}>
+                        {SEARCH_API_PROVIDERS.map((provider) => <option key={provider.code} value={provider.code}>{provider.name}</option>)}
+                      </select>
+                    </label>
+                    <div className={`linked-model-card ${selectedWebSearchCredential.has_secret ? "ready" : "missing"}`}>
+                      <span>Fuentes externas</span>
+                      <strong>{selectedWebSearchProvider.name}</strong>
+                      <small>{selectedWebSearchCredential.has_secret ? `API guardada ${selectedWebSearchCredential.secret_hint || "cifrada"}` : "Agrega la API key en Ajustes > APIs. Las fuentes requieren aprobacion humana."}</small>
+                    </div>
                     <label>Voice ID manual opcional<input value={aiConfig.voiceId} onChange={(event) => setAiConfig((prev) => ({ ...prev, voiceId: event.target.value }))} /></label>
                     <label>Nombre visible de voz<input value={aiConfig.voiceName} onChange={(event) => setAiConfig((prev) => ({ ...prev, voiceName: event.target.value }))} /></label>
                   </div>
@@ -3127,7 +4852,14 @@ function App() {
                 <article className="panel glass-card">
                   <div className="panel-head"><h2>Knowledge Base</h2><span>fuentes</span></div>
                   <p className="soft-copy">Estas fuentes se inyectan como contexto para la IA. Sirven para politicas, catalogos, preguntas frecuentes, precios y procesos internos.</p>
-                  <div className="inline-form compact"><select><option>Mostrar: Todos</option></select><button type="button" onClick={loadKnowledgeSources}>Refrescar</button></div>
+                  <div className="kb-health-grid">
+                    <div><span>Estado RAG</span><strong>{knowledgeHealth?.status || "sin datos"}</strong><small>{number(knowledgeHealth?.totals?.active_sources || 0)} fuentes activas</small></div>
+                    <div><span>Fragmentos</span><strong>{number(knowledgeHealth?.totals?.chunks || 0)}</strong><small>chunks indexados</small></div>
+                    <div><span>Vectorizados</span><strong>{number(knowledgeHealth?.totals?.vectorized_chunks || 0)}</strong><small>{knowledgeHealth?.retrieval_mode || "sparse_vector_lexical"}</small></div>
+                    <div><span>Calidad RAG</span><strong>{number(knowledgeHealth?.quality?.avg_quality_score || 0)}%</strong><small>{number(knowledgeHealth?.quality?.passed_evaluations || 0)} evaluaciones aprobadas</small></div>
+                    <div><span>Errores</span><strong>{number(knowledgeHealth?.totals?.error_sources || 0)}</strong><small>fuentes con problema</small></div>
+                  </div>
+                  <div className="inline-form compact"><select><option>Mostrar: Todos</option></select><button type="button" onClick={loadKnowledgeSources}>Refrescar</button><button type="button" onClick={reindexAllKnowledge} disabled={knowledgeUploading}>Reindexar todo</button></div>
                   <input ref={knowledgeFileRef} className="composer-file-input" type="file" accept=".txt,.md,.csv,.json,.pdf,text/plain,application/pdf" onChange={(event) => uploadKnowledgeFile(event.target.files?.[0])} />
                   <div
                     className="upload-zone actionable"
@@ -3138,8 +4870,51 @@ function App() {
                     onDragOver={(event) => event.preventDefault()}
                     onDrop={(event) => { event.preventDefault(); uploadKnowledgeFile(event.dataTransfer.files?.[0]); }}
                   >
-                    {knowledgeUploading ? "Procesando fuente..." : "Arrastra PDF/TXT aqui o haz clic para subir"}
+                    {knowledgeUploading ? "Procesando fuente..." : "Arrastra PDF/TXT/CSV aqui o haz clic para subir"}
                   </div>
+                  <form className="kb-search-form" onSubmit={searchKnowledgeSources}>
+                    <label>Probar recuperacion RAG
+                      <input
+                        placeholder="Ej: politicas de envio, garantia, precio de producto..."
+                        value={knowledgeSearch.query}
+                        onChange={(event) => setKnowledgeSearch((prev) => ({ ...prev, query: event.target.value }))}
+                      />
+                    </label>
+                    <button type="submit" className="primary" disabled={knowledgeSearching}>{knowledgeSearching ? "Buscando..." : "Buscar contexto"}</button>
+                  </form>
+                  {knowledgeSearch.searched ? (
+                    <div className="kb-rag-results">
+                      <div className="kb-rag-summary"><strong>{number(knowledgeSearch.results.length)} fragmentos encontrados</strong><span>Confianza {number(knowledgeSearch.confidence)}% / {knowledgeSearch.retrievalMode || "sparse_vector_lexical"}</span></div>
+                      {knowledgeSearch.results.slice(0, 4).map((item) => (
+                        <div className="kb-rag-result" key={item.chunk_id}>
+                          <strong>{item.title}</strong>
+                          <span>{item.source_label || item.filename || item.url || "Fuente interna"} / score {item.score} / vector {number(item.vector_score || 0)}</span>
+                          {Array.isArray(item.matched_terms) && item.matched_terms.length ? <small>Coincidencias: {item.matched_terms.slice(0, 8).join(", ")}</small> : null}
+                          <p>{item.content}</p>
+                        </div>
+                      ))}
+                      {knowledgeSearch.citations.length ? <div className="kb-citations"><strong>Citas internas</strong>{knowledgeSearch.citations.slice(0, 5).map((citation, index) => <span key={`${citation.chunk_id || index}`}>Fuente {index + 1}: {citation.title} / score {citation.score}</span>)}</div> : null}
+                      {knowledgeSearch.results.length === 0 ? <div className="empty">No se encontro contexto. Revisa que haya fuentes activas o reindexa.</div> : null}
+                    </div>
+                  ) : null}
+                  <form className="kb-eval-form" onSubmit={runKnowledgeEvaluation}>
+                    <h3>Evaluacion de calidad RAG</h3>
+                    <label>Pregunta de prueba<input placeholder="Ej: que garantia tiene este producto" value={knowledgeEvalForm.query} onChange={(event) => setKnowledgeEvalForm((prev) => ({ ...prev, query: event.target.value }))} /></label>
+                    <label>Respuesta esperada opcional<textarea rows={3} placeholder="Datos que deberian aparecer en el contexto recuperado" value={knowledgeEvalForm.expectedAnswer} onChange={(event) => setKnowledgeEvalForm((prev) => ({ ...prev, expectedAnswer: event.target.value }))} /></label>
+                    <label>Fuentes esperadas opcionales<textarea rows={2} placeholder="Una fuente por linea o separadas por coma" value={knowledgeEvalForm.expectedSources} onChange={(event) => setKnowledgeEvalForm((prev) => ({ ...prev, expectedSources: event.target.value }))} /></label>
+                    <button type="submit" className="primary" disabled={knowledgeEvaluating}>{knowledgeEvaluating ? "Evaluando..." : "Evaluar RAG"}</button>
+                  </form>
+                  {knowledgeEvaluations.length ? (
+                    <div className="kb-eval-list">
+                      {knowledgeEvaluations.map((item) => (
+                        <div key={item.id} className={item.passed ? "kb-eval-row ok" : "kb-eval-row warn"}>
+                          <strong>{item.query}</strong>
+                          <span>{item.answerability} / calidad {number(item.quality_score)}% / confianza {number(item.confidence)}%</span>
+                          <small>{compactDateTimeLabel(item.created_at)} / {item.passed ? "aprobada" : "requiere ajuste"}</small>
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
                   <h3>Fuentes Web</h3>
                   <form className="kb-url-form" onSubmit={addKnowledgeUrl}>
                     <label>URL<input placeholder="https://tutienda.com/pagina-o-blog" value={knowledgeUrlForm.url} onChange={(event) => setKnowledgeUrlForm((prev) => ({ ...prev, url: event.target.value }))} /></label>
@@ -3150,13 +4925,73 @@ function App() {
                   <div className="kb-source-list">
                     {knowledgeSources.map((source) => (
                       <div className="kb-source" key={source.id}>
-                        <div><strong>{source.title || source.filename || source.url}</strong><span>{source.source_type} / {number(source.content_chars)} chars / {compactDateTimeLabel(source.updated_at)}</span><p>{source.content_preview}</p></div>
-                        <button type="button" onClick={() => deleteKnowledgeSource(source.id)}>Eliminar</button>
+                        <div>
+                          <strong>{source.title || source.filename || source.url}</strong>
+                          <span>{source.source_type} / {number(source.content_chars)} chars / {number(source.chunk_count)} chunks / {source.status || "sin estado"} / {compactDateTimeLabel(source.updated_at)}</span>
+                          {source.metadata_json?.parser ? <small>Parser: {source.metadata_json.parser}</small> : null}
+                          {source.error ? <small className="danger-text">{source.error}</small> : <small>Indexado {source.last_indexed_at ? compactDateTimeLabel(source.last_indexed_at) : "pendiente"}</small>}
+                          <p>{source.content_preview}</p>
+                        </div>
+                        <div className="row-actions">
+                          <button type="button" onClick={() => reindexKnowledgeSource(source.id)}>Reindexar</button>
+                          <button type="button" onClick={() => deleteKnowledgeSource(source.id)}>Eliminar</button>
+                        </div>
                       </div>
                     ))}
                     {knowledgeSources.length === 0 ? <div className="empty">Aun no hay fuentes. Sube un TXT/PDF o agrega una URL para que la IA tenga contexto adicional.</div> : null}
                   </div>
                 </article>
+              </div>
+            ) : null}
+            {settingsTab === "vertical" ? (
+              <div className="settings-stack vertical-settings">
+                <article className="panel glass-card vertical-hero">
+                  <div className="panel-head">
+                    <div><h2>Verticalizacion</h2><span>{verticalState?.tenant?.industry_code || activeCompany?.industry_code || "general"}</span></div>
+                    <button type="button" onClick={() => loadVerticalState(false)}>Refrescar</button>
+                  </div>
+                  <p className="soft-copy">El pack de industria ajusta pipeline CRM, campos comerciales, segmentos, plantillas, triggers inactivos, flows draft, KPIs y agentes recomendados para la empresa activa.</p>
+                  <div className="vertical-current">
+                    <div><span>Industria actual</span><strong>{verticalState?.current_pack?.label || selectedVerticalPack?.label || "General"}</strong><small>{verticalState?.current_pack?.description || selectedVerticalPack?.description}</small></div>
+                    <div><span>Pack aplicado</span><strong>{verticalState?.tenant?.vertical_pack_applied_at ? compactDateTimeLabel(verticalState.tenant.vertical_pack_applied_at) : "pendiente"}</strong><small>Version {verticalState?.tenant?.vertical_pack_version || selectedVerticalPack?.pack_version || 1}</small></div>
+                    <div><span>Automatizaciones</span><strong>{number(verticalState?.kpis?.active_triggers || 0)} activas</strong><small>{number(verticalState?.kpis?.triggers || 0)} triggers / {number(verticalState?.kpis?.flows || 0)} flows</small></div>
+                  </div>
+                </article>
+                <div className="vertical-layout">
+                  <article className="panel glass-card">
+                    <div className="panel-head"><h2>Aplicar pack</h2><span>{selectedVerticalPack?.label}</span></div>
+                    <label>Industria
+                      <select value={verticalApply.industry_code} onChange={(event) => setVerticalApply((prev) => ({ ...prev, industry_code: event.target.value }))}>
+                        {verticalPacks.map((pack) => <option key={pack.code} value={pack.code}>{pack.label}</option>)}
+                      </select>
+                    </label>
+                    <p className="soft-copy">{selectedVerticalPack?.description}</p>
+                    <div className="vertical-counts">
+                      {Object.entries(selectedVerticalPack?.counts || {}).map(([key, value]) => <span key={key}><strong>{number(value)}</strong>{key.replaceAll("_", " ")}</span>)}
+                    </div>
+                    <label className="check-row"><input type="checkbox" checked={Boolean(verticalApply.create_agents)} onChange={(event) => setVerticalApply((prev) => ({ ...prev, create_agents: event.target.checked }))} /> Crear agentes recomendados como borradores si el plan lo permite</label>
+                    <div className="panel-actions"><button type="button" className="primary" onClick={applyVerticalPack} disabled={verticalBusy}>{verticalBusy ? "Aplicando..." : "Aplicar vertical"}</button><button type="button" onClick={() => { setActiveView("agents"); setSettingsTab("ia"); }}>Ver agentes</button></div>
+                    <div className="vertical-agents">
+                      <strong>Agentes sugeridos</strong>
+                      {(selectedVerticalPack?.agent_types || []).map((agentType) => <span key={agentType}>{agentType}</span>)}
+                    </div>
+                  </article>
+                  <article className="panel glass-card">
+                    <div className="panel-head"><h2>KPIs verticales</h2><span>tenant activo</span></div>
+                    <div className="vertical-kpis">
+                      {Object.entries(verticalState?.kpis || {}).map(([key, value]) => <div key={key}><strong>{number(value)}</strong><span>{key.replaceAll("_", " ")}</span></div>)}
+                    </div>
+                    <h3>KPIs esperados del pack</h3>
+                    <div className="vertical-chip-list">{(selectedVerticalPack?.kpis || []).map((item) => <span key={item}>{item.replaceAll("_", " ")}</span>)}</div>
+                  </article>
+                  <article className="panel glass-card">
+                    <div className="panel-head"><h2>Historial</h2><span>{number(verticalState?.last_applications?.length || 0)}</span></div>
+                    <div className="vertical-history">
+                      {(verticalState?.last_applications || []).map((item) => <div key={item.id}><strong>{item.industry_code}</strong><span>Version {item.pack_version} / agentes {item.created_agents ? "solicitados" : "no creados"}</span><small>{compactDateTimeLabel(item.created_at)}</small></div>)}
+                      {!(verticalState?.last_applications || []).length ? <p className="empty">Aun no hay aplicaciones de pack registradas.</p> : null}
+                    </div>
+                  </article>
+                </div>
               </div>
             ) : null}
             {settingsTab === "channels" ? (
@@ -3301,7 +5136,7 @@ function App() {
                   <div className="panel-head">
                     <div>
                       <h2>Instagram Business</h2>
-                      <span>Facebook Login, discovery automatico y webhooks</span>
+                      <span>{t("meta.facebook.discovery_label")}</span>
                     </div>
                     <button type="button" disabled={instagramBusy} onClick={loadInstagramDiagnostics}>Diagnostics IG</button>
                   </div>
@@ -3326,7 +5161,7 @@ function App() {
                       <strong>{metaTokenHealth.instagram.ok ? "Token Instagram operativo" : `Token Instagram: ${metaTokenHealth.instagram.recommendation || metaTokenHealth.instagram.status || "revisar"}`}</strong>
                       <span>Fuente: {metaTokenHealth.instagram.refresh_source || "-"} / Auto-renovable: {metaTokenHealth.instagram.can_auto_refresh ? "si" : "no"}</span>
                       <small>Page token {metaTokenHealth.instagram.page_access_token?.hint || "-"} {metaTokenHealth.instagram.page_access_token?.expires_at ? `/ vence ${compactDateTimeLabel(metaTokenHealth.instagram.page_access_token.expires_at)}` : ""}</small>
-                      {!metaTokenHealth.instagram.can_auto_refresh ? <small>Para auto-renovar necesitas conectar por Facebook Login o guardar un user token OAuth junto al App ID/App Secret.</small> : null}
+                      {!metaTokenHealth.instagram.can_auto_refresh ? <small>{t("meta.facebook.auto_refresh_hint")}</small> : null}
                     </div>
                   ) : null}
                   <form className="meta-grid instagram-manual-grid" onSubmit={saveInstagramManual}>
@@ -3422,11 +5257,11 @@ function App() {
                   ) : null}
                   <div className="oauth-mode-box">
                     <div>
-                      <strong>OAuth central con Facebook Login</strong>
-                      <span>Usalo cuando la app de Scentra tenga permisos aprobados. Descubre portfolios, paginas y cuentas Instagram automaticamente.</span>
+                      <strong>OAuth con la app Meta del cliente</strong>
+                      <span>Usa el Meta App ID/App Secret de este tenant para generar user token largo y page token renovable. Descubre paginas, Facebook Messenger e Instagram Business automaticamente.</span>
                     </div>
                     <div className="panel-actions">
-                      <button type="button" className="primary" disabled={instagramBusy} onClick={startInstagramOAuth}>{instagramBusy ? "Procesando..." : "Conectar con Facebook Login"}</button>
+                      <button type="button" className="primary" disabled={instagramBusy} onClick={startInstagramOAuth}>{instagramBusy ? "Procesando..." : t("meta.facebook.connect_button")}</button>
                       <button type="button" disabled={instagramBusy || !instagramOAuth.state} onClick={loadInstagramAssets}>Cargar cuentas detectadas</button>
                     </div>
                   </div>
@@ -3439,10 +5274,13 @@ function App() {
                         <span>Business: {asset.business_name || "-"} / {asset.business_id || "-"}</span>
                         <span>IG Business ID: {asset.instagram_business_account_id || "-"}</span>
                         <mark>{asset.connected ? "Instagram detectado" : "Pagina sin Instagram Business"}</mark>
-                        <button type="button" className="primary" disabled={!asset.connected || instagramBusy} onClick={() => connectInstagramAsset(asset)}>Usar esta cuenta</button>
+                        <div className="panel-actions compact-actions">
+                          <button type="button" className="primary" disabled={!asset.connected || instagramBusy} onClick={() => connectInstagramAsset(asset)}>Usar Instagram</button>
+                          <button type="button" disabled={facebookBusy || !asset.page_id} onClick={() => connectFacebookAsset(asset)}>Usar Facebook</button>
+                        </div>
                       </div>
                     ))}
-                    {instagramOAuth.state && instagramOAuth.assets.length === 0 ? <div className="empty">Cuando termines Facebook Login, pulsa Cargar cuentas detectadas.</div> : null}
+                    {instagramOAuth.state && instagramOAuth.assets.length === 0 ? <div className="empty">{t("meta.facebook.finish_empty")}</div> : null}
                   </div>
                   {instagramDiagnostics ? (
                     <div className={`debug-result ${instagramDiagnostics.ok && instagramDiagnostics.subscription?.final_subscribed ? "ok" : "bad"}`}>
@@ -3485,7 +5323,7 @@ function App() {
                       <strong>{metaTokenHealth.facebook.ok ? "Token Facebook operativo" : `Token Facebook: ${metaTokenHealth.facebook.recommendation || metaTokenHealth.facebook.status || "revisar"}`}</strong>
                       <span>Fuente: {metaTokenHealth.facebook.refresh_source || "-"} / Auto-renovable: {metaTokenHealth.facebook.can_auto_refresh ? "si" : "no"}</span>
                       <small>Page token {metaTokenHealth.facebook.page_access_token?.hint || "-"} {metaTokenHealth.facebook.page_access_token?.expires_at ? `/ vence ${compactDateTimeLabel(metaTokenHealth.facebook.page_access_token.expires_at)}` : ""}</small>
-                      {!metaTokenHealth.facebook.can_auto_refresh ? <small>Para auto-renovar necesitas conectar por Facebook Login o guardar un user token OAuth junto al App ID/App Secret.</small> : null}
+                      {!metaTokenHealth.facebook.can_auto_refresh ? <small>{t("meta.facebook.auto_refresh_hint")}</small> : null}
                     </div>
                   ) : null}
                   <form className="meta-grid instagram-manual-grid" onSubmit={saveFacebookManual}>
@@ -3563,6 +5401,16 @@ function App() {
                       <span>Crea un endpoint por tenant y copia Callback URL + Verify token en Meta Developers. Suscribe eventos: messages, messaging_postbacks y feed.</span>
                     </div>
                     <button type="button" onClick={createFacebookWebhookEndpoint}>Crear endpoint Facebook</button>
+                  </div>
+                  <div className="oauth-mode-box">
+                    <div>
+                      <strong>OAuth Facebook por tenant</strong>
+                      <span>Usa la misma app Meta del cliente para generar tokens renovables. Luego pulsa Cargar cuentas y elige Usar Facebook en la pagina detectada.</span>
+                    </div>
+                    <div className="panel-actions">
+                      <button type="button" className="primary" disabled={instagramBusy || facebookBusy} onClick={startInstagramOAuth}>{instagramBusy || facebookBusy ? "Procesando..." : t("meta.facebook.connect_button")}</button>
+                      <button type="button" disabled={(instagramBusy || facebookBusy) || !instagramOAuth.state} onClick={loadInstagramAssets}>Cargar cuentas</button>
+                    </div>
                   </div>
                   {lastWebhookSecret?.provider === "facebook" ? (
                     <div className="secret-box">
@@ -3668,16 +5516,21 @@ function App() {
             {settingsTab === "apis" ? <div className="settings-stack">
               <article className="panel glass-card api-console">
                 <div className="panel-head"><h2>Proveedores IA</h2><span>LLM / modelos</span></div>
-                <p className="soft-copy">Las llaves se guardan cifradas por empresa. En el navegador solo mostramos una pista; para rotarlas usa Actualizar y pega el valor nuevo en el modal.</p>
-                <div className="api-card-grid">{AI_API_PROVIDERS.map((provider) => renderCredentialCard(provider))}</div>
+                <p className="soft-copy">Agrega solo los proveedores que vas a usar. Las llaves se guardan cifradas por empresa y los modelos se cargan al expandir cada proveedor.</p>
+                {renderCredentialSection(AI_API_PROVIDERS)}
               </article>
               <article className="panel glass-card api-console">
                 <div className="panel-head"><h2>Voz y TTS</h2><span>ElevenLabs / Google / Piper</span></div>
-                <div className="api-card-grid">{TTS_API_PROVIDERS.map((provider) => renderCredentialCard(provider))}</div>
+                {renderCredentialSection(TTS_API_PROVIDERS)}
+              </article>
+              <article className="panel glass-card api-console">
+                <div className="panel-head"><h2>Busqueda web e imagenes</h2><span>Tavily / Brave / SerpAPI</span></div>
+                <p className="soft-copy">Activa solo el proveedor que usaras para fuentes externas. Los resultados quedan pendientes de aprobacion humana antes de usarse con clientes.</p>
+                {renderCredentialSection(SEARCH_API_PROVIDERS)}
               </article>
               <article className="panel glass-card api-console">
                 <div className="panel-head"><h2>Canales y comercio</h2><span>WhatsApp / WooCommerce</span></div>
-                <div className="api-card-grid channel-api-grid">{CHANNEL_API_PROVIDERS.map((provider) => <div className="api-card wide-api-card" key={provider.name}><div><strong>{provider.name}</strong><span>Principal: {provider.env}</span></div>{renderCredentialCard(provider)}<div className="api-field-list">{provider.fields.map((field) => renderCredentialCard({ ...provider, name: field, env: field, supportsModels: false }, field))}</div></div>)}</div>
+                {renderChannelCredentialSection(CHANNEL_API_PROVIDERS)}
               </article>
               <article className="panel glass-card"><div className="panel-head"><h2>API SaaS interna</h2><span>base URL</span></div><code className="code-block">{API_BASE || "sin configurar"}/saas/v1</code><p className="soft-copy">Usa Bearer JWT para endpoints privados. Los webhooks resuelven empresa por endpoint key.</p><div className="panel-actions"><button type="button" className="primary" onClick={loadApiCredentials}>Refrescar credenciales</button></div></article>
             </div> : null}
@@ -3737,7 +5590,7 @@ function App() {
                     <input value={debugInboundForm.from_phone} placeholder="573001112233" onChange={(event) => setDebugInboundForm((prev) => ({ ...prev, from_phone: event.target.value }))} />
                   </label>
                   <label>Nombre
-                    <input value={debugInboundForm.contact_name} placeholder="Cliente Debug" onChange={(event) => setDebugInboundForm((prev) => ({ ...prev, contact_name: event.target.value }))} />
+                    <input value={debugInboundForm.contact_name} placeholder="Cliente Diagnostico" onChange={(event) => setDebugInboundForm((prev) => ({ ...prev, contact_name: event.target.value }))} />
                   </label>
                   <label>Mensaje
                     <input value={debugInboundForm.message} placeholder="Hola, prueba entrante" onChange={(event) => setDebugInboundForm((prev) => ({ ...prev, message: event.target.value }))} />
@@ -3806,12 +5659,13 @@ function App() {
             {settingsTab === "users" ? <div className="settings-grid"><article className="panel glass-card"><div className="panel-head"><h2>Usuarios</h2><span>equipo</span></div><div className="table"><div className="row"><span>{me.email}</span><span>{me.role}</span><span>activo</span></div></div></article><article className="panel glass-card"><div className="panel-head"><h2>Invitar usuario</h2><span>proximo</span></div><label>Email<input placeholder="correo@empresa.com" /></label><label>Rol<select><option>agent</option><option>supervisor</option><option>admin</option></select></label><button type="button" className="primary" onClick={() => showStatus("Invitaciones de usuarios pendientes de backend.", "neutral")}>Enviar invitacion</button></article></div> : null}
             {settingsTab === "profile" ? <div className="settings-grid profile-grid">
               <article className="panel glass-card profile-card"><div className="panel-head"><h2>Perfil</h2><span>datos personales</span></div><div className="avatar-editor"><div className="avatar-preview">{(profileForm.fullName || me.email || "S").slice(0,1).toUpperCase()}</div><div><strong>{profileForm.fullName || me.email}</strong><p className="soft-copy">Foto de perfil, nombre visible y datos de contacto.</p></div></div><label>URL foto de perfil<input placeholder="https://..." value={profileForm.avatarUrl} onChange={(event) => setProfileForm((prev) => ({ ...prev, avatarUrl: event.target.value }))} /></label><div className="form-grid two"><label>Nombre completo<input value={profileForm.fullName} placeholder={me.email} onChange={(event) => setProfileForm((prev) => ({ ...prev, fullName: event.target.value }))} /></label><label>Email<input value={profileForm.email} placeholder={me.email} onChange={(event) => setProfileForm((prev) => ({ ...prev, email: event.target.value }))} /></label><label>Telefono<input value={profileForm.phone} placeholder="+57..." onChange={(event) => setProfileForm((prev) => ({ ...prev, phone: event.target.value }))} /></label><label>Cargo / rol visible<input value={profileForm.role} placeholder={me.role} onChange={(event) => setProfileForm((prev) => ({ ...prev, role: event.target.value }))} /></label></div><div className="panel-actions"><button type="button" className="primary" onClick={saveProfileLocal}>Guardar perfil</button></div></article>
-              <article className="panel glass-card"><div className="panel-head"><h2>Empresa</h2><span>workspace activo</span></div><div className="company-profile"><span>Empresa</span><strong>{activeCompany?.tenant_name || activeCompany?.name || "Scentra"}</strong><span>Rol</span><strong>{me.role}</strong><span>Plan</span><strong>{billingPlan.plan_code || activeCompany?.plan_code || "starter"}</strong></div></article>
+              <article className="panel glass-card"><div className="panel-head"><h2>Empresa</h2><span>workspace activo</span></div><div className="company-profile"><span>Empresa</span><strong>{activeCompany?.tenant_name || activeCompany?.name || "Scentra"}</strong><span>Rol</span><strong>{me.role}</strong><span>Plan</span><strong>{billingPlan.plan_code || activeCompany?.plan_code || "starter"}</strong><span>Industria</span><strong>{selectedVerticalPack?.label || currentIndustryCode}</strong></div></article>
             </div> : null}
             {settingsTab === "security" ? <div className="settings-grid security-grid">
-              <article className="panel glass-card"><div className="panel-head"><h2>Cambiar clave</h2><span>acceso</span></div><label>Clave actual<input type="password" value={securityForm.currentPassword} onChange={(event) => setSecurityForm((prev) => ({ ...prev, currentPassword: event.target.value }))} /></label><label>Nueva clave<input type="password" value={securityForm.newPassword} onChange={(event) => setSecurityForm((prev) => ({ ...prev, newPassword: event.target.value }))} /></label><label>Confirmar nueva clave<input type="password" value={securityForm.confirmPassword} onChange={(event) => setSecurityForm((prev) => ({ ...prev, confirmPassword: event.target.value }))} /></label><div className="panel-actions"><button type="button" className="primary" onClick={saveSecurityLocal}>Actualizar clave</button></div></article>
-              <article className="panel glass-card"><div className="panel-head"><h2>Autenticacion 2FA</h2><span>seguridad adicional</span></div><label className="switch-row"><input type="checkbox" checked={securityForm.twoFactorEnabled} onChange={(event) => setSecurityForm((prev) => ({ ...prev, twoFactorEnabled: event.target.checked }))} /><span><strong>Activar 2FA</strong><small>Preparado para TOTP o email OTP cuando exista endpoint backend.</small></span></label><div className="twofa-box"><strong>{securityForm.twoFactorEnabled ? "2FA solicitado" : "2FA apagado"}</strong><p>La siguiente fase debe generar QR, secreto TOTP y codigos de recuperacion.</p></div></article>
+              <article className="panel glass-card"><div className="panel-head"><h2>Cambiar clave</h2><span>acceso</span></div><label>Clave actual<input type="password" value={securityForm.currentPassword} onChange={(event) => setSecurityForm((prev) => ({ ...prev, currentPassword: event.target.value }))} /></label><label>Nueva clave<input type="password" value={securityForm.newPassword} onChange={(event) => setSecurityForm((prev) => ({ ...prev, newPassword: event.target.value }))} /></label><label>Confirmar nueva clave<input type="password" value={securityForm.confirmPassword} onChange={(event) => setSecurityForm((prev) => ({ ...prev, confirmPassword: event.target.value }))} /></label>{securityForm.passwordChangedAt ? <p className="soft-copy">Ultimo cambio: {dateLabel(securityForm.passwordChangedAt)}</p> : null}<div className="panel-actions"><button type="button" className="primary" onClick={savePasswordChange}>Actualizar clave</button></div></article>
+              <article className="panel glass-card"><div className="panel-head"><h2>2FA por email</h2><span>seguridad adicional</span></div><label className="switch-row"><input type="checkbox" checked={securityForm.twoFactorEnabled} onChange={(event) => setSecurityForm((prev) => ({ ...prev, twoFactorEnabled: event.target.checked }))} /><span><strong>Exigir codigo OTP al iniciar sesion</strong><small>El backend no entrega tokens hasta validar el codigo enviado por correo.</small></span></label><label>Metodo<select value={securityForm.twoFactorMethod} disabled={!securityForm.twoFactorEnabled} onChange={(event) => setSecurityForm((prev) => ({ ...prev, twoFactorMethod: event.target.value }))}><option value="email_otp">Codigo por email</option></select></label><div className="twofa-box"><strong>{securityForm.twoFactorEnabled ? "2FA activo" : "2FA inactivo"}</strong><p>Usa SMTP en produccion para entregar codigos. En local el backend devuelve un OTP de desarrollo.</p></div><div className="panel-actions"><button type="button" onClick={saveTwoFactorPreference}>Guardar 2FA</button></div></article>
               <article className="panel glass-card"><div className="panel-head"><h2>Politicas</h2><span>estado</span></div><label className="check-row"><input type="checkbox" checked readOnly /> JWT requerido</label><label className="check-row"><input type="checkbox" checked readOnly /> RBAC por rol</label><label className="check-row"><input type="checkbox" checked={webhookSignatureRequired} onChange={(event) => setWebhookSignatureRequired(event.target.checked)} /> Firma HMAC por defecto en nuevos webhooks</label><p className="soft-copy">Auditoria de acciones criticas quedara en saas_audit_events.</p></article>
+              <article className="panel glass-card"><div className="panel-head"><h2>Privacidad</h2><span>export/delete</span></div><p className="soft-copy">Exporta tu cuenta o el cliente seleccionado en Inbox. El borrado se registra como solicitud pendiente para evitar eliminaciones accidentales.</p><div className="panel-actions"><button type="button" onClick={exportMyAccountData}>Exportar mi cuenta</button><button type="button" onClick={exportSelectedCustomerData}>Exportar cliente</button><button type="button" onClick={requestSelectedCustomerDelete}>Solicitar borrado</button></div></article>
             </div> : null}
             {settingsTab === "plan" ? (
               <div className="settings-stack">
@@ -3836,9 +5690,21 @@ function App() {
                   <div className="feature-grid">{Object.entries(FEATURE_LABELS).map(([key, label]) => <span className={`feature-pill ${hasFeature(key) ? "on" : "off"}`} key={key}><strong>{label}</strong><small>{hasFeature(key) ? "Activo" : "Inactivo"}</small></span>)}</div>
                 </article>
                 <article className="panel glass-card">
-                  <div className="panel-head"><h2>Planes disponibles</h2><span>Cambio local para pruebas</span></div>
-                  <div className="plan-cards">{billingPlans.map((plan) => <article className={`plan-card ${billingPlan.plan_code === plan.plan_code ? "active" : ""}`} key={plan.plan_code}><strong>{plan.display_name || plan.plan_code}</strong><span>{number(plan.max_monthly_messages)} mensajes/mes</span><span>{number(plan.max_campaigns)} campanas CRM</span><span>{number(plan.max_broadcasts)} broadcasts</span><span>{number(plan.max_ai_tokens)} tokens IA</span><span>{number(plan.max_integrations)} integraciones / {number(plan.max_agents)} usuarios</span><button type="button" className="primary" disabled={!plan.is_active} onClick={() => changePlanDev(plan.plan_code)}>Usar plan</button></article>)}</div>
-                  <p className="soft-copy">En produccion este cambio lo debe ejecutar Stripe por checkout/webhook.</p>
+                  <div className="panel-head">
+                    <h2>Planes disponibles</h2>
+                    <label className="inline-select">Proveedor
+                      <select value={billingCheckoutProvider} onChange={(event) => setBillingCheckoutProvider(event.target.value)}>
+                        <option value="wompi">Wompi Bancolombia</option>
+                        <option value="mercadopago">MercadoPago</option>
+                        <option value="stripe">Stripe</option>
+                        <option value="manual">Manual</option>
+                      </select>
+                    </label>
+                  </div>
+                  <div className="plan-cards">{billingPlans.map((plan) => <article className={`plan-card ${billingPlan.plan_code === plan.plan_code ? "active" : ""}`} key={plan.plan_code}><strong>{plan.display_name || plan.plan_code}</strong><span>{number(plan.max_monthly_messages)} mensajes/mes</span><span>{number(plan.max_campaigns)} campanas CRM</span><span>{number(plan.max_broadcasts)} broadcasts</span><span>{number(plan.max_ai_tokens)} tokens IA</span><span>{number(plan.max_integrations)} integraciones / {number(plan.max_agents)} usuarios</span><span>{(Number(plan.price_monthly_cents || 0) / 100).toLocaleString("es-CO", { style: "currency", currency: plan.currency || "USD", maximumFractionDigits: 0 })} / mes</span><button type="button" className="primary" disabled={!plan.is_active || billingCheckoutBusy === plan.plan_code} onClick={() => startPlanCheckout(plan.plan_code)}>{billingCheckoutBusy === plan.plan_code ? "Creando..." : "Pagar / activar"}</button>{billingPlan.plan_code === plan.plan_code ? <small>Plan actual</small> : null}<button type="button" className="ghost" onClick={() => changePlanDev(plan.plan_code)}>Usar en local</button></article>)}</div>
+                  <p className="soft-copy">En produccion el plan se activa por checkout y webhook del proveedor. Wompi usa firma de integridad generada en backend.</p>
+                  {billingCheckoutSessions.length ? <div className="billing-history"><strong>Ultimos checkouts</strong>{billingCheckoutSessions.slice(0, 4).map((item) => <div key={item.id}><span>{item.provider} / {item.plan_code}</span><small>{item.status} · {compactDateTimeLabel(item.created_at)}</small>{item.checkout_url ? <button type="button" onClick={() => window.open(item.checkout_url, "_blank", "noopener,noreferrer")}>Abrir</button> : null}</div>)}</div> : null}
+                  {billingInvoices.length ? <div className="billing-history"><strong>Facturas</strong>{billingInvoices.slice(0, 6).map((item) => <div key={item.id}><span>{item.invoice_number || item.provider_invoice_id || item.id}</span><small>{item.status} · {money(item.total_cents, item.currency)} · {compactDateTimeLabel(item.paid_at || item.due_at || item.created_at)}</small><button type="button" onClick={() => downloadBillingInvoice(item)}>PDF</button></div>)}</div> : null}
                 </article>
               </div>
             ) : null}
@@ -3866,6 +5732,17 @@ function App() {
               <small>{advisorLastSync ? `Sinc. ${chatTimeLabel(advisorLastSync)}` : "Sinc. pendiente"}</small>
             </div>
             <div className="advisor-body">
+            {advisorBriefing.length ? (
+              <div className="advisor-briefing">
+                <strong>Briefing predictivo</strong>
+                {advisorBriefing.slice(0, 3).map((item) => (
+                  <div key={item.key || item.title}>
+                    <span>{item.title}</span>
+                    <small>{advisorDisplayContent(item.summary)}</small>
+                  </div>
+                ))}
+              </div>
+            ) : null}
             {advisorMetrics ? (
               <div className="advisor-pulse">
                 <div><strong>{number(advisorMetrics.pending_actions || 0)}</strong><span>Pendientes</span></div>

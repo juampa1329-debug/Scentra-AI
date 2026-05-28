@@ -14,11 +14,16 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
 from app_saas.ai_gateway.service import generate_with_gateway
-from app_saas.agents.service import record_agent_runtime_event, runtime_agent_for_conversation
+from app_saas.agents.service import (
+    assert_agent_budget_available,
+    collective_memory_context,
+    record_agent_runtime_event,
+    runtime_agent_for_conversation,
+)
 from app_saas.api_credentials.router import _ensure_api_credentials_table
 from app_saas.billing.limits import ensure_ai_token_quota, ensure_monthly_message_quota
 from app_saas.db import db_session, set_tenant_context
-from app_saas.knowledge.router import ensure_knowledge_tables
+from app_saas.knowledge.router import ensure_knowledge_tables, knowledge_context_for_query
 from app_saas.shared.secrets import decrypt_secret
 from app_saas.workers.dispatch import (
     DispatchPermanentError,
@@ -34,7 +39,28 @@ DEFAULT_AGENT_PROMPT = """Eres el agente comercial de Scentra +AI para WhatsApp 
 Tu trabajo es vender con tono humano, claro y consultivo, mantener el contexto de la conversacion y actualizar la ficha CRM.
 No inventes precios, disponibilidad, politicas, enlaces ni promesas si no aparecen en el contexto. Si falta informacion, pregunta de forma breve.
 Cuando el cliente comparta datos utiles, extraelos para CRM: nombre, apellido, ciudad, intereses, etiquetas, etapa comercial, estado de pago, intencion y notas.
-Responde siempre en el idioma del cliente, normalmente espanol colombiano, con frases naturales y cortas."""
+Responde siempre en el idioma del cliente, normalmente espanol colombiano, con frases naturales y cortas.
+Evita respuestas largas de un solo bloque: responde como WhatsApp humano, con 1 a 3 ideas breves y maximo una pregunta directa."""
+
+DEFAULT_AI_MAX_TOKENS = 700
+DEFAULT_REPLY_CHUNK_CHARS = 220
+DEFAULT_REPLY_INITIAL_DELAY_MS = 3200
+DEFAULT_REPLY_CHUNK_DELAY_MS = 4200
+DEFAULT_RECENT_MESSAGE_LIMIT = 16
+DEFAULT_MESSAGE_CONTEXT_CHARS = 1200
+
+DEFAULT_AI_METADATA = {
+    "human_reply_style_enabled": True,
+    "human_reply_splitting_enabled": True,
+    "typing_indicator_enabled": True,
+    "inbound_cooldown_seconds": 6,
+    "reply_max_output_tokens": DEFAULT_AI_MAX_TOKENS,
+    "reply_initial_delay_ms": DEFAULT_REPLY_INITIAL_DELAY_MS,
+    "reply_chunk_delay_ms": DEFAULT_REPLY_CHUNK_DELAY_MS,
+    "reply_chunk_chars": DEFAULT_REPLY_CHUNK_CHARS,
+    "recent_message_limit": DEFAULT_RECENT_MESSAGE_LIMIT,
+    "message_context_chars": DEFAULT_MESSAGE_CONTEXT_CHARS,
+}
 
 PROVIDER_CREDENTIAL_KEYS = {
     "google": "GOOGLE_AI_API_KEY",
@@ -50,6 +76,11 @@ PROVIDER_DEFAULT_MODELS = {
     "mistral": "mistral-small-latest",
     "openrouter": "google/gemini-2.5-flash",
     "kimi": "kimi-k2.6",
+}
+
+PROVIDER_HTTP_HEADERS = {
+    "User-Agent": "ScentraAI/1.0 (+https://scentra-ai.online)",
+    "Accept": "application/json",
 }
 
 PROVIDER_ALIASES = {
@@ -93,6 +124,55 @@ def _safe_dict(value: Any) -> dict[str, Any]:
         except json.JSONDecodeError:
             return {}
     return {}
+
+
+def _clean_custom_key(value: Any) -> str:
+    key = re.sub(r"[^a-z0-9_]+", "_", str(value or "").strip().lower())
+    key = re.sub(r"_+", "_", key).strip("_")
+    return key[:80]
+
+
+def _safe_custom_value(value: Any) -> Any:
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, int):
+        return max(-999999999, min(999999999, value))
+    if isinstance(value, float):
+        return max(-999999999.0, min(999999999.0, value))
+    if isinstance(value, list):
+        return [_clean(item, 240) for item in value[:25] if _clean(item, 240)]
+    return _clean(value, 1200)
+
+
+def _active_custom_field_keys(conn: Connection, tenant_id: str) -> set[str]:
+    try:
+        rows = conn.execute(
+            text(
+                """
+                SELECT field_key
+                FROM saas_crm_custom_fields
+                WHERE tenant_id = CAST(:tenant_id AS uuid)
+                  AND is_active = TRUE
+                """
+            ),
+            {"tenant_id": tenant_id},
+        ).mappings().all()
+    except Exception:
+        return set()
+    return {str(row["field_key"]) for row in rows}
+
+
+def _sanitize_custom_fields_for_ai(value: Any, allowed_keys: set[str]) -> dict[str, Any]:
+    if not isinstance(value, dict) or not allowed_keys:
+        return {}
+    clean: dict[str, Any] = {}
+    for raw_key, raw_value in value.items():
+        key = _clean_custom_key(raw_key)
+        if key and key in allowed_keys:
+            clean[key] = _safe_custom_value(raw_value)
+        if len(clean) >= 60:
+            break
+    return clean
 
 
 def _safe_list(value: Any) -> list[Any]:
@@ -201,13 +281,29 @@ def default_settings(tenant_id: str) -> dict[str, Any]:
         "provider_code": "google",
         "fallback_provider_code": "groq",
         "system_prompt": DEFAULT_AGENT_PROMPT,
-        "max_tokens": 1800,
+        "max_tokens": DEFAULT_AI_MAX_TOKENS,
         "temperature": 0.5,
-        "metadata_json": {},
+        "metadata_json": dict(DEFAULT_AI_METADATA),
         "updated_at": "",
         "active_model": "",
         "fallback_model": "",
     }
+
+
+def _settings_metadata(value: Any) -> dict[str, Any]:
+    return {**DEFAULT_AI_METADATA, **_safe_dict(value)}
+
+
+def _effective_max_tokens(raw_value: Any, metadata: dict[str, Any]) -> int:
+    try:
+        value = int(raw_value or DEFAULT_AI_MAX_TOKENS)
+    except Exception:
+        value = DEFAULT_AI_MAX_TOKENS
+    value = max(200, min(8000, value))
+    if metadata.get("human_reply_style_enabled", True) is not False:
+        cap = _metadata_int(metadata, "reply_max_output_tokens", DEFAULT_AI_MAX_TOKENS, 200, 2000)
+        return min(value, cap)
+    return value
 
 
 def _provider_model_from_credentials(conn: Connection, tenant_id: str, provider_code: str) -> tuple[str, str, str]:
@@ -269,9 +365,9 @@ def get_settings(conn: Connection, tenant_id: str) -> dict[str, Any]:
     _, fallback_model, _ = _provider_model_from_credentials(conn, tenant_id, str(data.get("fallback_provider_code") or ""))
     data["active_model"] = active_model
     data["fallback_model"] = fallback_model
-    data["max_tokens"] = int(data.get("max_tokens") or 1800)
     data["temperature"] = float(data.get("temperature") or 0.5)
-    data["metadata_json"] = data.get("metadata_json") if isinstance(data.get("metadata_json"), dict) else {}
+    data["metadata_json"] = _settings_metadata(data.get("metadata_json"))
+    data["max_tokens"] = _effective_max_tokens(data.get("max_tokens"), data["metadata_json"])
     return data
 
 
@@ -280,7 +376,8 @@ def upsert_settings(conn: Connection, tenant_id: str, payload: dict[str, Any]) -
     provider = _normalize_provider_code(payload.get("provider_code") or "google")
     fallback = _normalize_provider_code(payload.get("fallback_provider_code") or "")
     system_prompt = _clean(payload.get("system_prompt") or DEFAULT_AGENT_PROMPT, 20000)
-    metadata = payload.get("metadata_json") if isinstance(payload.get("metadata_json"), dict) else {}
+    metadata = _settings_metadata(payload.get("metadata_json"))
+    max_tokens = _effective_max_tokens(payload.get("max_tokens"), metadata)
     conn.execute(
         text(
             """
@@ -310,7 +407,7 @@ def upsert_settings(conn: Connection, tenant_id: str, payload: dict[str, Any]) -
             "provider_code": provider,
             "fallback_provider_code": fallback,
             "system_prompt": system_prompt,
-            "max_tokens": int(payload.get("max_tokens") or 1800),
+            "max_tokens": max_tokens,
             "temperature": float(payload.get("temperature") or 0.5),
             "metadata_json": _json(metadata),
         },
@@ -355,7 +452,9 @@ def _conversation(conn: Connection, tenant_id: str, conversation_id: str) -> dic
             SELECT id::text, tenant_id::text, channel, external_contact_id, phone, display_name,
                    first_name, last_name, city, customer_type, interests, takeover,
                    last_message_text, unread_count, tags, notes, payment_status,
-                   payment_reference, crm_stage, intent, profile_json, updated_at::text
+                   payment_reference, crm_stage, intent, profile_json,
+                   assigned_ai_agent_id::text, ai_owner_mode, ai_owner_locked_at::text,
+                   updated_at::text
             FROM saas_conversations
             WHERE tenant_id = CAST(:tenant_id AS uuid)
               AND id = CAST(:conversation_id AS uuid)
@@ -388,39 +487,123 @@ def _recent_messages(conn: Connection, tenant_id: str, conversation_id: str, lim
 
 def _knowledge_context(conn: Connection, tenant_id: str, messages: list[dict[str, Any]]) -> str:
     ensure_knowledge_tables(conn)
-    last_text = " ".join(_clean(message.get("text"), 500) for message in messages[-6:] if str(message.get("direction")).lower() == "in")
-    words = [word.lower() for word in re.findall(r"[a-zA-ZáéíóúÁÉÍÓÚñÑ0-9]{4,}", last_text)[:10]]
+    last_text = " ".join(
+        _clean(message.get("text"), 500)
+        for message in messages[-6:]
+        if str(message.get("direction")).lower() == "in"
+    )
+    query = last_text or "politicas preguntas frecuentes catalogo"
+    return knowledge_context_for_query(conn, tenant_id, query, limit=6, used_by="conversation_ai")
+
+
+def _table_exists(conn: Connection, table_name: str) -> bool:
+    return bool(conn.execute(text("SELECT to_regclass(:table_name) IS NOT NULL"), {"table_name": table_name}).scalar())
+
+
+def _approved_search_context(conn: Connection, tenant_id: str, run_id: str) -> list[str]:
+    if not run_id or not _table_exists(conn, "saas_web_search_intelligence_results"):
+        return []
     rows = conn.execute(
         text(
             """
-            SELECT title, url, filename, content
-            FROM saas_knowledge_sources
+            SELECT title, url, snippet, source_name, result_type
+            FROM saas_web_search_intelligence_results
             WHERE tenant_id = CAST(:tenant_id AS uuid)
-              AND status = 'active'
-            ORDER BY
-              CASE
-                WHEN :needle <> '' AND LOWER(content || ' ' || title) LIKE :needle THEN 0
-                ELSE 1
-              END,
-              updated_at DESC
-            LIMIT 8
+              AND run_id = CAST(:run_id AS uuid)
+              AND approval_status = 'approved'
+              AND safety_status <> 'blocked'
+            ORDER BY rank ASC, created_at ASC
+            LIMIT 4
             """
         ),
-        {"tenant_id": tenant_id, "needle": f"%{words[0]}%" if words else ""},
+        {"tenant_id": tenant_id, "run_id": run_id},
     ).mappings().all()
-    snippets = []
+    lines: list[str] = []
     for row in rows:
-        content = _clean(row.get("content"), 1800)
-        if words:
-            lowered = content.lower()
-            hit = next((word for word in words if word in lowered), "")
-            if hit:
-                pos = max(0, lowered.find(hit) - 420)
-                content = content[pos : pos + 1800]
-        title = _clean(row.get("title") or row.get("filename") or row.get("url") or "Fuente", 240)
-        source = _clean(row.get("url") or row.get("filename"), 320)
-        snippets.append(f"Fuente: {title}{f' ({source})' if source else ''}\n{content}")
-    return "\n\n---\n\n".join(snippets)
+        lines.append(
+            f"- Fuente aprobada ({_clean(row.get('result_type'), 20)}): {_clean(row.get('title'), 180)} | {_clean(row.get('source_name'), 120)} | {_clean(row.get('url'), 600)} | {_clean(row.get('snippet'), 320)}"
+        )
+    return lines
+
+
+def _agent_multimodal_context(conn: Connection, tenant_id: str, conversation_id: str, runtime_agent: dict[str, Any] | None) -> str:
+    if not runtime_agent or not _clean(conversation_id, 80):
+        return ""
+    if _table_exists(conn, "saas_multimodal_memory_events"):
+        memory_rows = conn.execute(
+            text(
+                """
+                SELECT source_kind, approval_status, memory_text, training_features_json, updated_at::text
+                FROM saas_multimodal_memory_events
+                WHERE tenant_id = CAST(:tenant_id AS uuid)
+                  AND conversation_id = CAST(:conversation_id AS uuid)
+                  AND status = 'ready'
+                  AND eligible_for_agent_memory = TRUE
+                  AND (
+                    agent_id IS NULL
+                    OR agent_id = CAST(:agent_id AS uuid)
+                  )
+                  AND (
+                    source_kind <> 'web_search_result'
+                    OR approval_status = 'approved'
+                  )
+                ORDER BY updated_at DESC
+                LIMIT 8
+                """
+            ),
+            {"tenant_id": tenant_id, "conversation_id": conversation_id, "agent_id": runtime_agent["id"]},
+        ).mappings().all()
+        memory_lines = []
+        for row in memory_rows:
+            features = _safe_dict(row.get("training_features_json"))
+            memory_lines.append(
+                f"- Memoria multimodal ({_clean(row.get('source_kind'), 80)}): {_clean(row.get('memory_text'), 900)}"
+                f" [confianza={_clean(features.get('confidence'), 20)}, aprobacion={_clean(row.get('approval_status'), 40)}]"
+            )
+        if memory_lines:
+            return "\n".join(memory_lines[:8])
+    if not _table_exists(conn, "saas_ai_agent_tool_runs"):
+        return ""
+    rows = conn.execute(
+        text(
+            """
+            SELECT tool_code, output_json, updated_at::text
+            FROM saas_ai_agent_tool_runs
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND agent_id = CAST(:agent_id AS uuid)
+              AND status = 'completed'
+              AND tool_code IN ('media.voice_analyze', 'media.vision_analyze', 'media.web_image_search')
+              AND (
+                input_json->>'conversation_id' = :conversation_id
+                OR output_json->>'conversation_id' = :conversation_id
+              )
+            ORDER BY updated_at DESC
+            LIMIT 6
+            """
+        ),
+        {"tenant_id": tenant_id, "agent_id": runtime_agent["id"], "conversation_id": conversation_id},
+    ).mappings().all()
+    lines: list[str] = []
+    for row in rows:
+        tool_code = str(row.get("tool_code") or "")
+        output = _safe_dict(row.get("output_json"))
+        if tool_code == "media.voice_analyze":
+            lines.append(
+                f"- Audio analizado: resumen={_clean(output.get('summary'), 500)}; sentimiento={_clean(output.get('sentiment'), 40)}; intencion={_clean(output.get('intent'), 80)}; urgencia={_clean(output.get('urgency'), 40)}; accion={_clean(output.get('recommended_action'), 300)}"
+            )
+        elif tool_code == "media.vision_analyze":
+            lines.append(
+                f"- Imagen/documento analizado: resumen={_clean(output.get('summary'), 500)}; texto={_clean(output.get('extracted_text_preview'), 400)}; tipo={_clean(output.get('document_type'), 80)}; intencion={_clean(output.get('intent'), 80)}; accion={_clean(output.get('recommended_action'), 300)}"
+            )
+        elif tool_code == "media.web_image_search":
+            approved = _approved_search_context(conn, tenant_id, _clean(output.get("search_run_id"), 80))
+            if approved:
+                lines.extend(approved)
+            else:
+                lines.append("- Busqueda externa ejecutada, pero los resultados aun no tienen aprobacion humana; no uses fuentes externas en la respuesta.")
+        if len(lines) >= 10:
+            break
+    return "\n".join(lines[:10])
 
 
 def _runtime_settings(settings: dict[str, Any], runtime_agent: dict[str, Any] | None) -> dict[str, Any]:
@@ -499,9 +682,19 @@ def _runtime_can_send(runtime_agent: dict[str, Any] | None) -> bool:
     return _runtime_tool_allowed(runtime_agent, "conversation.reply", default=True)
 
 
+def _runtime_can_update_crm(runtime_agent: dict[str, Any] | None) -> bool:
+    if not runtime_agent:
+        return True
+    approval = _safe_dict(runtime_agent.get("approval_policy_json"))
+    if "can_update_crm" in approval and approval.get("can_update_crm") is False:
+        return False
+    return _runtime_tool_allowed(runtime_agent, "crm.update", default=True)
+
+
 def _runtime_context(runtime_agent: dict[str, Any] | None) -> str:
     if not runtime_agent:
         return ""
+    agent_prompt = _clean(runtime_agent.get("system_prompt_rendered") or runtime_agent.get("system_prompt_template"), 12000)
     personality = _safe_dict(runtime_agent.get("personality_json"))
     provider_policy = _safe_dict(runtime_agent.get("provider_policy_json"))
     memory_policy = _safe_dict(runtime_agent.get("memory_policy_json"))
@@ -524,6 +717,7 @@ Agente runtime activo:
 - Politica de modelo: {json.dumps(provider_policy, ensure_ascii=False)}
 - Politica de memoria: {json.dumps(memory_policy, ensure_ascii=False)}
 - Politica de aprobacion: {json.dumps(approval_policy, ensure_ascii=False)}
+- System prompt del agente: {agent_prompt or "sin prompt operativo adicional"}
 
 Instrucciones de seguridad del agente:
 1. Usa solamente herramientas permitidas por el agente.
@@ -540,18 +734,24 @@ def _prompt(
     messages: list[dict[str, Any]],
     knowledge_context: str = "",
     runtime_agent: dict[str, Any] | None = None,
+    collective_context: str = "",
+    multimodal_context: str = "",
 ) -> tuple[str, str]:
     system_prompt = _clean(settings.get("system_prompt") or DEFAULT_AGENT_PROMPT, 20000)
+    metadata = _settings_metadata(settings.get("metadata_json"))
+    recent_limit = _metadata_int(metadata, "recent_message_limit", DEFAULT_RECENT_MESSAGE_LIMIT, 4, 24)
+    message_context_chars = _metadata_int(metadata, "message_context_chars", DEFAULT_MESSAGE_CONTEXT_CHARS, 200, 4000)
     agent_context = _runtime_context(runtime_agent)
     if agent_context:
         system_prompt = f"{system_prompt}\n\n{agent_context}"
     facts = memory.get("facts_json") if isinstance(memory.get("facts_json"), dict) else {}
     transcript_lines = []
-    for message in messages:
+    for message in messages[-recent_limit:]:
         role = "NEGOCIO" if str(message.get("direction")).lower() == "out" else "CLIENTE"
         msg_type = _clean(message.get("msg_type") or "text", 40)
-        text_value = _clean(message.get("text") or f"[{msg_type}]", 4000)
+        text_value = _clean(message.get("text") or f"[{msg_type}]", message_context_chars)
         transcript_lines.append(f"{role} ({msg_type}): {text_value}")
+    profile = conversation.get("profile_json") if isinstance(conversation.get("profile_json"), dict) else {}
     crm_context = {
         "display_name": conversation.get("display_name"),
         "first_name": conversation.get("first_name"),
@@ -566,7 +766,19 @@ def _prompt(
         "payment_reference": conversation.get("payment_reference"),
         "crm_stage": conversation.get("crm_stage"),
         "intent": conversation.get("intent"),
+        "custom_fields": profile.get("custom_fields") if isinstance(profile.get("custom_fields"), dict) else {},
     }
+    if metadata.get("human_reply_style_enabled", True) is not False:
+        style_context = """
+Estilo obligatorio de respuesta:
+- Mantente consciente del contexto usando CRM, memoria, hechos, Knowledge/RAG y conversacion reciente.
+- La respuesta visible al cliente debe ser breve, natural y de WhatsApp.
+- Evita un solo parrafo largo; usa frases cortas y solo una pregunta directa.
+- Si hacen falta datos, pide solo el dato necesario.
+- Si necesitas enviar varias ideas, separalas con saltos de linea para que el sistema pueda fragmentarlas.
+"""
+    else:
+        style_context = "Sin regla adicional de estilo breve; mantener coherencia contextual."
     user_prompt = f"""
 Contexto CRM actual:
 {json.dumps(crm_context, ensure_ascii=False)}
@@ -580,8 +792,17 @@ Hechos guardados:
 Base de conocimiento disponible:
 {knowledge_context or "Sin fuentes activas. Si falta informacion, pregunta o indica que se debe verificar."}
 
+Memoria colectiva de agentes:
+{collective_context or "Sin memoria colectiva disponible para esta conversacion."}
+
+Contexto multimodal aprobado para el agente:
+{multimodal_context or "Sin analisis multimodal aprobado para esta conversacion."}
+
 Conversacion reciente:
-{chr(10).join(transcript_lines[-24:])}
+{chr(10).join(transcript_lines)}
+
+Politica de contexto y estilo:
+{style_context}
 
 Tarea:
 1. Responde al ultimo mensaje del cliente si corresponde.
@@ -604,7 +825,8 @@ Devuelve UNICAMENTE JSON valido con esta forma:
     "notes": "",
     "payment_status": "",
     "crm_stage": "",
-    "intent": ""
+    "intent": "",
+    "custom_fields": {{"campo_configurado": "valor solo si el campo existe en CRM"}}
   }}
 }}
 """
@@ -615,7 +837,7 @@ def _post_json(url: str, payload: dict[str, Any], *, headers: dict[str, str] | N
     request = urllib.request.Request(
         url,
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={"Content-Type": "application/json", **(headers or {})},
+        headers={**PROVIDER_HTTP_HEADERS, "Content-Type": "application/json", **(headers or {})},
         method="POST",
     )
     try:
@@ -641,7 +863,7 @@ def _call_google(token: str, model: str, system_prompt: str, user_prompt: str, s
             "systemInstruction": {"parts": [{"text": system_prompt}]},
             "generationConfig": {
                 "temperature": float(settings.get("temperature") or 0.5),
-                "maxOutputTokens": int(settings.get("max_tokens") or 1800),
+                "maxOutputTokens": int(settings.get("max_tokens") or DEFAULT_AI_MAX_TOKENS),
                 "responseMimeType": "application/json",
             },
         },
@@ -671,7 +893,7 @@ def _call_chat_completions(provider: str, token: str, model: str, system_prompt:
                 {"role": "user", "content": user_prompt},
             ],
             "temperature": float(settings.get("temperature") or 0.5),
-            "max_tokens": int(settings.get("max_tokens") or 1800),
+            "max_tokens": int(settings.get("max_tokens") or DEFAULT_AI_MAX_TOKENS),
             "response_format": {"type": "json_object"},
         },
         headers=headers,
@@ -707,7 +929,14 @@ def generate_agent_result(conn: Connection, tenant_id: str, conversation: dict[s
     if not bool(settings.get("enabled")):
         return {"ok": False, "skipped": "ai_disabled"}
 
-    runtime_agent = runtime_agent_for_conversation(conn, tenant_id, _clean(conversation.get("channel"), 40) or "whatsapp")
+    runtime_agent = runtime_agent_for_conversation(conn, tenant_id, _clean(conversation.get("channel"), 40) or "whatsapp", conversation)
+    assigned_agent_id = _clean(conversation.get("assigned_ai_agent_id"), 80)
+    if assigned_agent_id and not runtime_agent:
+        return {
+            "ok": False,
+            "skipped": "assigned_ai_agent_unavailable",
+            "agent": {"id": assigned_agent_id, "name": "", "agent_type": ""},
+        }
     if runtime_agent and not _runtime_can_send(runtime_agent):
         record_agent_runtime_event(
             conn,
@@ -735,9 +964,13 @@ def generate_agent_result(conn: Connection, tenant_id: str, conversation: dict[s
     providers = _runtime_provider_chain(settings)
     memory = get_memory(conn, tenant_id, str(conversation["id"]))
     knowledge_context = _knowledge_context(conn, tenant_id, messages)
-    system_prompt, user_prompt = _prompt(settings, conversation, memory, messages, knowledge_context, runtime_agent)
+    collective_context = collective_memory_context(conn, tenant_id, runtime_agent["id"], limit=8) if runtime_agent else ""
+    multimodal_context = _agent_multimodal_context(conn, tenant_id, str(conversation["id"]), runtime_agent)
+    system_prompt, user_prompt = _prompt(settings, conversation, memory, messages, knowledge_context, runtime_agent, collective_context, multimodal_context)
     requested_tokens = estimate_tokens(system_prompt, user_prompt)
     ensure_ai_token_quota(conn, tenant_id, requested=requested_tokens)
+    if runtime_agent:
+        assert_agent_budget_available(conn, tenant_id, runtime_agent["id"], requested_tokens=requested_tokens)
 
     gateway = generate_with_gateway(
         conn,
@@ -752,6 +985,8 @@ def generate_agent_result(conn: Connection, tenant_id: str, conversation: dict[s
         settings=settings,
     )
     if not gateway.get("ok"):
+        gateway_reason = gateway.get("skipped") or "ai_unavailable"
+        skipped_code = "ai_generation_error" if bool(gateway.get("retryable")) else gateway_reason
         if runtime_agent:
             record_agent_runtime_event(
                 conn,
@@ -763,10 +998,18 @@ def generate_agent_result(conn: Connection, tenant_id: str, conversation: dict[s
                     "conversation_id": str(conversation.get("id") or ""),
                     "channel": conversation.get("channel") or "",
                     "provider_chain": providers,
-                    "error": gateway.get("skipped") or "ai_unavailable",
+                    "error": gateway_reason,
+                    "retryable": bool(gateway.get("retryable")),
+                    "attempts": gateway.get("attempts") or [],
                 },
             )
-        return {"ok": False, "skipped": gateway.get("skipped") or "ai_unavailable"}
+        return {
+            "ok": False,
+            "skipped": skipped_code,
+            "detail": gateway_reason,
+            "retryable": bool(gateway.get("retryable")),
+            "attempts": gateway.get("attempts") or [],
+        }
     raw = _clean(gateway.get("raw"), 50000)
     parsed = _extract_json(raw)
     parsed["provider_code"] = gateway.get("provider_code") or ""
@@ -774,6 +1017,7 @@ def generate_agent_result(conn: Connection, tenant_id: str, conversation: dict[s
     parsed["estimated_tokens"] = int(gateway.get("estimated_tokens") or estimate_tokens(system_prompt, user_prompt, raw))
     parsed["ai_gateway_run_id"] = gateway.get("run_id") or ""
     parsed["fallback_used"] = bool(gateway.get("fallback_used"))
+    parsed["model_fallback_used"] = bool(gateway.get("model_fallback_used"))
     if runtime_agent:
         parsed["agent_id"] = runtime_agent["id"]
         parsed["agent_type"] = runtime_agent.get("agent_type") or ""
@@ -791,6 +1035,7 @@ def generate_agent_result(conn: Connection, tenant_id: str, conversation: dict[s
                 "provider": parsed.get("provider_code") or "",
                 "model": parsed.get("model") or "",
                 "fallback_used": bool(parsed.get("fallback_used")),
+                "model_fallback_used": bool(parsed.get("model_fallback_used")),
             },
         )
     return {"ok": True, "result": parsed, "raw": raw, "agent": runtime_agent}
@@ -846,6 +1091,10 @@ def _merge_crm_patch(conversation: dict[str, Any], crm: dict[str, Any]) -> dict[
 def _update_crm(conn: Connection, tenant_id: str, conversation: dict[str, Any], crm: dict[str, Any], facts: dict[str, Any]) -> dict[str, Any]:
     patch = _merge_crm_patch(conversation, crm)
     profile = conversation.get("profile_json") if isinstance(conversation.get("profile_json"), dict) else {}
+    custom_fields = _sanitize_custom_fields_for_ai(crm.get("custom_fields"), _active_custom_field_keys(conn, tenant_id))
+    if custom_fields:
+        existing_custom = profile.get("custom_fields") if isinstance(profile.get("custom_fields"), dict) else {}
+        profile["custom_fields"] = {**existing_custom, **custom_fields}
     profile = {**profile, "ai_facts": facts, "ai_last_update": datetime.now(timezone.utc).isoformat()}
     patch["profile_json"] = profile
     assignments = []
@@ -964,7 +1213,7 @@ def _maybe_send_typing_indicator(
     latest_inbound: dict[str, Any] | None,
     settings: dict[str, Any],
 ) -> dict[str, Any]:
-    metadata = settings.get("metadata_json") if isinstance(settings.get("metadata_json"), dict) else {}
+    metadata = _settings_metadata(settings.get("metadata_json"))
     if metadata.get("typing_indicator_enabled", True) is False:
         return {"ok": False, "skipped": "typing_indicator_disabled"}
     message_id = _clean((latest_inbound or {}).get("external_message_id"), 240)
@@ -1002,10 +1251,12 @@ def _queue_ai_reply(conn: Connection, tenant_id: str, conversation: dict[str, An
     body = _clean(body_text, 4000)
     if not body:
         return {"ok": False, "skipped": "empty_ai_reply"}
-    metadata = settings.get("metadata_json") if isinstance(settings.get("metadata_json"), dict) else {}
-    chunk_chars = _metadata_int(metadata, "reply_chunk_chars", 480, 0, 2000)
-    initial_delay_ms = _metadata_int(metadata, "reply_initial_delay_ms", 4000, 0, 240000)
-    chunk_delay_ms = _metadata_int(metadata, "reply_chunk_delay_ms", 4000, 0, 240000)
+    metadata = _settings_metadata(settings.get("metadata_json"))
+    chunk_chars = _metadata_int(metadata, "reply_chunk_chars", DEFAULT_REPLY_CHUNK_CHARS, 0, 2000)
+    if metadata.get("human_reply_splitting_enabled", True) is not False and chunk_chars > 0:
+        chunk_chars = min(chunk_chars, DEFAULT_REPLY_CHUNK_CHARS)
+    initial_delay_ms = _metadata_int(metadata, "reply_initial_delay_ms", DEFAULT_REPLY_INITIAL_DELAY_MS, 0, 240000)
+    chunk_delay_ms = _metadata_int(metadata, "reply_chunk_delay_ms", DEFAULT_REPLY_CHUNK_DELAY_MS, 0, 240000)
     chunks = _split_reply_chunks(body, chunk_chars)
     if not chunks:
         return {"ok": False, "skipped": "empty_ai_reply"}
@@ -1021,6 +1272,9 @@ def _queue_ai_reply(conn: Connection, tenant_id: str, conversation: dict[str, An
             "dispatch_status": "queued",
             "ai_provider": ai_result.get("provider_code") or "",
             "ai_model": ai_result.get("model") or "",
+            "agent_id": ai_result.get("agent_id") or "",
+            "agent_type": ai_result.get("agent_type") or "",
+            "agent_name": ai_result.get("agent_name") or "",
             "reply_chunk_index": index + 1,
             "reply_chunk_total": len(chunks),
             "reply_delay_seconds": delay_seconds,
@@ -1149,7 +1403,7 @@ def process_conversation_ai(conn: Connection, tenant_id: str, conversation_id: s
     crm = result.get("crm") if isinstance(result.get("crm"), dict) else {}
     facts = result.get("facts") if isinstance(result.get("facts"), dict) else {}
     try:
-        if _runtime_tool_allowed(runtime_agent, "crm.update", default=True):
+        if _runtime_can_update_crm(runtime_agent):
             crm_patch = _update_crm(conn, tenant_id, conversation, crm, facts)
         else:
             crm_patch = {"skipped": "agent_tool_crm_update_not_allowed"}
@@ -1193,7 +1447,13 @@ def process_conversation_ai(conn: Connection, tenant_id: str, conversation_id: s
             "name": runtime_agent.get("name") if runtime_agent else "",
             "agent_type": runtime_agent.get("agent_type") if runtime_agent else "",
         },
-        "ai": {"provider": result.get("provider_code"), "model": result.get("model"), "tokens": tokens},
+        "ai": {
+            "provider": result.get("provider_code"),
+            "model": result.get("model"),
+            "tokens": tokens,
+            "fallback_used": bool(result.get("fallback_used")),
+            "model_fallback_used": bool(result.get("model_fallback_used")),
+        },
     }
 
 
@@ -1206,7 +1466,7 @@ def schedule_conversation_ai(
 ) -> dict[str, Any]:
     ensure_ai_tables(conn)
     settings = get_settings(conn, tenant_id)
-    metadata = settings.get("metadata_json") if isinstance(settings.get("metadata_json"), dict) else {}
+    metadata = _settings_metadata(settings.get("metadata_json"))
     if delay_seconds is None:
         delay_seconds = _metadata_int(metadata, "inbound_cooldown_seconds", 6, 0, 3600)
     row = conn.execute(
@@ -1361,6 +1621,8 @@ def test_agent(conn: Connection, tenant_id: str, phone: str, message: str) -> di
         "crm_stage": "contactado",
         "intent": "",
         "profile_json": {},
+        "assigned_ai_agent_id": "",
+        "ai_owner_mode": "general",
     }
     pseudo_messages = [
         {
@@ -1374,7 +1636,7 @@ def test_agent(conn: Connection, tenant_id: str, phone: str, message: str) -> di
     settings = get_settings(conn, tenant_id)
     if not bool(settings.get("enabled")):
         raise HTTPException(status_code=409, detail="ai_disabled")
-    runtime_agent = runtime_agent_for_conversation(conn, tenant_id, "whatsapp")
+    runtime_agent = runtime_agent_for_conversation(conn, tenant_id, "whatsapp", pseudo_conversation)
     if runtime_agent and not _runtime_can_send(runtime_agent):
         raise HTTPException(status_code=409, detail="active_agent_cannot_send_messages")
     settings = _runtime_settings(settings, runtime_agent)
@@ -1388,8 +1650,11 @@ def test_agent(conn: Connection, tenant_id: str, phone: str, message: str) -> di
         "updated_at": "",
     }
     knowledge_context = _knowledge_context(conn, tenant_id, pseudo_messages)
-    system_prompt, user_prompt = _prompt(settings, pseudo_conversation, memory, pseudo_messages, knowledge_context, runtime_agent)
+    collective_context = collective_memory_context(conn, tenant_id, runtime_agent["id"], limit=8) if runtime_agent else ""
+    system_prompt, user_prompt = _prompt(settings, pseudo_conversation, memory, pseudo_messages, knowledge_context, runtime_agent, collective_context)
     ensure_ai_token_quota(conn, tenant_id, requested=estimate_tokens(system_prompt, user_prompt))
+    if runtime_agent:
+        assert_agent_budget_available(conn, tenant_id, runtime_agent["id"], requested_tokens=estimate_tokens(system_prompt, user_prompt))
     provider_chain = _runtime_provider_chain(settings)
     gateway = generate_with_gateway(
         conn,
@@ -1404,13 +1669,22 @@ def test_agent(conn: Connection, tenant_id: str, phone: str, message: str) -> di
         settings=settings,
     )
     if not gateway.get("ok"):
-        raise HTTPException(status_code=409, detail=gateway.get("skipped") or "ai_unavailable")
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "ai_generation_error" if bool(gateway.get("retryable")) else "ai_unavailable",
+                "reason": gateway.get("skipped") or "ai_unavailable",
+                "retryable": bool(gateway.get("retryable")),
+                "attempts": gateway.get("attempts") or [],
+            },
+        )
     raw = _clean(gateway.get("raw"), 50000)
     parsed = _extract_json(raw)
     parsed["provider_code"] = gateway.get("provider_code") or ""
     parsed["model"] = gateway.get("model") or ""
     parsed["ai_gateway_run_id"] = gateway.get("run_id") or ""
     parsed["fallback_used"] = bool(gateway.get("fallback_used"))
+    parsed["model_fallback_used"] = bool(gateway.get("model_fallback_used"))
     if runtime_agent:
         parsed["agent_id"] = runtime_agent["id"]
         parsed["agent_type"] = runtime_agent.get("agent_type") or ""
@@ -1426,6 +1700,8 @@ def test_agent(conn: Connection, tenant_id: str, phone: str, message: str) -> di
                 "provider": parsed.get("provider_code") or "",
                 "model": parsed.get("model") or "",
                 "ai_gateway_run_id": parsed.get("ai_gateway_run_id") or "",
+                "fallback_used": bool(parsed.get("fallback_used")),
+                "model_fallback_used": bool(parsed.get("model_fallback_used")),
             },
         )
     _record_ai_usage(conn, tenant_id, estimate_tokens(system_prompt, user_prompt, raw))

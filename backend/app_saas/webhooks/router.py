@@ -52,6 +52,7 @@ def _safe_headers(request: Request) -> dict[str, str]:
     keep = {
         "content-type",
         "user-agent",
+        "x-correlation-id",
         "x-request-id",
         "x-hub-signature-256",
         "x-scentra-signature-256",
@@ -60,7 +61,11 @@ def _safe_headers(request: Request) -> dict[str, str]:
         "x-verane-webhook-token",
         "x-forwarded-for",
     }
-    return {k.lower(): str(v)[:500] for k, v in request.headers.items() if k.lower() in keep}
+    headers = {k.lower(): str(v)[:500] for k, v in request.headers.items() if k.lower() in keep}
+    correlation_id = str(getattr(request.state, "correlation_id", "") or "").strip()
+    if correlation_id:
+        headers["x-correlation-id"] = correlation_id[:120]
+    return headers
 
 
 def _safe_json(raw: bytes) -> dict[str, Any]:
@@ -741,7 +746,8 @@ async def receive_global_instagram_webhook(request: Request):
                     status,
                     headers_json,
                     payload_json,
-                    raw_sha256
+                    raw_sha256,
+                    correlation_id
                 )
                 VALUES (
                     CAST(:tenant_id AS uuid),
@@ -751,7 +757,8 @@ async def receive_global_instagram_webhook(request: Request):
                     'received',
                     CAST(:headers_json AS jsonb),
                     CAST(:payload_json AS jsonb),
-                    :raw_sha256
+                    :raw_sha256,
+                    :correlation_id
                 )
                 ON CONFLICT (tenant_id, provider, event_id) DO NOTHING
                 """
@@ -763,6 +770,7 @@ async def receive_global_instagram_webhook(request: Request):
                 "headers_json": json.dumps(_safe_headers(request)),
                 "payload_json": json.dumps(payload),
                 "raw_sha256": raw_sha256,
+                "correlation_id": str(getattr(request.state, "correlation_id", "") or "")[:120],
             },
         )
         inserted = int(result.rowcount or 0) > 0
@@ -851,7 +859,8 @@ async def receive_webhook(provider: str, endpoint_key: str, request: Request):
                     status,
                     headers_json,
                     payload_json,
-                    raw_sha256
+                    raw_sha256,
+                    correlation_id
                 )
                 VALUES (
                     CAST(:tenant_id AS uuid),
@@ -861,7 +870,8 @@ async def receive_webhook(provider: str, endpoint_key: str, request: Request):
                     'received',
                     CAST(:headers_json AS jsonb),
                     CAST(:payload_json AS jsonb),
-                    :raw_sha256
+                    :raw_sha256,
+                    :correlation_id
                 )
                 ON CONFLICT (tenant_id, provider, event_id) DO NOTHING
                 """
@@ -874,6 +884,7 @@ async def receive_webhook(provider: str, endpoint_key: str, request: Request):
                 "headers_json": json.dumps(_safe_headers(request)),
                 "payload_json": json.dumps(payload),
                 "raw_sha256": raw_sha256,
+                "correlation_id": str(getattr(request.state, "correlation_id", "") or "")[:120],
             },
         )
         inserted = int(result.rowcount or 0) > 0

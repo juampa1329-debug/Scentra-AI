@@ -87,7 +87,22 @@ Estas variables de Vite deben estar disponibles en buildtime:
 ```env
 VITE_API_BASE=https://api.scentra-ai.online
 VITE_CLIENT_APP_BASE=https://app.scentra-ai.online
+VITE_CAPTCHA_ENABLED=true
+VITE_TURNSTILE_SITE_KEY=<site_key_turnstile>
+VITE_ADMIN_BOOTSTRAP_ENABLED=false
 ```
+
+Si usas `docker-compose.saas.yml` como app Compose unificada, los build args del servicio `admin-frontend` se alimentan con:
+
+```env
+ADMIN_VITE_API_BASE=https://api.scentra-ai.online
+ADMIN_VITE_CLIENT_APP_BASE=https://app.scentra-ai.online
+ADMIN_VITE_CAPTCHA_ENABLED=true
+ADMIN_VITE_TURNSTILE_SITE_KEY=<site_key_turnstile>
+ADMIN_VITE_BOOTSTRAP_ENABLED=false
+```
+
+El compose ya incluye labels Traefik para `admin.scentra-ai.online`.
 
 ## Que es `SCENTRA_META_ACCESS_TOKEN`
 Es el token secreto que usa el backend para hablar con Meta Graph API / WhatsApp Cloud.
@@ -132,3 +147,17 @@ Pendiente antes de cobros reales:
 2. Checkout Stripe o MercadoPago.
 3. Webhooks de pago que pasen `trial` a `active` o `past_due`.
 4. Secretos Meta por tenant con cifrado o secret manager.
+
+## Seed de primer superadmin con Compose
+
+El servicio `platform-admin-seed` queda desactivado por defecto. Para ejecutarlo de forma puntual:
+
+```bash
+SAAS_ADMIN_EMAIL=admin@scentra-ai.online \
+SAAS_ADMIN_PASSWORD='usa-una-clave-larga-y-unica' \
+SAAS_ADMIN_FULL_NAME='Scentra Admin' \
+SAAS_ADMIN_ROLE=superadmin \
+docker compose -f docker-compose.saas.yml --profile admin-seed run --rm platform-admin-seed
+```
+
+No ejecutes el seed sin revisar el email y la clave. Si el usuario existe, el comando actualiza la clave y rol de ese platform admin.

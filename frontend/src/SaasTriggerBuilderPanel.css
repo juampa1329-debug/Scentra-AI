@@ -144,7 +144,7 @@
 
 .trigger-builder-tabs {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
   margin: 12px 0 14px;
 }
@@ -314,6 +314,35 @@
   border-color: rgba(52, 211, 153, 0.55);
   background: rgba(52, 211, 153, 0.18);
   color: #bbf7d0;
+}
+
+.trigger-result-box,
+.trigger-version-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: rgba(0, 0, 0, 0.18);
+  padding: 10px;
+}
+
+.trigger-result-box strong {
+  flex: 0 0 100%;
+}
+
+.trigger-version-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  width: 100%;
+}
+
+.trigger-version-row span {
+  color: var(--soft);
+  font-size: 12px;
+  overflow-wrap: anywhere;
 }
 
 .trigger-save-bar {

@@ -10,7 +10,7 @@ class AiSettingsIn(BaseModel):
     provider_code: str = Field(default="google", max_length=80)
     fallback_provider_code: str = Field(default="", max_length=80)
     system_prompt: str = Field(default="", max_length=20000)
-    max_tokens: int = Field(default=1800, ge=200, le=8000)
+    max_tokens: int = Field(default=700, ge=200, le=8000)
     temperature: float = Field(default=0.5, ge=0, le=2)
     metadata_json: dict[str, Any] = Field(default_factory=dict)
 

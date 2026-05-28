@@ -1,4 +1,4 @@
-﻿-- 022_instagram_business_integration.sql
+-- 022_instagram_business_integration.sql
 -- OAuth, discovery y auditoria para Instagram Business multi-tenant.
 
 CREATE TABLE IF NOT EXISTS saas_instagram_oauth_states (
