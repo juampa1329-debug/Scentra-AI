@@ -471,7 +471,7 @@ def _recent_messages(conn: Connection, tenant_id: str, conversation_id: str, lim
     rows = conn.execute(
         text(
             """
-            SELECT id::text, direction, msg_type, text, media_id, mime_type, payload_json, created_at::text
+            SELECT id::text, external_message_id, direction, msg_type, text, media_id, mime_type, payload_json, created_at::text
             FROM saas_messages
             WHERE tenant_id = CAST(:tenant_id AS uuid)
               AND conversation_id = CAST(:conversation_id AS uuid)
@@ -939,6 +939,47 @@ def generate_agent_result(conn: Connection, tenant_id: str, conversation: dict[s
             "skipped": "assigned_ai_agent_unavailable",
             "agent": {"id": assigned_agent_id, "name": "", "agent_type": ""},
         }
+    if runtime_agent and not _runtime_tool_allowed(runtime_agent, "conversation.reply", default=True):
+        record_agent_runtime_event(
+            conn,
+            tenant_id=tenant_id,
+            agent_id=runtime_agent["id"],
+            event_type="agent.runtime_released",
+            summary=f"{_runtime_agent_label(runtime_agent)} no puede responder clientes; la conversacion vuelve a IA general.",
+            details={
+                "conversation_id": str(conversation.get("id") or ""),
+                "channel": conversation.get("channel") or "",
+                "reason": "conversation_reply_tool_missing",
+            },
+        )
+        conn.execute(
+            text(
+                """
+                UPDATE saas_conversations
+                SET assigned_ai_agent_id = NULL,
+                    ai_owner_mode = 'general',
+                    ai_owner_locked_at = NULL,
+                    updated_at = NOW()
+                WHERE tenant_id = CAST(:tenant_id AS uuid)
+                  AND id = CAST(:conversation_id AS uuid)
+                  AND assigned_ai_agent_id = CAST(:agent_id AS uuid)
+                """
+            ),
+            {
+                "tenant_id": tenant_id,
+                "conversation_id": str(conversation.get("id") or ""),
+                "agent_id": runtime_agent["id"],
+            },
+        )
+        conversation = {
+            **conversation,
+            "assigned_ai_agent_id": "",
+            "assigned_ai_agent_name": "",
+            "assigned_ai_agent_type": "",
+            "ai_owner_mode": "general",
+            "ai_owner_locked_at": "",
+        }
+        runtime_agent = None
     if runtime_agent and not _runtime_can_send(runtime_agent):
         record_agent_runtime_event(
             conn,
@@ -1386,13 +1427,22 @@ def process_conversation_ai(conn: Connection, tenant_id: str, conversation_id: s
     if not messages:
         return {"ok": False, "skipped": "no_messages"}
     latest = messages[-1]
-    if str(latest.get("direction") or "").lower() != "in":
-        return {"ok": False, "skipped": "latest_not_inbound"}
-    if message_id and str(latest.get("id")) != str(message_id):
-        inbound_ids = {str(item.get("id")) for item in messages if str(item.get("direction")).lower() == "in"}
-        if str(message_id) not in inbound_ids:
+    target_inbound = latest if str(latest.get("direction") or "").lower() == "in" else None
+    if message_id:
+        target_inbound = None
+        for item in messages:
+            if str(item.get("id")) == str(message_id):
+                if str(item.get("direction") or "").lower() != "in":
+                    return {"ok": False, "skipped": "message_not_inbound"}
+                target_inbound = item
+                break
+        if not target_inbound:
             return {"ok": False, "skipped": "message_not_inbound"}
-    typing = _maybe_send_typing_indicator(conn, tenant_id, conversation, _latest_inbound_message(messages), settings)
+    if not target_inbound:
+        target_inbound = _latest_inbound_message(messages)
+    if not target_inbound:
+        return {"ok": False, "skipped": "latest_not_inbound"}
+    typing = _maybe_send_typing_indicator(conn, tenant_id, conversation, target_inbound, settings)
 
     try:
         generated = generate_agent_result(conn, tenant_id, conversation, messages)
@@ -1416,7 +1466,7 @@ def process_conversation_ai(conn: Connection, tenant_id: str, conversation_id: s
             conn,
             tenant_id,
             conversation_id,
-            str(latest["id"]),
+            str(target_inbound["id"]),
             _clean(result.get("memory_summary") or "", 5000),
             facts,
         )
@@ -1452,6 +1502,7 @@ def process_conversation_ai(conn: Connection, tenant_id: str, conversation_id: s
             "name": runtime_agent.get("name") if runtime_agent else "",
             "agent_type": runtime_agent.get("agent_type") if runtime_agent else "",
         },
+        "replying_to_message_id": str(target_inbound.get("id") or ""),
         "ai": {
             "provider": result.get("provider_code"),
             "model": result.get("model"),

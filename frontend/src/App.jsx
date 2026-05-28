@@ -241,6 +241,7 @@ function formatApiError(data, fallback) {
     if (detail.code === "agent_preflight_not_ready") return `Preflight del agente no aprobado (${detail.score || 0}/100). Revisa los checks antes de activar.`;
     if (detail.code === "ai_agent_budget_exceeded") return "Presupuesto del agente excedido. Ajusta limite o pausa hard stop.";
     if (detail.code === "ai_agent_not_active") return "Solo puedes asignar conversaciones a agentes activos.";
+    if (detail.code === "ai_agent_not_conversation_capable") return "Este agente es interno y no puede tomar conversaciones de clientes.";
     if (detail.code === "feature_not_enabled") return `Modulo no incluido o desactivado: ${FEATURE_LABELS[detail.feature] || detail.feature}.`;
     if (detail.code === "tenant_not_operational") return `Empresa no habilitada para operar. Estado: ${detail.status || "desconocido"}.`;
     return detail.message || detail.code || fallback;
@@ -526,6 +527,15 @@ const agentTypeLabel = (type) => ({
   appointment_scheduler: "Agenda / Citas",
 }[String(type || "").toLowerCase()] || String(type || "Agente"));
 
+const isConversationCapableAgent = (agent, channel = "") => {
+  const tools = Array.isArray(agent?.tools_json) ? agent.tools_json.map((item) => String(item || "").toLowerCase()) : [];
+  const channels = Array.isArray(agent?.channels_json) ? agent.channels_json.map((item) => String(item || "").toLowerCase()) : [];
+  const cleanChannel = String(channel || "").toLowerCase();
+  if (tools.length && !tools.includes("conversation.reply")) return false;
+  if (cleanChannel && channels.length && !channels.includes(cleanChannel) && !channels.includes("global")) return false;
+  return true;
+};
+
 const fallbackProviderModels = (provider) => String(provider?.models || "")
   .split(",")
   .map((item) => item.trim())
@@ -606,13 +616,18 @@ const buildProductOutboundText = (product, note = "") => {
   const lines = [];
   const cleanNote = cleanProductText(note, 900);
   if (cleanNote) lines.push(cleanNote, "");
-  lines.push(product.name || "Producto");
+  lines.push(`✨ ${product.name || "Producto"}`);
+  if (Array.isArray(product.categories) && product.categories.length) lines.push(`👤 Para: ${product.categories.slice(0, 2).join(", ")}`);
+  const aromaAttrs = (product.attributes || []).filter((attribute) => /aroma|fragancia|nota|olor|familia/i.test(String(attribute.name || "")));
+  const otherAttrs = (product.attributes || []).filter((attribute) => !aromaAttrs.includes(attribute));
+  aromaAttrs.forEach((attribute) => lines.push(`🌿 ${attribute.name}: ${attribute.value}`));
+  otherAttrs.slice(0, 3).forEach((attribute) => lines.push(`${attribute.name}: ${attribute.value}`));
   const price = productPriceLabel(product);
-  if (price && price !== "Precio no visible") lines.push(`Precio: ${price}`);
+  if (price && price !== "Precio no visible") lines.push(`💰 Precio: ${price}`);
   if (product.sku) lines.push(`SKU: ${product.sku}`);
-  product.attributes.forEach((attribute) => lines.push(`${attribute.name}: ${attribute.value}`));
   if (product.short_description) lines.push(product.short_description);
-  if (product.permalink) lines.push(`Ver producto: ${product.permalink}`);
+  if (product.permalink) lines.push("", "🛒 Ver producto:", product.permalink);
+  if (product.image_url) lines.push("📷 Ver foto real:", product.image_url);
   return lines.join("\n").trim();
 };
 
@@ -659,6 +674,18 @@ const messageDeliveryState = (message) => {
   if (["failed", "blocked"].includes(raw)) return { key: "failed", label: payload.delivery_error || payload.error || "No enviado", mark: "!" };
   return { key: "queued", label: "En cola", mark: "•" };
 };
+
+function DeliveryReceipt({ message }) {
+  const state = messageDeliveryState(message);
+  if (!state) return null;
+  const markByKey = { read: "✓✓", delivered: "✓✓", sent: "✓", queued: "•", failed: "!" };
+  return (
+    <span className={`wa-checks ${state.key}`} title={state.label} aria-label={state.label}>
+      <span className="wa-check-mark">{markByKey[state.key] || state.mark}</span>
+      <span className="wa-status-text">{state.label}</span>
+    </span>
+  );
+}
 
 const userDisplayName = (user) => {
   const fullName = String(user?.full_name || "").trim();
@@ -978,6 +1005,7 @@ function App() {
     ...socialComments.map((item) => String(item.channel || "").toLowerCase()),
   ].filter(Boolean))).filter((channel) => !["billing"].includes(channel)).sort();
   const activeInboxAiAgents = inboxAiAgents.filter((agent) => String(agent.status || "").toLowerCase() === "active");
+  const activeConversationAiAgents = activeInboxAiAgents.filter((agent) => isConversationCapableAgent(agent));
   const webSearchItems = useMemo(() => webSearchRuns.flatMap((run) => (run.results || []).map((result) => ({ run, result }))), [webSearchRuns]);
   const approvedVisualReferences = useMemo(() => webSearchItems.filter(({ result }) => result.approval_status === "approved" && result.safety_status !== "blocked" && (result.thumbnail_url || result.image_url)).slice(0, 6), [webSearchItems]);
   const pendingVisualReferences = useMemo(() => webSearchItems.filter(({ result }) => result.approval_status !== "approved" && result.safety_status !== "blocked" && (result.thumbnail_url || result.image_url)).slice(0, 6), [webSearchItems]);
@@ -4316,7 +4344,7 @@ function App() {
                   <label>Agente IA
                     <select value={inboxAgentFilter} onChange={(event) => setInboxAgentFilter(event.target.value)}>
                       <option value="all">Todos los agentes</option>
-                      {activeInboxAiAgents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name || agentTypeLabel(agent.agent_type)}</option>)}
+                      {activeConversationAiAgents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name || agentTypeLabel(agent.agent_type)}</option>)}
                     </select>
                   </label>
                 </div>
@@ -4423,7 +4451,7 @@ function App() {
                   <div className={`message ${message.direction === "out" ? "out" : "in"} ${message.msg_type || "text"}`} key={message.id}>
                     <span className="message-type">{messageSenderLabel(message)}</span>
                     {renderMessageContent(message)}
-                    <small className="message-foot">{chatTimeLabel(message.created_at)}{messageDeliveryState(message) ? <span className={`wa-checks ${messageDeliveryState(message).key}`} title={messageDeliveryState(message).label}>{messageDeliveryState(message).mark}</span> : null}</small>
+                    <small className="message-foot">{chatTimeLabel(message.created_at)}<DeliveryReceipt message={message} /></small>
                   </div>
                 ))}
                 {messages.length === 0 ? <div className="empty">Selecciona una conversacion.</div> : null}
@@ -4516,7 +4544,9 @@ function App() {
                       <strong>{selectedConversation.assigned_ai_agent_name || "IA general"}</strong>
                       <select value={selectedConversation.assigned_ai_agent_id || ""} onChange={(event) => assignSelectedAiAgent(event.target.value)}>
                         <option value="">IA general</option>
-                        {activeInboxAiAgents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name || agentTypeLabel(agent.agent_type)}</option>)}
+                        {activeConversationAiAgents
+                          .filter((agent) => isConversationCapableAgent(agent, selectedConversation.channel))
+                          .map((agent) => <option key={agent.id} value={agent.id}>{agent.name || agentTypeLabel(agent.agent_type)}</option>)}
                       </select>
                       <button type="button" onClick={() => assignSelectedAiAgent("")} disabled={!selectedConversation.assigned_ai_agent_id}>Liberar IA</button>
                     </div>

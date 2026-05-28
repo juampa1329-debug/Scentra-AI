@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import urllib.parse
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
@@ -166,6 +167,16 @@ def _clean_text(value: Any, limit: int = 500) -> str:
     return str(value or "").strip()[:limit]
 
 
+def _safe_public_url(value: Any, limit: int = 1200) -> str:
+    url = _clean_text(value, limit)
+    if not url:
+        return ""
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return ""
+    return url
+
+
 def _safe_product_card(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         return {}
@@ -202,19 +213,33 @@ def _product_caption(product: dict[str, Any], note: str = "") -> str:
         lines.append(clean_note)
         lines.append("")
     if product.get("name"):
-        lines.append(str(product["name"]))
+        lines.append(f"✨ {product['name']}")
+    categories = [str(item or "").strip() for item in product.get("categories") or [] if str(item or "").strip()]
+    if categories:
+        lines.append(f"👤 Para: {', '.join(categories[:2])}")
+    attributes = product.get("attributes") or []
+    aroma_attributes = [
+        item
+        for item in attributes
+        if any(word in str(item.get("name") or "").lower() for word in ("aroma", "fragancia", "nota", "olor", "familia"))
+    ]
+    other_attributes = [item for item in attributes if item not in aroma_attributes]
+    for attribute in aroma_attributes:
+        lines.append(f"🌿 {attribute['name']}: {attribute['value']}")
+    for attribute in other_attributes[:3]:
+        lines.append(f"{attribute['name']}: {attribute['value']}")
     price = product.get("sale_price") or product.get("price") or product.get("regular_price")
     if price:
-        lines.append(f"Precio: {price}")
+        lines.append(f"💰 Precio: {price}")
     sku = product.get("sku")
     if sku:
         lines.append(f"SKU: {sku}")
-    for attribute in product.get("attributes") or []:
-        lines.append(f"{attribute['name']}: {attribute['value']}")
     if product.get("short_description"):
         lines.append(str(product["short_description"]))
     if product.get("permalink"):
-        lines.append(f"Ver producto: {product['permalink']}")
+        lines.extend(["", "🛒 Ver producto:", str(product["permalink"])])
+    if product.get("image_url"):
+        lines.extend(["📷 Ver foto real:", str(product["image_url"])])
     return "\n".join(line for line in lines if line is not None).strip()[:4096]
 
 
@@ -3148,6 +3173,8 @@ def send_message(
         mime_type = payload.mime_type.strip()
         filename = payload.filename.strip()
         message_type = requested_type
+        dispatch_message_type = message_type
+        dispatch_media_url = ""
         if requested_media_id:
             asset = conn.execute(
                 text(
@@ -3171,6 +3198,11 @@ def send_message(
                 message_type = asset_kind if asset_kind in allowed_types else "file"
             if message_type == "file":
                 message_type = "document"
+            dispatch_message_type = message_type
+        elif product_card and channel == "whatsapp":
+            dispatch_media_url = _safe_public_url(product_card.get("image_url"), 1200)
+            if dispatch_media_url:
+                dispatch_message_type = "image"
 
         local_external_id = f"local:out:{uuid4().hex}"
         message_payload = {
@@ -3178,7 +3210,9 @@ def send_message(
             "actor_user_id": ctx.user_id,
             "dispatch_status": "queued",
             "message_type": message_type,
+            "dispatch_message_type": dispatch_message_type,
             "media_id": media_id,
+            "media_url": dispatch_media_url,
             "mime_type": mime_type,
             "filename": filename,
         }
@@ -3276,8 +3310,10 @@ def send_message(
                 "payload_json": json.dumps({
                     "local_external_message_id": local_external_id,
                     "source": "saas_console",
-                    "message_type": message_type,
+                    "message_type": dispatch_message_type,
+                    "display_message_type": message_type,
                     "media_id": media_id,
+                    "media_url": dispatch_media_url,
                     "mime_type": mime_type,
                     "filename": filename,
                     **({

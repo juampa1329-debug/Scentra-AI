@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import tempfile
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -385,6 +386,16 @@ def _meta_upload_mime(content_type: str) -> str:
     return str(content_type or "application/octet-stream").split(";", 1)[0].strip().lower() or "application/octet-stream"
 
 
+def _safe_media_link(value: Any) -> str:
+    url = str(value or "").strip()[:1200]
+    if not url:
+        return ""
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return ""
+    return url
+
+
 def _ffmpeg_executable() -> str:
     configured = str(os.getenv("FFMPEG_BINARY") or "").strip()
     if configured:
@@ -507,7 +518,8 @@ def _send_meta_cloud_media(conn, integration: dict[str, Any], job: dict[str, Any
     payload_json = _job_payload(job)
     local_media_id = str(payload_json.get("media_id") or "").strip()
     provider_media_id = str(payload_json.get("provider_media_id") or "").strip()
-    if not local_media_id and not provider_media_id:
+    media_link = _safe_media_link(payload_json.get("media_url") or payload_json.get("media_link"))
+    if not local_media_id and not provider_media_id and not media_link:
         raise DispatchPermanentError("media_id_required")
 
     asset: dict[str, Any] | None = None
@@ -524,13 +536,15 @@ def _send_meta_cloud_media(conn, integration: dict[str, Any], job: dict[str, Any
     if asset:
         asset = _prepare_asset_for_meta(asset, message_type)
         content_type = str(asset.get("content_type") or content_type)
-    if not provider_media_id:
+    if not provider_media_id and not media_link:
         upload = _upload_meta_media(config, access_token, asset or {})
         provider_media_id = upload["provider_media_id"]
+    elif media_link:
+        upload = {"provider_media_id": "", "upload_response": {"link": media_link}}
     else:
         upload = {"provider_media_id": provider_media_id, "upload_response": {}}
 
-    media_payload: dict[str, Any] = {"id": provider_media_id}
+    media_payload: dict[str, Any] = {"id": provider_media_id} if provider_media_id else {"link": media_link}
     if message_type in {"image", "video", "document"} and body_text:
         media_payload["caption"] = body_text[:1024]
     filename = str(payload_json.get("filename") or (asset or {}).get("filename") or "").strip()
@@ -866,7 +880,18 @@ def _dispatch_one(conn, job: dict[str, Any]) -> str:
             payload_json = _job_payload(job)
             message_type = str(payload_json.get("message_type") or payload_json.get("type") or "").strip().lower()
             if message_type in {"image", "video", "audio", "document", "file"} or payload_json.get("media_id"):
-                result = _send_meta_cloud_media(conn, integration, job)
+                try:
+                    result = _send_meta_cloud_media(conn, integration, job)
+                except DispatchPermanentError as media_exc:
+                    is_product_media = str(payload_json.get("display_message_type") or "").strip().lower() == "product"
+                    if not (is_product_media and payload_json.get("media_url") and str(job.get("body_text") or "").strip()):
+                        raise
+                    result = _send_meta_cloud_text(integration, job)
+                    result["request_type"] = "product_image_fallback_text"
+                    result["upload_response"] = {
+                        "fallback_from": "product_image",
+                        "media_error": str(media_exc),
+                    }
             elif message_type == "template" or payload_json.get("meta_template_name") or payload_json.get("template_name"):
                 allowed, reason = _meta_template_send_allowed(conn, job, payload_json)
                 if not allowed:

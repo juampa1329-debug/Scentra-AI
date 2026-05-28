@@ -43,6 +43,14 @@ class NormalizedStatus:
     payload: dict[str, Any] | None = None
 
 
+DELIVERY_STATUS_RANK = {
+    "sent": 1,
+    "delivered": 2,
+    "read": 3,
+    "failed": 4,
+}
+
+
 def _as_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
@@ -531,6 +539,7 @@ def _upsert_message(conn, tenant_id: str, event_id: str, payload: dict[str, Any]
 
 def _apply_delivery_status(conn, tenant_id: str, status_event: NormalizedStatus) -> int:
     status = status_event.status if status_event.status in {"sent", "delivered", "read", "failed"} else "sent"
+    status_rank = DELIVERY_STATUS_RANK.get(status, 1)
     patch = {
         "delivery_status": status,
         "delivery_timestamp": status_event.timestamp,
@@ -549,6 +558,7 @@ def _apply_delivery_status(conn, tenant_id: str, status_event: NormalizedStatus)
                     payload_json->'provider_response'->>'provider_message_id' = :provider_message_id
                     OR payload_json->'provider_response'->>'id' = :provider_message_id
                     OR payload_json->'provider_response'->'messages'->0->>'id' = :provider_message_id
+                    OR payload_json->>'provider_message_id' = :provider_message_id
                   )
             ),
             updated AS (
@@ -561,6 +571,15 @@ def _apply_delivery_status(conn, tenant_id: str, status_event: NormalizedStatus)
                     OR external_message_id = :provider_message_id
                     OR id IN (SELECT message_id FROM outbound_matches)
                   )
+                  AND (
+                    :status = 'failed'
+                    OR CASE payload_json->>'delivery_status'
+                        WHEN 'read' THEN 3
+                        WHEN 'delivered' THEN 2
+                        WHEN 'sent' THEN 1
+                        ELSE 0
+                       END <= :status_rank
+                  )
                 RETURNING id
             )
             SELECT id::text, conversation_id::text FROM updated
@@ -570,6 +589,8 @@ def _apply_delivery_status(conn, tenant_id: str, status_event: NormalizedStatus)
             "tenant_id": tenant_id,
             "provider_message_id": status_event.provider_message_id,
             "patch_json": json.dumps(patch),
+            "status": status,
+            "status_rank": status_rank,
         },
     ).mappings().all()
     message_ids = [str(row["id"]) for row in rows]
@@ -622,6 +643,16 @@ def _apply_delivery_status(conn, tenant_id: str, status_event: NormalizedStatus)
                 OR payload_json->'provider_response'->>'provider_message_id' = :provider_message_id
                 OR payload_json->'provider_response'->>'id' = :provider_message_id
                 OR payload_json->'provider_response'->'messages'->0->>'id' = :provider_message_id
+                OR payload_json->>'provider_message_id' = :provider_message_id
+              )
+              AND (
+                :status = 'failed'
+                OR CASE payload_json->>'delivery_status'
+                    WHEN 'read' THEN 3
+                    WHEN 'delivered' THEN 2
+                    WHEN 'sent' THEN 1
+                    ELSE 0
+                   END <= :status_rank
               )
             """
         ),
@@ -632,6 +663,7 @@ def _apply_delivery_status(conn, tenant_id: str, status_event: NormalizedStatus)
             "provider_message_id": status_event.provider_message_id,
             "message_ids": message_ids,
             "patch_json": json.dumps(patch),
+            "status_rank": status_rank,
         },
     )
     conn.execute(
@@ -653,6 +685,7 @@ def _apply_delivery_status(conn, tenant_id: str, status_event: NormalizedStatus)
                         OR payload_json->'provider_response'->>'provider_message_id' = :provider_message_id
                         OR payload_json->'provider_response'->>'id' = :provider_message_id
                         OR payload_json->'provider_response'->'messages'->0->>'id' = :provider_message_id
+                        OR payload_json->>'provider_message_id' = :provider_message_id
                       )
                 )
               )

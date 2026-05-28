@@ -1969,6 +1969,13 @@ def _runtime_agent_score(agent: dict[str, Any], channel: str, conversation: dict
     return score
 
 
+def _agent_can_own_conversation(agent: dict[str, Any], channel: str) -> bool:
+    if not _agent_channel_match(agent, channel):
+        return False
+    tools = {str(item or "").strip().lower() for item in _json_value(agent.get("tools_json"), [])}
+    return not tools or "conversation.reply" in tools
+
+
 def assign_conversation_ai_agent(
     conn: Connection,
     tenant_id: str,
@@ -1981,11 +1988,34 @@ def assign_conversation_ai_agent(
     _ensure_tables(conn)
     _ensure_conversation_agent_columns(conn)
     clean_agent_id = _clean(agent_id, 80)
+    conversation = conn.execute(
+        text(
+            """
+            SELECT id::text, channel
+            FROM saas_conversations
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND id = CAST(:conversation_id AS uuid)
+            LIMIT 1
+            """
+        ),
+        {"tenant_id": tenant_id, "conversation_id": conversation_id},
+    ).mappings().first()
+    if not conversation:
+        raise HTTPException(status_code=404, detail="conversation_not_found")
     agent: dict[str, Any] | None = None
     if clean_agent_id:
         agent = get_agent(conn, tenant_id, clean_agent_id)
         if agent.get("status") != "active":
             raise HTTPException(status_code=409, detail={"code": "ai_agent_not_active", "agent_id": clean_agent_id})
+        if not _agent_can_own_conversation(agent, _clean(conversation.get("channel"), 40) or "whatsapp"):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "ai_agent_not_conversation_capable",
+                    "agent_id": clean_agent_id,
+                    "agent_type": agent.get("agent_type") or "",
+                },
+            )
     row = conn.execute(
         text(
             """
