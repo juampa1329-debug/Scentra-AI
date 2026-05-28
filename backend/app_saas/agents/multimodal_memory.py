@@ -66,6 +66,23 @@ def _table_exists(conn: Connection, table_name: str) -> bool:
     return bool(conn.execute(text("SELECT to_regclass(:table_name) IS NOT NULL"), {"table_name": table_name}).scalar())
 
 
+def _table_has_columns(conn: Connection, table_name: str, required_columns: tuple[str, ...]) -> bool:
+    if not required_columns:
+        return True
+    rows = conn.execute(
+        text(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = :table_name
+            """
+        ),
+        {"table_name": table_name},
+    ).scalars().all()
+    return set(rows) >= set(required_columns)
+
+
 def _to_float(value: Any, default: float = 0.0) -> float:
     try:
         return float(value)
@@ -787,7 +804,41 @@ def list_multimodal_memory_events(
     source_kind: str = "",
     limit: int = 80,
 ) -> list[dict[str, Any]]:
-    ensure_multimodal_memory_tables(conn)
+    required_columns = (
+        "tenant_id",
+        "conversation_id",
+        "message_id",
+        "agent_id",
+        "source_kind",
+        "source_id",
+        "event_type",
+        "channel",
+        "status",
+        "privacy_level",
+        "approval_status",
+        "eligible_for_training",
+        "eligible_for_rag",
+        "eligible_for_agent_memory",
+        "memory_text",
+        "rag_text",
+        "training_features_json",
+        "training_labels_json",
+        "source_payload_json",
+        "safety_json",
+        "intelligence_event_id",
+        "knowledge_source_id",
+        "collective_memory_id",
+        "created_by_user_id",
+        "materialized_by_user_id",
+        "materialized_at",
+        "replay_key",
+        "created_at",
+        "updated_at",
+    )
+    if not _table_exists(conn, "saas_multimodal_memory_events"):
+        return []
+    if not _table_has_columns(conn, "saas_multimodal_memory_events", required_columns):
+        return []
     where = ["e.tenant_id = CAST(:tenant_id AS uuid)"]
     params: dict[str, Any] = {"tenant_id": tenant_id, "limit": max(1, min(int(limit or 80), 200))}
     if conversation_id:

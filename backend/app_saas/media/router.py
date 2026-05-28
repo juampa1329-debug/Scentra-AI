@@ -90,6 +90,27 @@ def _json(value: Any) -> str:
     return json.dumps(value if value is not None else {}, ensure_ascii=False)
 
 
+def _table_exists(conn, table_name: str) -> bool:
+    return bool(conn.execute(text("SELECT to_regclass(:table_name) IS NOT NULL"), {"table_name": table_name}).scalar())
+
+
+def _table_has_columns(conn, table_name: str, required_columns: tuple[str, ...]) -> bool:
+    if not required_columns:
+        return True
+    rows = conn.execute(
+        text(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = :table_name
+            """
+        ),
+        {"table_name": table_name},
+    ).scalars().all()
+    return set(rows) >= set(required_columns)
+
+
 def _safe_kind(value: object) -> str:
     kind = re.sub(r"[^a-z0-9_-]+", "", _clean(value, 40).lower())
     return kind if kind in ALLOWED_KINDS else "file"
@@ -1532,6 +1553,57 @@ def _insert_search_run(
 
 
 def _load_search_runs(conn, tenant_id: str, conversation_id: str = "", limit: int = 10) -> list[dict[str, Any]]:
+    run_columns = (
+        "id",
+        "tenant_id",
+        "conversation_id",
+        "message_id",
+        "created_by_user_id",
+        "query",
+        "search_type",
+        "provider_code",
+        "status",
+        "access_mode",
+        "result_count",
+        "approved_count",
+        "blocked_count",
+        "summary",
+        "metadata_json",
+        "created_at",
+        "updated_at",
+    )
+    result_columns = (
+        "id",
+        "tenant_id",
+        "run_id",
+        "result_type",
+        "title",
+        "url",
+        "display_url",
+        "snippet",
+        "source_name",
+        "image_url",
+        "thumbnail_url",
+        "license_label",
+        "license_details_url",
+        "width",
+        "height",
+        "rank",
+        "safety_status",
+        "approval_status",
+        "approved_by_user_id",
+        "approved_at",
+        "rejected_reason",
+        "metadata_json",
+        "created_at",
+        "updated_at",
+    )
+    if not _table_exists(conn, "saas_web_search_intelligence_runs") or not _table_exists(conn, "saas_web_search_intelligence_results"):
+        return []
+    if not _table_has_columns(conn, "saas_web_search_intelligence_runs", run_columns):
+        return []
+    if not _table_has_columns(conn, "saas_web_search_intelligence_results", result_columns):
+        return []
     clean_limit = min(max(1, int(limit or 10)), 30)
     params = {"tenant_id": tenant_id, "limit": clean_limit}
     where = ["tenant_id = CAST(:tenant_id AS uuid)"]
@@ -2402,14 +2474,12 @@ def list_web_image_search_runs(
 ):
     with db_session() as conn:
         set_tenant_context(conn, ctx.tenant_id)
-        _ensure_web_image_search_tables(conn)
-        try:
-            access = _resolve_any_search_access(conn, ctx.tenant_id)
-        except HTTPException as exc:
-            disabled_access = _disabled_search_access_from_error(exc)
-            if not disabled_access:
-                raise
-            return {"ok": True, "tenant_id": ctx.tenant_id, "access": disabled_access, "runs": []}
+        access = {
+            "enabled": True,
+            "mode": "read_only",
+            "resolved_feature_key": "web_image_search_read",
+            "reason": "inbox_read_endpoint_no_provider_execution",
+        }
         if conversation_id:
             _validate_search_context(conn, ctx.tenant_id, conversation_id, "")
         runs = _load_search_runs(conn, ctx.tenant_id, conversation_id, limit)
