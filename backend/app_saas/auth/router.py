@@ -240,7 +240,22 @@ def register(payload: RegisterIn, request: Request):
                     {"tenant_id": tenant["id"], "user_id": user["id"]},
                 )
                 create_trial_subscription(conn, tenant["id"], trial_plan_code)
-                apply_industry_pack(conn, tenant["id"], user["id"], industry_code, create_agents=False)
+                try:
+                    with conn.begin_nested():
+                        apply_industry_pack(conn, tenant["id"], user["id"], industry_code, create_agents=False)
+                except Exception as exc:
+                    record_security_event(
+                        conn,
+                        event_type="auth.register",
+                        status="warning",
+                        request=request,
+                        principal=email,
+                        rate_key=rate_key,
+                        tenant_id=tenant["id"],
+                        user_id=user["id"],
+                        reason="vertical_pack_apply_failed",
+                        details={"industry_code": industry_code, "error": f"{type(exc).__name__}: {str(exc)[:300]}"},
+                    )
                 tenants = _tenant_rows(conn, user["id"])
                 record_security_event(
                     conn,
