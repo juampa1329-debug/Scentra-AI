@@ -34,15 +34,25 @@ Si usas el Postgres incluido en el Docker Compose, coloca estas variables en el 
 La API ejecuta las migraciones automaticamente antes de iniciar `uvicorn`, asi evitamos un contenedor `migrate` que quede en estado `Exited` dentro de Coolify.
 
 ## API con Build Pack Dockerfile
-Si publicas la API como una app Dockerfile separada en Coolify, usa exactamente:
+Si publicas la API como una app Dockerfile separada en Coolify, la ruta depende del repositorio que hayas conectado.
+
+Si Coolify importa directamente `juampa1329-debug/Scentra-AI`, ese repositorio ya tiene el SaaS en la raiz. Usa:
 
 ```text
-Base Directory: saas-version
+Base Directory: /
 Dockerfile Location: /backend/Dockerfile
 Port Exposes: 8000
 ```
 
-No uses `Base Directory: /` con `/backend/Dockerfile`: eso construye la app legacy no-SaaS (`uvicorn app.main:app`) y el contenedor no tendra `/app/app_saas` ni `/app/migrations`.
+Si Coolify importa el monorepo `juampa1329-debug/verane-whatsapp-ai`, entonces usa:
+
+```text
+Base Directory: /saas-version
+Dockerfile Location: /backend/Dockerfile
+Port Exposes: 8000
+```
+
+No mezcles los dos modos. Si el log dice `lstat .../saas-version/backend: no such file or directory`, Coolify esta usando el repo `Scentra-AI` directo y la base debe ser `/`.
 
 El Dockerfile SaaS ya ejecuta por defecto:
 
