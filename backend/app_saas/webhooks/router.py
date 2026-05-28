@@ -224,6 +224,39 @@ def _load_endpoint(conn, provider: str, endpoint_key: str) -> dict:
     return dict(row)
 
 
+def _load_whatsapp_endpoint_by_verify_token(conn, verify_token: str) -> dict[str, Any] | None:
+    if not str(verify_token or "").strip():
+        return None
+    rows = conn.execute(
+        text(
+            """
+            SELECT
+                id::text,
+                tenant_id::text,
+                provider,
+                endpoint_key,
+                verify_token_hash,
+                signature_secret_hash,
+                signature_secret_salt,
+                signature_required,
+                is_active
+            FROM saas_webhook_endpoints
+            WHERE provider IN ('whatsapp', 'meta')
+              AND is_active = TRUE
+            ORDER BY
+              CASE WHEN provider = 'whatsapp' THEN 0 ELSE 1 END,
+              updated_at DESC NULLS LAST
+            LIMIT 50
+            """
+        )
+    ).mappings().all()
+    for row in rows:
+        data = dict(row)
+        if verify_secret(verify_token, str(data.get("verify_token_hash") or "")):
+            return data
+    return None
+
+
 def _whatsapp_lookup_ids(payload: dict[str, Any]) -> dict[str, list[str]]:
     waba_ids: list[str] = []
     phone_number_ids: list[str] = []
@@ -873,6 +906,42 @@ async def receive_global_instagram_webhook(request: Request):
     }
 
 
+@router.get("/whatsapp")
+def verify_global_whatsapp_webhook(
+    mode: str = Query("", alias="hub.mode"),
+    verify_token: str = Query("", alias="hub.verify_token"),
+    challenge: str = Query("", alias="hub.challenge"),
+):
+    with db_session() as conn:
+        endpoint = _load_whatsapp_endpoint_by_verify_token(conn, verify_token)
+    if mode == "subscribe" and challenge and endpoint:
+        return Response(content=str(challenge), media_type="text/plain")
+    raise HTTPException(status_code=403, detail="webhook_verification_failed")
+
+
+@router.post("/whatsapp")
+async def receive_global_whatsapp_webhook(request: Request):
+    return await receive_webhook("whatsapp", "", request)
+
+
+@router.get("/meta")
+def verify_global_meta_webhook(
+    mode: str = Query("", alias="hub.mode"),
+    verify_token: str = Query("", alias="hub.verify_token"),
+    challenge: str = Query("", alias="hub.challenge"),
+):
+    with db_session() as conn:
+        endpoint = _load_whatsapp_endpoint_by_verify_token(conn, verify_token)
+    if mode == "subscribe" and challenge and endpoint:
+        return Response(content=str(challenge), media_type="text/plain")
+    raise HTTPException(status_code=403, detail="webhook_verification_failed")
+
+
+@router.post("/meta")
+async def receive_global_meta_webhook(request: Request):
+    return await receive_webhook("meta", "", request)
+
+
 @router.get("/{provider}/{endpoint_key}")
 def verify_webhook(
     provider: str,
@@ -908,6 +977,7 @@ async def receive_webhook(provider: str, endpoint_key: str, request: Request):
 
     with db_session() as conn:
         endpoint_fallback_used = False
+        endpoint_fallback_reason = ""
         try:
             endpoint = _load_endpoint(conn, provider_clean, key_clean)
         except HTTPException as exc:
@@ -918,6 +988,7 @@ async def receive_webhook(provider: str, endpoint_key: str, request: Request):
                 raise
             endpoint = fallback_endpoint
             endpoint_fallback_used = True
+            endpoint_fallback_reason = "payload_asset" if key_clean else "legacy_no_key_payload_asset"
         token_ok = verify_secret(supplied_token, endpoint["verify_token_hash"])
         signature_ok = _verify_endpoint_signature(endpoint, raw, request)
         meta_app_secret_configured = False
@@ -967,7 +1038,7 @@ async def receive_webhook(provider: str, endpoint_key: str, request: Request):
                 "headers_json": json.dumps(
                     {
                         **_safe_headers(request),
-                        "x-scentra-endpoint-fallback": "payload_asset" if endpoint_fallback_used else "",
+                        "x-scentra-endpoint-fallback": endpoint_fallback_reason if endpoint_fallback_used else "",
                         "x-scentra-requested-endpoint-key": key_clean,
                     }
                 ),

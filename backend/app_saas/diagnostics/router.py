@@ -342,6 +342,11 @@ def diagnostics_overview(ctx: AuthContext = Depends(get_current_user)):
                 if api_public_url and endpoint.get("provider") and endpoint.get("endpoint_key")
                 else ""
             )
+            endpoint["legacy_callback_url"] = (
+                f"{api_public_url}/saas/v1/webhooks/{endpoint.get('provider')}"
+                if api_public_url and endpoint.get("provider") in {"whatsapp", "meta"}
+                else ""
+            )
         last_events = _recent_rows(
             conn,
             """

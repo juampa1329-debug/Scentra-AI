@@ -5597,6 +5597,7 @@ function App() {
                       <span>{endpoint.endpoint_key || "-"}</span>
                       <small>Ultimo evento: {endpoint.last_seen_at ? fullDateTimeLabel(endpoint.last_seen_at) : "sin eventos"}</small>
                       {endpoint.callback_url ? <code>{endpoint.callback_url}</code> : null}
+                      {endpoint.legacy_callback_url ? <small>Compatibilidad legacy sin key: {endpoint.legacy_callback_url}</small> : null}
                     </div>
                   ))}
                   {!diagnostics?.webhooks?.endpoints?.length ? <div className="empty">Sin endpoints webhook configurados.</div> : null}
