@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
+from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
@@ -24,6 +25,10 @@ from app_saas.workers.dispatch import process_due_outbound_messages
 from app_saas.workers.ingest import process_due_webhook_events
 
 router = APIRouter(prefix="/diagnostics", tags=["saas-diagnostics"])
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 class WhatsappInboundSimulationIn(BaseModel):
@@ -256,6 +261,7 @@ def _social_meta_diagnostics(conn: Connection, tenant_id: str) -> dict[str, Any]
 
 @router.get("/overview")
 def diagnostics_overview(ctx: AuthContext = Depends(get_current_user)):
+    generated_at = _now_iso()
     with db_session() as conn:
         set_tenant_context(conn, ctx.tenant_id)
         _ensure_api_credentials_table(conn)
@@ -329,13 +335,24 @@ def diagnostics_overview(ctx: AuthContext = Depends(get_current_user)):
             """,
             ctx.tenant_id,
         ) if _table_exists(conn, "saas_webhook_endpoints") else []
+        api_public_url = str(settings.scentra_api_public_url or "").strip().rstrip("/")
+        for endpoint in webhooks:
+            endpoint["callback_url"] = (
+                f"{api_public_url}/saas/v1/webhooks/{endpoint.get('provider')}/{endpoint.get('endpoint_key')}"
+                if api_public_url and endpoint.get("provider") and endpoint.get("endpoint_key")
+                else ""
+            )
         last_events = _recent_rows(
             conn,
             """
-            SELECT provider, status, received_at::text, processed_at::text, error
-            FROM saas_webhook_events
-            WHERE tenant_id = CAST(:tenant_id AS uuid)
-            ORDER BY received_at DESC
+            SELECT ev.provider, ev.status, ev.received_at::text, ev.processed_at::text, ev.error,
+                   COALESCE(ev.headers_json->>'x-scentra-endpoint-fallback', '') AS endpoint_fallback,
+                   COALESCE(ep.endpoint_key, '') AS endpoint_key,
+                   COALESCE(ep.last_seen_at::text, '') AS endpoint_last_seen_at
+            FROM saas_webhook_events ev
+            LEFT JOIN saas_webhook_endpoints ep ON ep.id = ev.endpoint_id
+            WHERE ev.tenant_id = CAST(:tenant_id AS uuid)
+            ORDER BY ev.received_at DESC
             LIMIT :limit
             """,
             ctx.tenant_id,
@@ -370,6 +387,8 @@ def diagnostics_overview(ctx: AuthContext = Depends(get_current_user)):
         subscription_checks = _recent_subscription_checks(conn, ctx.tenant_id)
         social_meta = _social_meta_diagnostics(conn, ctx.tenant_id)
     return {
+        "generated_at": generated_at,
+        "diagnostic_type": "overview",
         "tenant": dict(tenant or {}),
         "runtime": {
             "api_ok": True,
@@ -416,10 +435,18 @@ def run_diagnostics_processors(
     limit: int = Query(25, ge=1, le=200),
     ctx: AuthContext = Depends(require_role("owner", "admin", "supervisor")),
 ):
-    return {
+    started_at = _now_iso()
+    result = {
         "webhooks": process_due_webhook_events(limit=limit, tenant_id=ctx.tenant_id),
         "ai": process_due_ai_replies(limit=limit, tenant_id=ctx.tenant_id),
         "outbound": process_due_outbound_messages(limit=limit, tenant_id=ctx.tenant_id),
+    }
+    return {
+        "ok": True,
+        "diagnostic_type": "processors",
+        "started_at": started_at,
+        "finished_at": _now_iso(),
+        **result,
     }
 
 
@@ -428,6 +455,7 @@ def simulate_whatsapp_inbound(
     payload: WhatsappInboundSimulationIn,
     ctx: AuthContext = Depends(require_role("owner", "admin", "supervisor")),
 ):
+    started_at = _now_iso()
     from_phone = _safe_phone(payload.from_phone)
     body = str(payload.message or "").strip()[:1000] or "Mensaje de prueba desde diagnostico Scentra"
     contact_name = str(payload.contact_name or "").strip()[:120] or "Cliente Debug"
@@ -554,6 +582,9 @@ def simulate_whatsapp_inbound(
 
     return {
         "ok": bool(message),
+        "diagnostic_type": "whatsapp_simulate_inbound",
+        "started_at": started_at,
+        "finished_at": _now_iso(),
         "inserted_event": inserted,
         "tenant_id": ctx.tenant_id,
         "provider": endpoint["provider"],

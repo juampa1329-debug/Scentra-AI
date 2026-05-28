@@ -224,6 +224,79 @@ def _load_endpoint(conn, provider: str, endpoint_key: str) -> dict:
     return dict(row)
 
 
+def _whatsapp_lookup_ids(payload: dict[str, Any]) -> dict[str, list[str]]:
+    waba_ids: list[str] = []
+    phone_number_ids: list[str] = []
+    for entry in payload.get("entry") if isinstance(payload.get("entry"), list) else []:
+        if not isinstance(entry, dict):
+            continue
+        entry_id = str(entry.get("id") or "").strip()
+        if entry_id and entry_id not in waba_ids:
+            waba_ids.append(entry_id)
+        for change in entry.get("changes") if isinstance(entry.get("changes"), list) else []:
+            value = change.get("value") if isinstance(change, dict) else {}
+            if not isinstance(value, dict):
+                continue
+            metadata = value.get("metadata") if isinstance(value.get("metadata"), dict) else {}
+            phone_id = str(metadata.get("phone_number_id") or "").strip()
+            if phone_id and phone_id not in phone_number_ids:
+                phone_number_ids.append(phone_id)
+            for candidate in (value.get("id"), value.get("business_account_id"), value.get("waba_id")):
+                clean = str(candidate or "").strip()
+                if clean and clean not in waba_ids:
+                    waba_ids.append(clean)
+    return {"waba_ids": waba_ids, "phone_number_ids": phone_number_ids}
+
+
+def _load_whatsapp_endpoint_from_payload(conn, provider: str, payload: dict[str, Any]) -> dict[str, Any] | None:
+    if provider not in {"meta", "whatsapp"}:
+        return None
+    ids = _whatsapp_lookup_ids(payload)
+    if not ids["waba_ids"] and not ids["phone_number_ids"]:
+        return None
+    row = conn.execute(
+        text(
+            """
+            SELECT
+                e.id::text,
+                e.tenant_id::text,
+                e.provider,
+                e.endpoint_key,
+                e.verify_token_hash,
+                e.signature_secret_hash,
+                e.signature_secret_salt,
+                e.signature_required,
+                e.is_active
+            FROM saas_integrations i
+            JOIN saas_webhook_endpoints e
+              ON e.tenant_id = i.tenant_id
+             AND e.provider IN ('whatsapp', 'meta')
+             AND e.is_active = TRUE
+            WHERE i.channel = 'whatsapp'
+              AND i.status = 'connected'
+              AND (
+                i.config_json->>'business_account_id' = ANY(CAST(:waba_ids AS text[]))
+                OR i.config_json->>'waba_id' = ANY(CAST(:waba_ids AS text[]))
+                OR i.config_json->>'phone_number_id' = ANY(CAST(:phone_number_ids AS text[]))
+              )
+            ORDER BY
+              CASE WHEN e.provider = :provider THEN 0 ELSE 1 END,
+              i.updated_at DESC NULLS LAST,
+              e.updated_at DESC NULLS LAST
+            LIMIT 1
+            """
+        ),
+        {"provider": provider, "waba_ids": ids["waba_ids"], "phone_number_ids": ids["phone_number_ids"]},
+    ).mappings().first()
+    if not row:
+        return None
+    data = dict(row)
+    data["matched_by_payload_asset"] = True
+    data["payload_waba_ids"] = ids["waba_ids"]
+    data["payload_phone_number_ids"] = ids["phone_number_ids"]
+    return data
+
+
 def _instagram_lookup_ids(payload: dict[str, Any]) -> list[str]:
     ids: list[str] = []
     for entry in payload.get("entry") if isinstance(payload.get("entry"), list) else []:
@@ -834,7 +907,17 @@ async def receive_webhook(provider: str, endpoint_key: str, request: Request):
     ).strip()
 
     with db_session() as conn:
-        endpoint = _load_endpoint(conn, provider_clean, key_clean)
+        endpoint_fallback_used = False
+        try:
+            endpoint = _load_endpoint(conn, provider_clean, key_clean)
+        except HTTPException as exc:
+            if exc.status_code != 404 or not meta_post_ok:
+                raise
+            fallback_endpoint = _load_whatsapp_endpoint_from_payload(conn, provider_clean, payload)
+            if not fallback_endpoint:
+                raise
+            endpoint = fallback_endpoint
+            endpoint_fallback_used = True
         token_ok = verify_secret(supplied_token, endpoint["verify_token_hash"])
         signature_ok = _verify_endpoint_signature(endpoint, raw, request)
         meta_app_secret_configured = False
@@ -881,7 +964,13 @@ async def receive_webhook(provider: str, endpoint_key: str, request: Request):
                 "endpoint_id": endpoint["id"],
                 "provider": provider_clean,
                 "event_id": event_id,
-                "headers_json": json.dumps(_safe_headers(request)),
+                "headers_json": json.dumps(
+                    {
+                        **_safe_headers(request),
+                        "x-scentra-endpoint-fallback": "payload_asset" if endpoint_fallback_used else "",
+                        "x-scentra-requested-endpoint-key": key_clean,
+                    }
+                ),
                 "payload_json": json.dumps(payload),
                 "raw_sha256": raw_sha256,
                 "correlation_id": str(getattr(request.state, "correlation_id", "") or "")[:120],
@@ -926,5 +1015,6 @@ async def receive_webhook(provider: str, endpoint_key: str, request: Request):
         "provider": provider_clean,
         "event_id": event_id,
         "duplicate": not inserted,
+        "endpoint_fallback_used": endpoint_fallback_used,
         "process_result": process_result,
     }

@@ -1900,6 +1900,7 @@ nav { display: grid; gap: 8px; width: 100%; }
 }
 .kb-source strong, .debug-row strong { display: block; color: var(--ink); }
 .kb-source span, .kb-source p, .kb-source small, .debug-row span, .debug-row small { color: var(--muted); font-size: 12px; }
+.debug-row code { grid-column: 1 / -1; overflow-wrap: anywhere; color: var(--soft); font-size: 12px; }
 .kb-source p { margin: 6px 0 0; white-space: normal; }
 .debug-grid, .queue-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; }
 .debug-grid div, .queue-grid div {

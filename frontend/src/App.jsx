@@ -404,6 +404,20 @@ const compactDateTimeLabel = (value) => {
   if (date.toDateString() === yesterday.toDateString()) return `ayer ${chatTimeLabel(value)}`;
   return `${new Intl.DateTimeFormat("es-CO", { day: "2-digit", month: "short" }).format(date)} ${chatTimeLabel(value)}`;
 };
+const fullDateTimeLabel = (value) => {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return new Intl.DateTimeFormat("es-CO", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: true,
+  }).format(date).toLowerCase().replace(/\s+/g, " ");
+};
 const datetimeLocalValue = (value) => {
   if (!value) return "";
   const date = new Date(value);
@@ -1426,7 +1440,7 @@ function App() {
     if (!accessToken) return;
     try {
       const data = await apiCall("/saas/v1/diagnostics/overview");
-      setDiagnostics(data);
+      setDiagnostics({ ...data, client_received_at: new Date().toISOString() });
       if (!silent) showStatus("Diagnostico actualizado", "ok");
     } catch (err) { showStatus(String(err.message || err), "error"); }
   };
@@ -3627,7 +3641,8 @@ function App() {
     setDiagnosticsRunning(true);
     try {
       const data = await apiCall("/saas/v1/diagnostics/run?limit=50", { method: "POST" });
-      showStatus(`Procesado: webhooks ${data?.webhooks?.processed || 0}, IA ${data?.ai?.processed || 0}, outbound ${data?.outbound?.processed || 0}.`, "ok");
+      const processedAt = data?.finished_at ? ` / ${fullDateTimeLabel(data.finished_at)}` : "";
+      showStatus(`Procesado: webhooks ${data?.webhooks?.processed || 0}, IA ${data?.ai?.processed || 0}, outbound ${data?.outbound?.processed || 0}.${processedAt}`, "ok");
       await loadDiagnostics(true);
       await loadInbox();
     } catch (err) {
@@ -5274,7 +5289,7 @@ function App() {
                       {instagramDiagnostics.ok ? <small>IG Business ID: {instagramDiagnostics.instagram_business_account_id || "-"} / subscribed_apps: {instagramDiagnostics.subscription?.status || "-"}</small> : null}
                       {instagramDiagnostics.ok ? <small>Webhook global: {instagramDiagnostics.webhook_callback_url || "-"} / Ultimo evento: {instagramDiagnostics.webhook_status?.last_seen_at || "sin eventos"}</small> : null}
                       {instagramDiagnostics.last_message?.id ? <small>Ultimo mensaje: {instagramDiagnostics.last_message.display_name || instagramDiagnostics.last_message.external_contact_id} - {instagramDiagnostics.last_message.last_message_text}</small> : null}
-                      {(instagramDiagnostics.subscription_checks || []).slice(0, 3).map((item, idx) => <small key={`${item.created_at}-${idx}`}>{compactDateTimeLabel(item.created_at)} - {item.status} {item.error || item.meta_error_message || ""}</small>)}
+                      {(instagramDiagnostics.subscription_checks || []).slice(0, 3).map((item, idx) => <small key={`${item.created_at}-${idx}`}>{fullDateTimeLabel(item.created_at)} - {item.status} {item.error || item.meta_error_message || ""}</small>)}
                     </div>
                   ) : null}
                 </article>
@@ -5416,8 +5431,8 @@ function App() {
                       {facebookMetaRequiredPermissions.length ? <small>Meta esta reclamando: {facebookMetaRequiredPermissions.join(", ")}</small> : null}
                       {facebookMissingPermissions.length ? <small>Permisos faltantes segun el token: {facebookMissingPermissions.join(", ")}</small> : <small>Permisos Facebook requeridos: completos o no reportados por este token.</small>}
                       {facebookGrantedPermissions.length ? <small>Permisos concedidos detectados: {facebookGrantedPermissions.join(", ")}</small> : null}
-                      {(facebookDiagnostics.subscription_checks || []).slice(0, 3).map((item, idx) => <small key={`${item.created_at}-${idx}`}>{compactDateTimeLabel(item.created_at)} - {item.status} {item.error || item.meta_error_message || ""}</small>)}
-                      {(facebookDiagnostics.recent_errors || []).slice(0, 3).map((item, idx) => <small key={`${item.received_at}-${idx}`}>{compactDateTimeLabel(item.received_at)} - webhook {item.status}: {item.error}</small>)}
+                      {(facebookDiagnostics.subscription_checks || []).slice(0, 3).map((item, idx) => <small key={`${item.created_at}-${idx}`}>{fullDateTimeLabel(item.created_at)} - {item.status} {item.error || item.meta_error_message || ""}</small>)}
+                      {(facebookDiagnostics.recent_errors || []).slice(0, 3).map((item, idx) => <small key={`${item.received_at}-${idx}`}>{fullDateTimeLabel(item.received_at)} - webhook {item.status}: {item.error}</small>)}
                     </div>
                   ) : null}
                 </article>
@@ -5523,6 +5538,11 @@ function App() {
               <article className="panel glass-card">
                 <div className="panel-head"><h2>Diagnostico operativo</h2><span>Meta / IA / colas</span></div>
                 <p className="soft-copy">Usa este panel cuando un cliente no recibe mensajes, no entran webhooks o la IA no responde. No muestra secretos, solo estado y ultimos errores.</p>
+                <div className="debug-result">
+                  <strong>Fecha y hora del diagnostico</strong>
+                  <span>Servidor: {diagnostics?.generated_at ? fullDateTimeLabel(diagnostics.generated_at) : "pendiente"}</span>
+                  <small>Recibido en navegador: {diagnostics?.client_received_at ? fullDateTimeLabel(diagnostics.client_received_at) : "pendiente"}</small>
+                </div>
                 <div className="panel-actions"><button type="button" className="primary" onClick={() => loadDiagnostics()} disabled={diagnosticsRunning}>Refrescar diagnostico</button><button type="button" onClick={runDiagnostics} disabled={diagnosticsRunning}>{diagnosticsRunning ? "Procesando..." : "Procesar pendientes"}</button><button type="button" onClick={checkWhatsappSubscription} disabled={diagnosticsRunning}>{diagnosticsRunning ? "Verificando..." : "Verificar WABA subscribed_apps"}</button></div>
                 <div className="debug-grid">
                   <div><span>API</span><strong>{diagnostics?.runtime?.api_ok ? "OK" : "Sin datos"}</strong><small>Worker embebido: {diagnostics?.runtime?.embedded_worker_enabled ? "ON" : "OFF"}</small></div>
@@ -5562,10 +5582,25 @@ function App() {
                       </>
                     ) : null}
                     {(diagnostics?.whatsapp_subscription_checks || []).slice(0, 3).map((item, idx) => (
-                      <small key={`${item.created_at}-${idx}`}>{compactDateTimeLabel(item.created_at)} - {item.waba_id}: {item.status} {item.auto_subscribe_attempted ? "(auto-subscribe)" : ""}</small>
+                      <small key={`${item.created_at}-${idx}`}>{fullDateTimeLabel(item.created_at)} - {item.waba_id}: {item.status} {item.auto_subscribe_attempted ? "(auto-subscribe)" : ""}</small>
                     ))}
                   </div>
                 ) : null}
+              </article>
+              <article className="panel glass-card">
+                <div className="panel-head"><h2>Endpoints webhook</h2><span>callback Meta actual</span></div>
+                <p className="soft-copy">Si Meta sigue usando una URL anterior, los POST de WhatsApp pueden entrar por compatibilidad si el WABA o Phone Number ID del payload coincide con una integracion activa.</p>
+                <div className="debug-table">
+                  {(diagnostics?.webhooks?.endpoints || []).map((endpoint, idx) => (
+                    <div className="debug-row" key={`${endpoint.provider}-${endpoint.endpoint_key}-${idx}`}>
+                      <strong>{endpoint.provider} / {endpoint.is_active ? "activo" : "pausado"}</strong>
+                      <span>{endpoint.endpoint_key || "-"}</span>
+                      <small>Ultimo evento: {endpoint.last_seen_at ? fullDateTimeLabel(endpoint.last_seen_at) : "sin eventos"}</small>
+                      {endpoint.callback_url ? <code>{endpoint.callback_url}</code> : null}
+                    </div>
+                  ))}
+                  {!diagnostics?.webhooks?.endpoints?.length ? <div className="empty">Sin endpoints webhook configurados.</div> : null}
+                </div>
               </article>
               <article className="panel glass-card">
                 <div className="panel-head"><h2>Simular mensaje entrante</h2><span>prueba pipeline interno</span></div>
@@ -5613,8 +5648,8 @@ function App() {
                 </div>
                 {diagnostics?.meta_social?.recommendation ? <div className="debug-result warn"><strong>Revision recomendada</strong><span>{diagnostics.meta_social.recommendation}</span></div> : null}
                 <div className="debug-table">
-                  {(diagnostics?.meta_social?.last_comments || []).map((item, idx) => <div className="debug-row" key={`comment-${idx}`}><strong>{item.channel} / comentario</strong><span>{item.author_name || item.author_username || "sin nombre"}</span><small>{compactDateTimeLabel(item.updated_at)} - {item.message || "-"}</small></div>)}
-                  {(diagnostics?.meta_social?.last_dms || []).map((item, idx) => <div className="debug-row" key={`dm-${idx}`}><strong>{item.channel} / DM</strong><span>{item.display_name || item.external_contact_id || "sin nombre"}</span><small>{compactDateTimeLabel(item.updated_at)} - {item.last_message_text || "-"}</small></div>)}
+                  {(diagnostics?.meta_social?.last_comments || []).map((item, idx) => <div className="debug-row" key={`comment-${idx}`}><strong>{item.channel} / comentario</strong><span>{item.author_name || item.author_username || "sin nombre"}</span><small>{fullDateTimeLabel(item.updated_at)} - {item.message || "-"}</small></div>)}
+                  {(diagnostics?.meta_social?.last_dms || []).map((item, idx) => <div className="debug-row" key={`dm-${idx}`}><strong>{item.channel} / DM</strong><span>{item.display_name || item.external_contact_id || "sin nombre"}</span><small>{fullDateTimeLabel(item.updated_at)} - {item.last_message_text || "-"}</small></div>)}
                   {!(diagnostics?.meta_social?.last_comments || []).length && !(diagnostics?.meta_social?.last_dms || []).length ? <div className="empty">Aun no hay comentarios ni DMs sociales registrados para este tenant.</div> : null}
                 </div>
               </article>
@@ -5625,7 +5660,7 @@ function App() {
                   <div><strong>IA pendiente</strong>{(diagnostics?.queues?.ai_pending || []).map((item) => <span key={item.status}>{item.status}: {item.total}</span>)}</div>
                   <div><strong>Outbound</strong>{(diagnostics?.queues?.outbound || []).map((item) => <span key={item.status}>{item.status}: {item.total}</span>)}</div>
                 </div>
-                <div className="debug-table">{(diagnostics?.queues?.outbound_errors || []).map((item, idx) => <div className="debug-row error" key={`${item.updated_at}-${idx}`}><strong>{item.status} / {item.channel}</strong><span>{item.recipient_external_id || "-"}</span><small>{item.error}</small></div>)}{!diagnostics?.queues?.outbound_errors?.length ? <div className="empty">Sin errores outbound recientes.</div> : null}</div>
+                <div className="debug-table">{(diagnostics?.queues?.outbound_errors || []).map((item, idx) => <div className="debug-row error" key={`${item.updated_at}-${idx}`}><strong>{item.status} / {item.channel}</strong><span>{item.recipient_external_id || "-"}</span><small>{fullDateTimeLabel(item.updated_at)} - {item.error}</small></div>)}{!diagnostics?.queues?.outbound_errors?.length ? <div className="empty">Sin errores outbound recientes.</div> : null}</div>
               </article>
               <article className="panel glass-card">
                 <div className="panel-head"><h2>AI Gateway</h2><button type="button" onClick={() => loadAiGateway()}>Refrescar</button></div>
@@ -5634,11 +5669,11 @@ function App() {
                   <div><strong>Kimi</strong><span>{aiGatewayProviders.find((item) => item.provider_code === "kimi") ? "registrado como proveedor oficial" : "pendiente de migracion"}</span></div>
                   <div><strong>Ultimas llamadas</strong><span>{number(aiGatewayRuns.length)} registradas</span></div>
                 </div>
-                <div className="debug-table">{aiGatewayRuns.map((item) => <div className={`debug-row ${item.status === "failed" ? "error" : ""}`} key={item.id}><strong>{item.agent_type || "agent"} / {item.provider_code}</strong><span>{item.status} · {item.model || "-"}</span><small>{compactDateTimeLabel(item.created_at)} / {number(item.total_tokens)} tokens / {number(item.latency_ms)} ms {item.fallback_used ? "/ fallback" : ""}{item.error_code ? ` / ${item.error_code}: ${item.error_message}` : ""}</small></div>)}{!aiGatewayRuns.length ? <div className="empty">Sin llamadas AI todavia. Usa Probar IA o espera una respuesta automatica para llenar esta traza.</div> : null}</div>
+                <div className="debug-table">{aiGatewayRuns.map((item) => <div className={`debug-row ${item.status === "failed" ? "error" : ""}`} key={item.id}><strong>{item.agent_type || "agent"} / {item.provider_code}</strong><span>{item.status} · {item.model || "-"}</span><small>{fullDateTimeLabel(item.created_at)} / {number(item.total_tokens)} tokens / {number(item.latency_ms)} ms {item.fallback_used ? "/ fallback" : ""}{item.error_code ? ` / ${item.error_code}: ${item.error_message}` : ""}</small></div>)}{!aiGatewayRuns.length ? <div className="empty">Sin llamadas AI todavia. Usa Probar IA o espera una respuesta automatica para llenar esta traza.</div> : null}</div>
               </article>
               <article className="panel glass-card">
                 <div className="panel-head"><h2>Ultimos webhooks</h2><span>entrada Meta</span></div>
-                <div className="debug-table">{(diagnostics?.webhooks?.last_events || []).map((item, idx) => <div className="debug-row" key={`${item.received_at}-${idx}`}><strong>{item.provider} / {item.status}</strong><span>{compactDateTimeLabel(item.received_at)}</span><small>{item.error || "sin error"}</small></div>)}{!diagnostics?.webhooks?.last_events?.length ? <div className="empty">No hay eventos webhook recientes. Si escribes por WhatsApp y esto sigue vacio, Meta no esta llegando a Scentra o el callback/token esta mal configurado.</div> : null}</div>
+                <div className="debug-table">{(diagnostics?.webhooks?.last_events || []).map((item, idx) => <div className="debug-row" key={`${item.received_at}-${idx}`}><strong>{item.provider} / {item.status}</strong><span>{fullDateTimeLabel(item.received_at)}</span><small>Endpoint: {item.endpoint_key || "-"}{item.endpoint_fallback ? " / fallback URL antigua" : ""} / Procesado: {item.processed_at ? fullDateTimeLabel(item.processed_at) : "pendiente"} / {item.error || "sin error"}</small></div>)}{!diagnostics?.webhooks?.last_events?.length ? <div className="empty">No hay eventos webhook recientes. Si escribes por WhatsApp y esto sigue vacio, Meta no esta llegando a Scentra o el callback/token esta mal configurado.</div> : null}</div>
               </article>
             </div> : null}
             {settingsTab === "users" ? <div className="settings-grid"><article className="panel glass-card"><div className="panel-head"><h2>Usuarios</h2><span>equipo</span></div><div className="table"><div className="row"><span>{me.email}</span><span>{me.role}</span><span>activo</span></div></div></article><article className="panel glass-card"><div className="panel-head"><h2>Invitar usuario</h2><span>proximo</span></div><label>Email<input placeholder="correo@empresa.com" /></label><label>Rol<select><option>agent</option><option>supervisor</option><option>admin</option></select></label><button type="button" className="primary" onClick={() => showStatus("Invitaciones de usuarios pendientes de backend.", "neutral")}>Enviar invitacion</button></article></div> : null}
