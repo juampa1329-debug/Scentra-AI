@@ -13,4 +13,4 @@ COPY backend/app_saas ./app_saas
 COPY migrations ./migrations
 
 EXPOSE 8000
-CMD ["uvicorn", "app_saas.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["bash", "-lc", "python -m app_saas.tools.migrate /app/migrations && python -m app_saas.tools.schema_check /app/migrations && uvicorn app_saas.main:app --host 0.0.0.0 --port 8000"]

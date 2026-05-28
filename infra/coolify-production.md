@@ -33,6 +33,25 @@ Si usas el Postgres incluido en el Docker Compose, coloca estas variables en el 
 
 La API ejecuta las migraciones automaticamente antes de iniciar `uvicorn`, asi evitamos un contenedor `migrate` que quede en estado `Exited` dentro de Coolify.
 
+## API con Build Pack Dockerfile
+Si publicas la API como una app Dockerfile separada en Coolify, usa exactamente:
+
+```text
+Base Directory: saas-version
+Dockerfile Location: /backend/Dockerfile
+Port Exposes: 8000
+```
+
+No uses `Base Directory: /` con `/backend/Dockerfile`: eso construye la app legacy no-SaaS (`uvicorn app.main:app`) y el contenedor no tendra `/app/app_saas` ni `/app/migrations`.
+
+El Dockerfile SaaS ya ejecuta por defecto:
+
+```bash
+python -m app_saas.tools.migrate /app/migrations && python -m app_saas.tools.schema_check /app/migrations && uvicorn app_saas.main:app --host 0.0.0.0 --port 8000
+```
+
+Ese comando es para el contenedor/Coolify, no para pegarlo en el shell del VPS. Si lo ejecutas en el host Ubuntu, puede fallar con `python: command not found` aunque la imagen SaaS sea correcta.
+
 ```env
 POSTGRES_DB=scentra_saas
 POSTGRES_USER=scentra_saas
