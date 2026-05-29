@@ -8,6 +8,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from sqlalchemy import text
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 
 from app_saas.api_credentials.router import router as api_credentials_router
 from app_saas.advisor.router import router as advisor_router
@@ -233,6 +234,19 @@ async def cors_error_guard(request: Request, call_next):
                     blocked.headers[key] = value
             return blocked
         response = await call_next(request)
+    except SQLAlchemyTimeoutError:
+        logger.exception(
+            "request_db_pool_timeout correlation_id=%s method=%s path=%s",
+            correlation_id,
+            request.method,
+            request.url.path,
+        )
+        content = {
+            "ok": False,
+            "error": "database_busy",
+            "correlation_id": correlation_id,
+        }
+        return JSONResponse(status_code=503, content=content, headers={**cors_headers, **trace_headers})
     except Exception as exc:
         logger.exception(
             "request_failed correlation_id=%s method=%s path=%s",

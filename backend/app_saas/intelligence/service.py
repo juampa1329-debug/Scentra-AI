@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 import hashlib
 import json
+import threading
 import time
 from typing import Any
 import urllib.error
@@ -32,6 +33,44 @@ VALID_MODEL_STAGES = {"development", "staging", "shadow", "production", "archive
 VALID_ROLLOUT_MODES = {"disabled", "shadow", "canary", "production"}
 VALID_PROMOTION_STATUSES = {"draft", "pending_review", "approved", "rejected", "blocked"}
 VALID_PREDICTION_TASKS = set(PREDICTION_FEATURE_MAP.keys())
+
+_RUNTIME_SCHEMA_LOCK = threading.RLock()
+_RUNTIME_SCHEMA_ADVISORY_LOCK_ID = 73110011
+_INTELLIGENCE_SCHEMA_READY = False
+_ML_TRAINING_SCHEMA_READY = False
+
+_INTELLIGENCE_CORE_TABLES = (
+    "saas_intelligence_events",
+    "saas_intelligence_feature_values",
+    "saas_intelligence_predictions",
+    "saas_intelligence_recommendations",
+    "saas_intelligence_feature_grants",
+    "saas_intelligence_model_registry",
+    "saas_intelligence_model_rollout_events",
+    "saas_intelligence_usage",
+    "saas_intelligence_prediction_feedback",
+    "saas_intelligence_model_metrics",
+)
+_INTELLIGENCE_MODEL_REGISTRY_COLUMNS = (
+    "rollout_mode",
+    "traffic_percent",
+    "min_labeled_count",
+    "min_accuracy",
+    "max_drift_score",
+    "promotion_status",
+    "approved_by_user_id",
+    "approved_at",
+)
+_ML_TRAINING_TABLES = (
+    "saas_intelligence_event_contracts",
+    "saas_intelligence_event_replay_cursors",
+    "saas_ml_auto_labels",
+    "saas_ml_feature_sets",
+    "saas_ml_feature_pipeline_runs",
+    "saas_ml_training_datasets",
+    "saas_ml_model_evaluations",
+)
+_FEATURE_VALUE_ML_COLUMNS = ("feature_set_key", "feature_version", "quality_json")
 
 EVENT_CONTRACTS: list[dict[str, Any]] = [
     {
@@ -385,7 +424,75 @@ def normalize_mode(value: str, *, enabled: bool = True) -> str:
     return mode
 
 
+def _acquire_runtime_schema_lock(conn: Connection) -> None:
+    conn.execute(text("SELECT pg_advisory_xact_lock(:lock_id)"), {"lock_id": _RUNTIME_SCHEMA_ADVISORY_LOCK_ID})
+
+
+def _runtime_tables_exist(conn: Connection, table_names: tuple[str, ...]) -> bool:
+    if not table_names:
+        return True
+    rows = conn.execute(
+        text(
+            """
+            SELECT table_name
+            FROM information_schema.tables
+            WHERE table_schema = 'public'
+              AND table_name = ANY(CAST(:table_names AS text[]))
+            """
+        ),
+        {"table_names": list(table_names)},
+    ).mappings().all()
+    return {str(row["table_name"]) for row in rows} >= set(table_names)
+
+
+def _runtime_columns_exist(conn: Connection, table_name: str, column_names: tuple[str, ...]) -> bool:
+    if not column_names:
+        return True
+    rows = conn.execute(
+        text(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = :table_name
+              AND column_name = ANY(CAST(:column_names AS text[]))
+            """
+        ),
+        {"table_name": table_name, "column_names": list(column_names)},
+    ).mappings().all()
+    return {str(row["column_name"]) for row in rows} >= set(column_names)
+
+
+def _ml_training_schema_ready(conn: Connection) -> bool:
+    return _runtime_tables_exist(conn, _ML_TRAINING_TABLES) and _runtime_columns_exist(
+        conn,
+        "saas_intelligence_feature_values",
+        _FEATURE_VALUE_ML_COLUMNS,
+    )
+
+
+def _intelligence_schema_ready(conn: Connection) -> bool:
+    return (
+        _runtime_tables_exist(conn, _INTELLIGENCE_CORE_TABLES)
+        and _runtime_columns_exist(conn, "saas_intelligence_model_registry", _INTELLIGENCE_MODEL_REGISTRY_COLUMNS)
+        and _ml_training_schema_ready(conn)
+    )
+
+
 def ensure_intelligence_tables(conn: Connection) -> None:
+    global _INTELLIGENCE_SCHEMA_READY
+    if _INTELLIGENCE_SCHEMA_READY:
+        return
+
+    with _RUNTIME_SCHEMA_LOCK:
+        if _INTELLIGENCE_SCHEMA_READY:
+            return
+        _acquire_runtime_schema_lock(conn)
+        if _intelligence_schema_ready(conn):
+            ensure_ml_training_tables(conn)
+            _INTELLIGENCE_SCHEMA_READY = True
+            return
+
     conn.execute(
         text(
             """
@@ -631,9 +738,24 @@ def ensure_intelligence_tables(conn: Connection) -> None:
     conn.execute(text("CREATE INDEX IF NOT EXISTS idx_saas_intelligence_model_metrics_tenant_status ON saas_intelligence_model_metrics (tenant_id, status, computed_at DESC)"))
     conn.execute(text("CREATE INDEX IF NOT EXISTS idx_saas_intelligence_model_metrics_model ON saas_intelligence_model_metrics (model_key, prediction_type, computed_at DESC)"))
     ensure_ml_training_tables(conn)
+    _INTELLIGENCE_SCHEMA_READY = False
 
 
 def ensure_ml_training_tables(conn: Connection) -> None:
+    global _ML_TRAINING_SCHEMA_READY
+    if _ML_TRAINING_SCHEMA_READY:
+        return
+
+    with _RUNTIME_SCHEMA_LOCK:
+        if _ML_TRAINING_SCHEMA_READY:
+            return
+        _acquire_runtime_schema_lock(conn)
+        if _ml_training_schema_ready(conn):
+            _seed_event_contracts(conn)
+            _seed_feature_sets(conn)
+            _ML_TRAINING_SCHEMA_READY = True
+            return
+
     conn.execute(
         text(
             """
@@ -813,6 +935,7 @@ def ensure_ml_training_tables(conn: Connection) -> None:
     conn.execute(text("CREATE INDEX IF NOT EXISTS idx_saas_ml_model_evaluations_tenant ON saas_ml_model_evaluations (tenant_id, prediction_type, created_at DESC) WHERE tenant_id IS NOT NULL"))
     _seed_event_contracts(conn)
     _seed_feature_sets(conn)
+    _ML_TRAINING_SCHEMA_READY = False
 
 
 def _seed_event_contracts(conn: Connection) -> None:

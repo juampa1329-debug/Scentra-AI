@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import secrets
 from urllib.parse import quote
 
@@ -165,26 +166,26 @@ def register(payload: RegisterIn, request: Request):
     if not tenant_slug:
         raise HTTPException(status_code=400, detail="valid_tenant_slug_required")
 
-    auth_error: HTTPException | None = None
     rate_key = rate_limit_key(action="auth.register", principal=email or tenant_slug, request=request)
+    with db_session() as conn:
+        enforce_auth_rate_limits(
+            conn,
+            event_type="auth.register",
+            rate_key=rate_key,
+            combined_limit=5,
+            principal_limit=5,
+            ip_limit=20,
+            window_seconds=3600,
+            request=request,
+            principal=email,
+            count_statuses=("attempt", "failed", "blocked"),
+        )
+
     try:
-        with db_session() as conn:
-            enforce_auth_rate_limits(
-                conn,
-                event_type="auth.register",
-                rate_key=rate_key,
-                combined_limit=5,
-                principal_limit=5,
-                ip_limit=20,
-                window_seconds=3600,
-                request=request,
-                principal=email,
-                count_statuses=("attempt", "failed", "blocked"),
-            )
-            try:
-                verify_captcha_or_raise(token=payload.captcha_token, provider=payload.captcha_provider, request=request)
-            except HTTPException as exc:
-                auth_error = exc
+        verify_captcha_or_raise(token=payload.captcha_token, provider=payload.captcha_provider, request=request)
+    except HTTPException as exc:
+        with contextlib.suppress(Exception):
+            with db_session() as conn:
                 record_security_event(
                     conn,
                     event_type="auth.register",
@@ -195,78 +196,82 @@ def register(payload: RegisterIn, request: Request):
                     reason="captcha_rejected",
                     details={"detail": exc.detail},
                 )
-            if not auth_error:
+        raise exc
+
+    password_hash = hash_password(payload.password)
+    try:
+        with db_session() as conn:
+            record_security_event(
+                conn,
+                event_type="auth.register",
+                status="attempt",
+                request=request,
+                principal=email,
+                rate_key=rate_key,
+                details={"tenant_slug": tenant_slug},
+            )
+            user = conn.execute(
+                text(
+                    """
+                    INSERT INTO saas_users (email, full_name, password_hash, password_algo, password_changed_at)
+                    VALUES (:email, :full_name, :password_hash, 'argon2id', NOW())
+                    RETURNING id::text, email
+                    """
+                ),
+                {
+                    "email": email,
+                    "full_name": str(payload.full_name or "").strip(),
+                    "password_hash": password_hash,
+                },
+            ).mappings().first()
+            trial_plan_code = configured_trial_plan_code(conn)
+            tenant = conn.execute(
+                text(
+                    """
+                    INSERT INTO saas_tenants (slug, name, status, plan_code, industry_code)
+                    VALUES (:slug, :name, 'trial', :plan_code, :industry_code)
+                    RETURNING id::text, slug, name
+                    """
+                ),
+                {"slug": tenant_slug, "name": str(payload.tenant_name).strip(), "plan_code": trial_plan_code, "industry_code": industry_code},
+            ).mappings().first()
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO saas_memberships (tenant_id, user_id, role)
+                    VALUES (CAST(:tenant_id AS uuid), CAST(:user_id AS uuid), 'owner')
+                    """
+                ),
+                {"tenant_id": tenant["id"], "user_id": user["id"]},
+            )
+            create_trial_subscription(conn, tenant["id"], trial_plan_code)
+            try:
+                with conn.begin_nested():
+                    apply_industry_pack(conn, tenant["id"], user["id"], industry_code, create_agents=False)
+            except Exception as exc:
                 record_security_event(
                     conn,
                     event_type="auth.register",
-                    status="attempt",
-                    request=request,
-                    principal=email,
-                    rate_key=rate_key,
-                    details={"tenant_slug": tenant_slug},
-                )
-                user = conn.execute(
-                    text(
-                        """
-                        INSERT INTO saas_users (email, full_name, password_hash, password_algo, password_changed_at)
-                        VALUES (:email, :full_name, :password_hash, 'argon2id', NOW())
-                        RETURNING id::text, email
-                        """
-                    ),
-                    {
-                        "email": email,
-                        "full_name": str(payload.full_name or "").strip(),
-                        "password_hash": hash_password(payload.password),
-                    },
-                ).mappings().first()
-                trial_plan_code = configured_trial_plan_code(conn)
-                tenant = conn.execute(
-                    text(
-                        """
-                        INSERT INTO saas_tenants (slug, name, status, plan_code, industry_code)
-                        VALUES (:slug, :name, 'trial', :plan_code, :industry_code)
-                        RETURNING id::text, slug, name
-                        """
-                    ),
-                    {"slug": tenant_slug, "name": str(payload.tenant_name).strip(), "plan_code": trial_plan_code, "industry_code": industry_code},
-                ).mappings().first()
-                conn.execute(
-                    text(
-                        """
-                        INSERT INTO saas_memberships (tenant_id, user_id, role)
-                        VALUES (CAST(:tenant_id AS uuid), CAST(:user_id AS uuid), 'owner')
-                        """
-                    ),
-                    {"tenant_id": tenant["id"], "user_id": user["id"]},
-                )
-                create_trial_subscription(conn, tenant["id"], trial_plan_code)
-                try:
-                    with conn.begin_nested():
-                        apply_industry_pack(conn, tenant["id"], user["id"], industry_code, create_agents=False)
-                except Exception as exc:
-                    record_security_event(
-                        conn,
-                        event_type="auth.register",
-                        status="warning",
-                        request=request,
-                        principal=email,
-                        rate_key=rate_key,
-                        tenant_id=tenant["id"],
-                        user_id=user["id"],
-                        reason="vertical_pack_apply_failed",
-                        details={"industry_code": industry_code, "error": f"{type(exc).__name__}: {str(exc)[:300]}"},
-                    )
-                tenants = _tenant_rows(conn, user["id"])
-                record_security_event(
-                    conn,
-                    event_type="auth.register",
-                    status="success",
+                    status="warning",
                     request=request,
                     principal=email,
                     rate_key=rate_key,
                     tenant_id=tenant["id"],
                     user_id=user["id"],
+                    reason="vertical_pack_apply_failed",
+                    details={"industry_code": industry_code, "error": f"{type(exc).__name__}: {str(exc)[:300]}"},
                 )
+            tenants = _tenant_rows(conn, user["id"])
+            record_security_event(
+                conn,
+                event_type="auth.register",
+                status="success",
+                request=request,
+                principal=email,
+                rate_key=rate_key,
+                tenant_id=tenant["id"],
+                user_id=user["id"],
+            )
     except IntegrityError:
         with db_session() as conn:
             record_security_event(
@@ -280,9 +285,6 @@ def register(payload: RegisterIn, request: Request):
                 details={"tenant_slug": tenant_slug},
             )
         raise HTTPException(status_code=409, detail="email_or_tenant_already_exists")
-
-    if auth_error:
-        raise auth_error
 
     membership = _select_membership(tenants, str(tenant["id"]))
     return _token_response(

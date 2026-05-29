@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -12,64 +13,117 @@ from sqlalchemy.engine import Connection
 from app_saas.config import settings
 from app_saas.shared.request_meta import client_ip, user_agent
 
+_SECURITY_EVENT_COLUMNS = (
+    "id",
+    "tenant_id",
+    "user_id",
+    "event_type",
+    "rate_limit_key",
+    "principal",
+    "ip_address",
+    "user_agent",
+    "status",
+    "reason",
+    "details_json",
+    "created_at",
+)
+_security_event_schema_ready = False
+_security_event_schema_lock = threading.RLock()
+
 
 def _json(value: Any) -> str:
     return json.dumps(value if value is not None else {}, ensure_ascii=False, default=str)
 
 
+def _security_event_schema_exists(conn: Connection) -> bool:
+    count = int(
+        conn.execute(
+            text(
+                """
+                SELECT COUNT(*)::int
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = 'saas_security_events'
+                  AND column_name = ANY(:columns)
+                """
+            ),
+            {"columns": list(_SECURITY_EVENT_COLUMNS)},
+        ).scalar()
+        or 0
+    )
+    return count == len(_SECURITY_EVENT_COLUMNS)
+
+
 def ensure_security_event_table(conn: Connection) -> None:
-    conn.execute(
-        text(
-            """
-            CREATE TABLE IF NOT EXISTS saas_security_events (
-                id uuid PRIMARY KEY,
-                tenant_id uuid NULL,
-                user_id uuid NULL,
-                event_type text NOT NULL,
-                rate_limit_key text NOT NULL DEFAULT '',
-                principal text NOT NULL DEFAULT '',
-                ip_address text NOT NULL DEFAULT '',
-                user_agent text NOT NULL DEFAULT '',
-                status text NOT NULL DEFAULT 'attempt',
-                reason text NOT NULL DEFAULT '',
-                details_json jsonb NOT NULL DEFAULT '{}'::jsonb,
-                created_at timestamptz NOT NULL DEFAULT NOW()
+    global _security_event_schema_ready
+    if _security_event_schema_ready:
+        return
+    if _security_event_schema_exists(conn):
+        _security_event_schema_ready = True
+        return
+    with _security_event_schema_lock:
+        if _security_event_schema_ready:
+            return
+        if _security_event_schema_exists(conn):
+            _security_event_schema_ready = True
+            return
+        conn.execute(text("SELECT pg_advisory_xact_lock(hashtext('scentra.security_events.schema'))"))
+        if _security_event_schema_exists(conn):
+            _security_event_schema_ready = True
+            return
+        conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS saas_security_events (
+                    id uuid PRIMARY KEY,
+                    tenant_id uuid NULL,
+                    user_id uuid NULL,
+                    event_type text NOT NULL,
+                    rate_limit_key text NOT NULL DEFAULT '',
+                    principal text NOT NULL DEFAULT '',
+                    ip_address text NOT NULL DEFAULT '',
+                    user_agent text NOT NULL DEFAULT '',
+                    status text NOT NULL DEFAULT 'attempt',
+                    reason text NOT NULL DEFAULT '',
+                    details_json jsonb NOT NULL DEFAULT '{}'::jsonb,
+                    created_at timestamptz NOT NULL DEFAULT NOW()
+                )
+                """
             )
-            """
         )
-    )
-    conn.execute(
-        text(
-            """
-            CREATE INDEX IF NOT EXISTS idx_saas_security_events_rate
-            ON saas_security_events (event_type, rate_limit_key, created_at DESC)
-            """
+        conn.execute(
+            text(
+                """
+                CREATE INDEX IF NOT EXISTS idx_saas_security_events_rate
+                ON saas_security_events (event_type, rate_limit_key, created_at DESC)
+                """
+            )
         )
-    )
-    conn.execute(
-        text(
-            """
-            CREATE INDEX IF NOT EXISTS idx_saas_security_events_created
-            ON saas_security_events (created_at DESC)
-            """
+        conn.execute(
+            text(
+                """
+                CREATE INDEX IF NOT EXISTS idx_saas_security_events_created
+                ON saas_security_events (created_at DESC)
+                """
+            )
         )
-    )
-    conn.execute(
-        text(
-            """
-            CREATE INDEX IF NOT EXISTS idx_saas_security_events_principal_created
-            ON saas_security_events (event_type, principal, created_at DESC)
-            """
+        conn.execute(
+            text(
+                """
+                CREATE INDEX IF NOT EXISTS idx_saas_security_events_principal_created
+                ON saas_security_events (event_type, principal, created_at DESC)
+                """
+            )
         )
-    )
-    conn.execute(
-        text(
-            """
-            CREATE INDEX IF NOT EXISTS idx_saas_security_events_ip_created
-            ON saas_security_events (event_type, ip_address, created_at DESC)
-            """
+        conn.execute(
+            text(
+                """
+                CREATE INDEX IF NOT EXISTS idx_saas_security_events_ip_created
+                ON saas_security_events (event_type, ip_address, created_at DESC)
+                """
+            )
         )
-    )
+        _security_event_schema_ready = True
 
 
 def rate_limit_key(*, action: str, principal: str = "", request: Request | None = None) -> str:
