@@ -44,9 +44,9 @@ Responde siempre en el idioma del cliente, normalmente espanol colombiano, con f
 Evita respuestas largas de un solo bloque: responde como WhatsApp humano, con 1 a 3 ideas breves y maximo una pregunta directa."""
 
 DEFAULT_AI_MAX_TOKENS = 700
-DEFAULT_REPLY_CHUNK_CHARS = 220
-DEFAULT_REPLY_INITIAL_DELAY_MS = 3200
-DEFAULT_REPLY_CHUNK_DELAY_MS = 4200
+DEFAULT_REPLY_CHUNK_CHARS = 180
+DEFAULT_REPLY_INITIAL_DELAY_MS = 2600
+DEFAULT_REPLY_CHUNK_DELAY_MS = 9000
 DEFAULT_RECENT_MESSAGE_LIMIT = 16
 DEFAULT_MESSAGE_CONTEXT_CHARS = 1200
 
@@ -1293,7 +1293,15 @@ def _maybe_send_typing_indicator(
         return {"ok": False, "error": str(exc)[:300]}
 
 
-def _queue_ai_reply(conn: Connection, tenant_id: str, conversation: dict[str, Any], body_text: str, ai_result: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
+def _queue_ai_reply(
+    conn: Connection,
+    tenant_id: str,
+    conversation: dict[str, Any],
+    body_text: str,
+    ai_result: dict[str, Any],
+    settings: dict[str, Any],
+    latest_inbound: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     body = _clean(body_text, 4000)
     if not body:
         return {"ok": False, "skipped": "empty_ai_reply"}
@@ -1306,9 +1314,19 @@ def _queue_ai_reply(conn: Connection, tenant_id: str, conversation: dict[str, An
     chunks = _split_reply_chunks(body, chunk_chars)
     if not chunks:
         return {"ok": False, "skipped": "empty_ai_reply"}
+    if len(chunks) > 1:
+        chunk_delay_ms = max(chunk_delay_ms, _metadata_int(metadata, "reply_min_chunk_delay_ms", DEFAULT_REPLY_CHUNK_DELAY_MS, 0, 240000))
     ensure_monthly_message_quota(conn, tenant_id, requested=len(chunks))
     channel = _clean(conversation.get("channel"), 40) or "whatsapp"
     conversation_id = str(conversation["id"])
+    typing_message_id = _clean((latest_inbound or {}).get("external_message_id"), 240)
+    can_type_between_chunks = (
+        metadata.get("typing_indicator_enabled", True) is not False
+        and channel == "whatsapp"
+        and bool(typing_message_id)
+        and not typing_message_id.startswith("local:")
+        and len(chunks) > 1
+    )
     queued: list[dict[str, Any]] = []
     for index, chunk in enumerate(chunks):
         local_external_id = f"local:ai:{uuid4().hex}"
@@ -1324,6 +1342,8 @@ def _queue_ai_reply(conn: Connection, tenant_id: str, conversation: dict[str, An
             "reply_chunk_index": index + 1,
             "reply_chunk_total": len(chunks),
             "reply_delay_seconds": delay_seconds,
+            "typing_indicator_before_send": can_type_between_chunks,
+            "typing_message_id": typing_message_id if can_type_between_chunks else "",
         }
         message = conn.execute(
             text(
@@ -1472,7 +1492,7 @@ def process_conversation_ai(conn: Connection, tenant_id: str, conversation_id: s
         )
         tokens = int(result.get("estimated_tokens") or estimate_tokens(generated.get("raw") or ""))
         _record_ai_usage(conn, tenant_id, tokens)
-        outbound = _queue_ai_reply(conn, tenant_id, conversation, _clean(result.get("reply"), 4000), result, settings)
+        outbound = _queue_ai_reply(conn, tenant_id, conversation, _clean(result.get("reply"), 4000), result, settings, latest_inbound=target_inbound)
     except HTTPException as exc:
         return {"ok": False, "skipped": "ai_postprocess_blocked", "detail": exc.detail}
     except Exception as exc:

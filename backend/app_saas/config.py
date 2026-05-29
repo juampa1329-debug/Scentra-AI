@@ -38,8 +38,12 @@ class Settings(BaseSettings):
     saas_trial_days: int = 30
     saas_trial_plan_code: str = "starter"
     saas_embedded_worker_enabled: bool = True
-    saas_worker_idle_sec: int = 5
-    saas_worker_batch_size: int = 25
+    saas_worker_idle_sec: int = 10
+    saas_worker_batch_size: int = 10
+    saas_db_pool_size: int = 10
+    saas_db_max_overflow: int = 20
+    saas_db_pool_timeout_sec: int = 20
+    saas_db_pool_recycle_sec: int = 1800
     saas_captcha_enabled: bool = False
     saas_captcha_provider: str = "turnstile"
     saas_rate_limit_enabled: bool = True

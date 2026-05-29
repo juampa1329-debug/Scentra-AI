@@ -1222,16 +1222,18 @@ nav { display: grid; gap: 8px; width: 100%; }
 .message.product { padding: 8px; max-width: min(380px, 94%); border-radius: 22px; }
 .product-message-card {
   width: min(340px, 100%);
+  display: grid;
+  grid-template-rows: auto auto;
   overflow: hidden;
   border-radius: 20px;
   border: 1px solid rgba(94,234,212,0.24);
-  background: linear-gradient(145deg, rgba(10, 37, 42, 0.94), rgba(20, 70, 68, 0.78));
+  background: rgba(6, 38, 39, 0.98);
   box-shadow: 0 18px 44px rgba(0,0,0,0.22);
 }
-.product-card-media { display: grid; place-items: center; height: 172px; padding: 8px; background: rgba(0,0,0,0.22); }
-.product-card-media img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.product-card-media { position: relative; z-index: 1; display: grid; place-items: center; height: 160px; padding: 8px; overflow: hidden; background: rgba(2,8,12,0.72); }
+.product-card-media img { position: static; width: auto; height: auto; max-width: 100%; max-height: 100%; object-fit: contain; display: block; }
 .product-card-media span { place-self: center; color: var(--muted); font-size: 12px; font-weight: 900; text-transform: uppercase; }
-.product-card-body { display: grid; gap: 8px; padding: 13px; }
+.product-card-body { position: relative; z-index: 2; display: grid; gap: 8px; padding: 13px; border-top: 1px solid rgba(94,234,212,0.14); background: #052d2c; }
 .product-card-body strong { color: var(--ink); font-size: 15px; line-height: 1.25; }
 .product-card-body b { color: var(--ok); font-size: 18px; }
 .product-card-body p { margin: 0; color: var(--muted); font-size: 12px; }
@@ -1256,8 +1258,9 @@ nav { display: grid; gap: 8px; width: 100%; }
 .product-message-note { color: var(--soft); }
 .product-draft-preview { grid-template-columns: minmax(0, 360px) auto; }
 .product-message-card.compact { width: min(320px, 100%); }
-.product-message-card.compact .product-card-media { height: 118px; }
+.product-message-card.compact .product-card-media { height: 112px; }
 .product-message-card.compact .product-card-body { padding: 10px; }
+.media-unavailable { max-width: 300px; padding: 9px 10px; border-radius: 12px; border: 1px solid rgba(248,113,113,0.28); background: rgba(127,29,29,0.16); color: #fecaca; font-size: 12px; }
 .wa-checks { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-width: 18px; min-height: 14px; color: var(--muted); font-size: 13px; font-weight: 1000; letter-spacing: 0; }
 .wa-check-mark { letter-spacing: -0.16em; }
 .wa-status-text { font-size: 10px; font-weight: 900; letter-spacing: 0; }

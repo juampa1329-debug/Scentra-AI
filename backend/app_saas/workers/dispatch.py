@@ -33,6 +33,13 @@ class DispatchTransientError(Exception):
     pass
 
 
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _period_yyyymm() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m")
 
@@ -126,6 +133,89 @@ def _job_payload(job: dict[str, Any]) -> dict[str, Any]:
         except Exception:
             return {}
     return {}
+
+
+def _ensure_local_message_for_outbound(conn, job: dict[str, Any]) -> dict[str, Any]:
+    if str(job.get("message_id") or "").strip():
+        return job
+    conversation_id = str(job.get("conversation_id") or "").strip()
+    tenant_id = str(job.get("tenant_id") or "").strip()
+    body = str(job.get("body_text") or "").strip()
+    if not tenant_id or not conversation_id or not body:
+        return job
+    payload_json = _job_payload(job)
+    raw_type = str(
+        payload_json.get("display_message_type")
+        or payload_json.get("message_type")
+        or payload_json.get("type")
+        or "text"
+    ).strip().lower()
+    msg_type = raw_type if raw_type in {"image", "video", "audio", "document", "file", "product"} else "text"
+    local_external_id = str(payload_json.get("local_external_message_id") or "").strip()
+    if not local_external_id:
+        local_external_id = f"local:outbound:{job.get('id') or uuid4().hex}"
+        payload_json = {**payload_json, "local_external_message_id": local_external_id}
+    message = conn.execute(
+        text(
+            """
+            INSERT INTO saas_messages (
+                tenant_id, conversation_id, channel, external_message_id, direction, msg_type, text, payload_json
+            )
+            VALUES (
+                CAST(:tenant_id AS uuid), CAST(:conversation_id AS uuid), :channel, :external_message_id,
+                'out', :msg_type, :body_text, CAST(:payload_json AS jsonb)
+            )
+            ON CONFLICT (tenant_id, channel, external_message_id)
+            DO UPDATE SET payload_json = saas_messages.payload_json || EXCLUDED.payload_json
+            RETURNING id::text
+            """
+        ),
+        {
+            "tenant_id": tenant_id,
+            "conversation_id": conversation_id,
+            "channel": str(job.get("channel") or "whatsapp"),
+            "external_message_id": local_external_id,
+            "msg_type": msg_type,
+            "body_text": body,
+            "payload_json": json.dumps({"source": "outbound_recovery", "dispatch_status": "queued", **payload_json}),
+        },
+    ).mappings().first()
+    if not message:
+        return job
+    conn.execute(
+        text(
+            """
+            UPDATE saas_outbound_messages
+            SET message_id = CAST(:message_id AS uuid),
+                payload_json = payload_json || CAST(:payload_json AS jsonb),
+                updated_at = NOW()
+            WHERE id = CAST(:id AS uuid)
+            """
+        ),
+        {"id": job["id"], "message_id": message["id"], "payload_json": json.dumps({"local_external_message_id": local_external_id})},
+    )
+    conn.execute(
+        text(
+            """
+            INSERT INTO saas_message_status_events (
+                tenant_id, conversation_id, message_id, provider_message_id, status, payload_json
+            )
+            VALUES (
+                CAST(:tenant_id AS uuid), CAST(:conversation_id AS uuid), CAST(:message_id AS uuid),
+                :provider_message_id, 'queued', CAST(:payload_json AS jsonb)
+            )
+            ON CONFLICT DO NOTHING
+            """
+        ),
+        {
+            "tenant_id": tenant_id,
+            "conversation_id": conversation_id,
+            "message_id": message["id"],
+            "provider_message_id": local_external_id,
+            "payload_json": json.dumps({"source": "outbound_recovery", "outbound_id": str(job.get("id") or "")}),
+        },
+    )
+    return {**job, "message_id": message["id"], "payload_json": payload_json}
 
 
 def _mark_outbound(
@@ -616,6 +706,38 @@ def _send_meta_cloud_text(integration: dict[str, Any], job: dict[str, Any]) -> d
     }
 
 
+def _send_meta_cloud_typing_indicator(integration: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
+    payload_json = _job_payload(job)
+    if payload_json.get("typing_indicator_before_send") is not True:
+        return {"ok": False, "skipped": "typing_indicator_not_requested"}
+    message_id = str(payload_json.get("typing_message_id") or "").strip()
+    if not message_id or message_id.startswith("local:"):
+        return {"ok": False, "skipped": "typing_message_id_missing"}
+    config = _integration_config(integration)
+    phone_number_id = str(config.get("phone_number_id") or "").strip()
+    access_token = _secret_from_env(config, integration)
+    if not phone_number_id or not access_token:
+        return {"ok": False, "skipped": "meta_credentials_missing"}
+    base_url = str(config.get("graph_base_url") or "https://graph.facebook.com").rstrip("/")
+    version = _meta_graph_version(config)
+    timeout_sec = int(config.get("timeout_sec") or os.getenv("SCENTRA_META_TIMEOUT_SEC") or "15")
+    try:
+        response = _post_json(
+            f"{base_url}/{version}/{phone_number_id}/messages",
+            {
+                "messaging_product": "whatsapp",
+                "status": "read",
+                "message_id": message_id,
+                "typing_indicator": {"type": "text"},
+            },
+            access_token,
+            timeout_sec,
+        )
+        return {"ok": True, "response": response}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)[:300]}
+
+
 def _send_instagram_graph_text(integration: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
     config = _integration_config(integration)
     page_access_token = decrypt_secret(str(config.get("page_access_token") or "").strip())
@@ -840,6 +962,7 @@ def _dispatch_one(conn, job: dict[str, Any]) -> str:
     if not bool(entitlements.get("features", {}).get(feature_key, False)):
         return _block_dispatch(conn, job, f"feature_not_enabled:{feature_key}")
 
+    job = _ensure_local_message_for_outbound(conn, job)
     integration = _load_connected_integration(conn, str(job["tenant_id"]), str(job["channel"]))
     if not integration:
         error = "integration_not_connected"
@@ -898,6 +1021,7 @@ def _dispatch_one(conn, job: dict[str, Any]) -> str:
                     return _block_dispatch(conn, job, reason)
                 result = _send_meta_cloud_template(integration, job)
             else:
+                _send_meta_cloud_typing_indicator(integration, job)
                 result = _send_meta_cloud_text(integration, job)
         except DispatchPermanentError as exc:
             error = str(exc)
@@ -974,8 +1098,31 @@ def process_due_outbound_messages(limit: int = 25, tenant_id: str | None = None)
         ).mappings().all()
         stats["picked"] = len(jobs)
 
+        ai_chunk_conversations: set[str] = set()
         for row in jobs:
             job = dict(row)
+            payload_json = _job_payload(job)
+            is_ai_chunk = (
+                str(payload_json.get("source") or "").strip().lower() == "ai_agent"
+                and _safe_int(payload_json.get("reply_chunk_total")) > 1
+            )
+            conversation_key = f"{job.get('tenant_id')}:{job.get('conversation_id')}"
+            if is_ai_chunk and conversation_key in ai_chunk_conversations:
+                conn.execute(
+                    text(
+                        """
+                        UPDATE saas_outbound_messages
+                        SET next_attempt_at = NOW() + INTERVAL '8 seconds',
+                            updated_at = NOW()
+                        WHERE id = CAST(:id AS uuid)
+                        """
+                    ),
+                    {"id": job["id"]},
+                )
+                stats["deferred"] = int(stats.get("deferred") or 0) + 1
+                continue
+            if is_ai_chunk:
+                ai_chunk_conversations.add(conversation_key)
             conn.execute(
                 text(
                     """

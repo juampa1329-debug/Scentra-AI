@@ -14,7 +14,14 @@ def get_engine() -> Engine:
     if _engine is None:
         if not settings.database_url:
             raise RuntimeError("DATABASE_URL is required for SaaS backend")
-        _engine = create_engine(settings.database_url, pool_pre_ping=True)
+        _engine = create_engine(
+            settings.database_url,
+            pool_pre_ping=True,
+            pool_size=max(1, int(settings.saas_db_pool_size or 10)),
+            max_overflow=max(0, int(settings.saas_db_max_overflow or 20)),
+            pool_timeout=max(5, int(settings.saas_db_pool_timeout_sec or 20)),
+            pool_recycle=max(60, int(settings.saas_db_pool_recycle_sec or 1800)),
+        )
     return _engine
 
 

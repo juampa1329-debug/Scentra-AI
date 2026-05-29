@@ -114,9 +114,9 @@ const defaultAiConfig = () => ({
   humanReplyStyle: true,
   humanReplySplitting: true,
   replyMaxOutputTokens: "700",
-  chunks: "220",
-  delayBetween: "4200",
-  typingDelay: "3200",
+  chunks: "180",
+  delayBetween: "9000",
+  typingDelay: "2600",
   cooldown: "6",
   recentMessageLimit: "16",
   messageContextChars: "1200",
@@ -936,6 +936,7 @@ function App() {
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [recordingLevels, setRecordingLevels] = useState(EMPTY_WAVEFORM);
   const [composerSending, setComposerSending] = useState(false);
+  const [failedMediaIds, setFailedMediaIds] = useState({});
   const [status, setStatus] = useState("");
   const [statusTone, setStatusTone] = useState("neutral");
   const [milestoneNotice, setMilestoneNotice] = useState(null);
@@ -1663,23 +1664,28 @@ function App() {
   const loadMessages = async (conversation, options = {}) => {
     if (!conversation?.id) return;
     try {
-      const [data, memoryData, tasksData, statusData, dedupeData, searchData, multimodalData] = await Promise.all([
+      const lightweight = Boolean(options.lightweight);
+      const [data, statusData] = await Promise.all([
         apiCall(`/saas/v1/conversations/${encodeURIComponent(conversation.id)}/messages`),
-        apiCall(`/saas/v1/ai/conversations/${encodeURIComponent(conversation.id)}/memory`).catch(() => null),
-        apiCall(`/saas/v1/conversations/${encodeURIComponent(conversation.id)}/tasks`).catch(() => ({ tasks: [] })),
-        apiCall(`/saas/v1/conversations/${encodeURIComponent(conversation.id)}/status-events?limit=40`).catch(() => ({ events: [] })),
-        apiCall(`/saas/v1/customers/${encodeURIComponent(conversation.id)}/dedupe-candidates?limit=6`).catch(() => ({ candidates: [] })),
-        apiCall(`/saas/v1/media/search/runs?conversation_id=${encodeURIComponent(conversation.id)}&limit=8`).catch(() => ({ runs: [] })),
-        apiCall(`/saas/v1/agents/multimodal-memory/events?conversation_id=${encodeURIComponent(conversation.id)}&limit=24`).catch(() => ({ events: [] })),
+        apiCall(`/saas/v1/conversations/${encodeURIComponent(conversation.id)}/status-events?limit=24`).catch(() => ({ events: [] })),
       ]);
       const selected = { ...conversation, unread_count: 0 };
       setSelectedConversation(selected); setMessages(data?.messages || []);
-      setConversationMemory(memoryData || null);
-      setConversationTasks(tasksData?.tasks || []);
       setMessageStatusEvents(statusData?.events || []);
-      setDedupeCandidates(dedupeData?.candidates || []);
-      setWebSearchRuns(searchData?.runs || []);
-      setMultimodalMemoryEvents(multimodalData?.events || []);
+      if (!lightweight) {
+        const [memoryData, tasksData, dedupeData, searchData, multimodalData] = await Promise.all([
+          apiCall(`/saas/v1/ai/conversations/${encodeURIComponent(conversation.id)}/memory`).catch(() => null),
+          apiCall(`/saas/v1/conversations/${encodeURIComponent(conversation.id)}/tasks`).catch(() => ({ tasks: [] })),
+          apiCall(`/saas/v1/customers/${encodeURIComponent(conversation.id)}/dedupe-candidates?limit=6`).catch(() => ({ candidates: [] })),
+          apiCall(`/saas/v1/media/search/runs?conversation_id=${encodeURIComponent(conversation.id)}&limit=8`).catch(() => ({ runs: [] })),
+          apiCall(`/saas/v1/agents/multimodal-memory/events?conversation_id=${encodeURIComponent(conversation.id)}&limit=24`).catch(() => ({ events: [] })),
+        ]);
+        setConversationMemory(memoryData || null);
+        setConversationTasks(tasksData?.tasks || []);
+        setDedupeCandidates(dedupeData?.candidates || []);
+        setWebSearchRuns(searchData?.runs || []);
+        setMultimodalMemoryEvents(multimodalData?.events || []);
+      }
       if (!options.preserveComposer) { setReplyText(""); clearComposerAttachment(); setCatalogDraft(null); setEmojiOpen(false); setAttachMenuOpen(false); }
       if (Number(conversation.unread_count || 0) > 0) markConversationRead(conversation.id, { silent: true });
     } catch (err) { showStatus(String(err.message || err), "error"); }
@@ -1752,10 +1758,13 @@ function App() {
     const requestSeq = inboxRequestSeqRef.current + 1;
     inboxRequestSeqRef.current = requestSeq;
     const run = (async () => {
+      const lightweight = Boolean(options.lightweight);
+      const shouldLoadComments = inboxMode === "comments" || !lightweight;
+      const shouldLoadAgents = !lightweight || !inboxAiAgents.length;
       const [data, commentsData, agentsData] = await Promise.all([
         apiCall(buildInboxConversationPath()),
-        apiCall(buildSocialCommentsPath()).catch(() => ({ comments: [] })),
-        apiCall("/saas/v1/agents").catch(() => ({ agents: [] })),
+        shouldLoadComments ? apiCall(buildSocialCommentsPath()).catch(() => ({ comments: socialComments })) : Promise.resolve({ comments: socialComments }),
+        shouldLoadAgents ? apiCall("/saas/v1/agents").catch(() => ({ agents: inboxAiAgents })) : Promise.resolve({ agents: inboxAiAgents }),
       ]);
       if (requestSeq !== inboxRequestSeqRef.current) return;
       const items = data?.conversations || [];
@@ -1777,10 +1786,10 @@ function App() {
       lastOpenCommentsRef.current = nextOpenComments;
       setConversations(items);
       setSocialComments(comments);
-      if (items.length && !selectedConversation) await loadMessages(items[0]);
+      if (items.length && !selectedConversation) await loadMessages(items[0], { lightweight });
       if (items.length && selectedConversation?.id) {
         const updatedSelected = items.find((item) => item.id === selectedConversation.id);
-        if (updatedSelected) await loadMessages({ ...selectedConversation, ...updatedSelected }, { preserveComposer: true });
+        if (updatedSelected) await loadMessages({ ...selectedConversation, ...updatedSelected }, { preserveComposer: true, lightweight });
       }
       if (!items.length) { setSelectedConversation(null); setConversationMemory(null); setConversationTasks([]); setMessageStatusEvents([]); setWebSearchRuns([]); setMultimodalMemoryEvents([]); setMessages([]); setReplyText(""); clearComposerAttachment(); setCatalogDraft(null); }
       setInboxLastSyncAt(new Date().toISOString());
@@ -1861,18 +1870,18 @@ function App() {
     const schedule = (delay) => {
       timer = window.setTimeout(async () => {
         if (stopped) return;
-        if (document.visibilityState === "visible") await loadInbox();
+        if (document.visibilityState === "visible") await loadInbox({ lightweight: true });
         const nextDelay = document.visibilityState === "visible"
-          ? (selectedConversation?.id ? 5000 : 8000)
-          : 20000;
+          ? (selectedConversation?.id ? 12000 : 18000)
+          : 60000;
         schedule(nextDelay);
       }, delay);
     };
     const handleVisibility = () => {
-      if (document.visibilityState === "visible") loadInbox({ force: true });
+      if (document.visibilityState === "visible") loadInbox({ force: true, lightweight: true });
     };
     document.addEventListener("visibilitychange", handleVisibility);
-    schedule(5000);
+    schedule(9000);
     return () => {
       stopped = true;
       if (timer) window.clearTimeout(timer);
@@ -2932,9 +2941,15 @@ function App() {
   };
   const localMediaUrl = (mediaId) => mediaId && accessToken ? `${API_BASE}/saas/v1/media/${encodeURIComponent(mediaId)}?token=${encodeURIComponent(accessToken)}` : "";
   const whatsappMediaUrl = (mediaId) => mediaId && accessToken ? `${API_BASE}/saas/v1/media/whatsapp/${encodeURIComponent(mediaId)}?token=${encodeURIComponent(accessToken)}` : "";
+  const mediaFailureKey = (message) => `${message?.channel || ""}:${message?.media_id || ""}`;
+  const markMediaUnavailable = (message) => {
+    const key = mediaFailureKey(message);
+    if (!key.endsWith(":") && !failedMediaIds[key]) setFailedMediaIds((prev) => ({ ...prev, [key]: true }));
+  };
   const messageMediaUrl = (message) => {
     const id = String(message?.media_id || "").trim();
     if (!id) return "";
+    if (failedMediaIds[mediaFailureKey(message)]) return "";
     return message.direction === "in" ? whatsappMediaUrl(id) : localMediaUrl(id);
   };
   const messageLabel = (message) => {
@@ -3158,6 +3173,7 @@ function App() {
     const label = messageLabel(message);
     const product = productCardFromMessage(message);
     const payload = asObject(message?.payload_json);
+    const mediaUnavailable = Boolean(message?.media_id && failedMediaIds[mediaFailureKey(message)]);
     const note = cleanProductText(payload.message_note, 900);
     const voice = asObject(payload.voice_intelligence);
     const vision = asObject(payload.vision_intelligence);
@@ -3168,14 +3184,15 @@ function App() {
       <>
         {product ? <ProductMessageCard product={product} /> : null}
         {product && note ? <p className="product-message-note">{note}</p> : null}
-        {type === "image" && url ? <img className="chat-media image" src={url} alt={message.text || "Imagen recibida"} loading="lazy" /> : null}
-        {type === "video" && url ? <video className="chat-media video" src={url} controls playsInline /> : null}
+        {type === "image" && url ? <img className="chat-media image" src={url} alt={message.text || "Imagen recibida"} loading="lazy" onError={() => markMediaUnavailable(message)} /> : null}
+        {type === "video" && url ? <video className="chat-media video" src={url} controls playsInline onError={() => markMediaUnavailable(message)} /> : null}
         {type === "audio" && url ? (
           <div className="audio-message">
             <AudioWaveform src={url} seed={message.id || message.created_at || message.media_id} />
-            <audio src={url} controls preload="metadata" />
+            <audio src={url} controls preload="metadata" onError={() => markMediaUnavailable(message)} />
           </div>
         ) : null}
+        {mediaUnavailable ? <p className="media-unavailable">Media no disponible desde Meta. Revisa token/permisos o expiracion del archivo.</p> : null}
         {type === "audio" ? (
           <div className={`voice-intel-card ${hasVoiceAnalysis ? "ready" : ""}`}>
             <div className="voice-intel-head">
@@ -3496,9 +3513,10 @@ function App() {
             reply_max_output_tokens: Number(aiConfig.replyMaxOutputTokens || aiConfig.maxTokens || 700),
             typing_indicator_enabled: Boolean(aiConfig.typingIndicator),
             inbound_cooldown_seconds: Number(aiConfig.cooldown || 6),
-            reply_initial_delay_ms: Number(aiConfig.typingDelay || 3200),
-            reply_chunk_delay_ms: Number(aiConfig.delayBetween || 4200),
-            reply_chunk_chars: Number(aiConfig.chunks || 220),
+            reply_initial_delay_ms: Number(aiConfig.typingDelay || 2600),
+            reply_chunk_delay_ms: Number(aiConfig.delayBetween || 9000),
+            reply_min_chunk_delay_ms: Number(aiConfig.delayBetween || 9000),
+            reply_chunk_chars: Number(aiConfig.chunks || 180),
             recent_message_limit: Number(aiConfig.recentMessageLimit || 16),
             message_context_chars: Number(aiConfig.messageContextChars || 1200),
           },
@@ -3539,6 +3557,11 @@ function App() {
   };
   const uploadKnowledgeFile = async (file) => {
     if (!file || knowledgeUploading) return;
+    if (Number(file.size || 0) > 8_000_000) {
+      showStatus("knowledge_file_too_large: el archivo supera 8 MB. Divide el PDF/CSV o sube una version resumida.", "error");
+      if (knowledgeFileRef.current) knowledgeFileRef.current.value = "";
+      return;
+    }
     setKnowledgeUploading(true);
     try {
       const formData = new FormData();

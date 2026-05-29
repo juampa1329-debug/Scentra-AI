@@ -33,6 +33,13 @@ services:
       SAAS_CORS_ORIGINS: ${SAAS_CORS_ORIGINS:-http://localhost:5174,http://127.0.0.1:5174,http://localhost:5175,http://127.0.0.1:5175,http://localhost:8011,http://127.0.0.1:8011,http://localhost:3000,http://127.0.0.1:3000,https://app.scentra-ai.online,https://admin.scentra-ai.online,https://api.scentra-ai.online,https://scentra-ai.online,https://www.scentra-ai.online,http://app.scentra-ai.online,http://admin.scentra-ai.online,http://api.scentra-ai.online,http://scentra-ai.online,http://www.scentra-ai.online}
       SAAS_TRIAL_DAYS: ${SAAS_TRIAL_DAYS:-30}
       SAAS_TRIAL_PLAN_CODE: ${SAAS_TRIAL_PLAN_CODE:-starter}
+      SAAS_EMBEDDED_WORKER_ENABLED: ${SAAS_EMBEDDED_WORKER_ENABLED:-false}
+      SAAS_WORKER_IDLE_SEC: ${SAAS_WORKER_IDLE_SEC:-10}
+      SAAS_WORKER_BATCH_SIZE: ${SAAS_WORKER_BATCH_SIZE:-10}
+      SAAS_DB_POOL_SIZE: ${SAAS_DB_POOL_SIZE:-10}
+      SAAS_DB_MAX_OVERFLOW: ${SAAS_DB_MAX_OVERFLOW:-20}
+      SAAS_DB_POOL_TIMEOUT_SEC: ${SAAS_DB_POOL_TIMEOUT_SEC:-20}
+      SAAS_DB_POOL_RECYCLE_SEC: ${SAAS_DB_POOL_RECYCLE_SEC:-1800}
       SAAS_MIGRATION_PROFILE: ${SAAS_MIGRATION_PROFILE:-core}
       SAAS_CAPTCHA_ENABLED: ${SAAS_CAPTCHA_ENABLED:-false}
       SAAS_CAPTCHA_PROVIDER: ${SAAS_CAPTCHA_PROVIDER:-turnstile}
@@ -121,8 +128,12 @@ services:
       SAAS_JWT_ISSUER: ${SAAS_JWT_ISSUER:-scentra-ai}
       SAAS_SECRET_KEY: ${SAAS_SECRET_KEY:-}
       SAAS_WORKER_NAME: ${SAAS_WORKER_NAME:-worker-local}
-      SAAS_WORKER_IDLE_SEC: ${SAAS_WORKER_IDLE_SEC:-5}
-      SAAS_WORKER_BATCH_SIZE: ${SAAS_WORKER_BATCH_SIZE:-25}
+      SAAS_WORKER_IDLE_SEC: ${SAAS_WORKER_IDLE_SEC:-10}
+      SAAS_WORKER_BATCH_SIZE: ${SAAS_WORKER_BATCH_SIZE:-10}
+      SAAS_DB_POOL_SIZE: ${SAAS_DB_POOL_SIZE:-5}
+      SAAS_DB_MAX_OVERFLOW: ${SAAS_DB_MAX_OVERFLOW:-10}
+      SAAS_DB_POOL_TIMEOUT_SEC: ${SAAS_DB_POOL_TIMEOUT_SEC:-20}
+      SAAS_DB_POOL_RECYCLE_SEC: ${SAAS_DB_POOL_RECYCLE_SEC:-1800}
       SAAS_CAPTCHA_ENABLED: ${SAAS_CAPTCHA_ENABLED:-false}
       SAAS_CAPTCHA_PROVIDER: ${SAAS_CAPTCHA_PROVIDER:-turnstile}
       SAAS_RATE_LIMIT_ENABLED: ${SAAS_RATE_LIMIT_ENABLED:-true}
