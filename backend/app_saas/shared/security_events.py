@@ -267,7 +267,11 @@ def enforce_rate_limit(
             reason="rate_limit_exceeded",
             details={"limit": limit, "window_seconds": window_seconds, "count": count},
         )
-        raise HTTPException(status_code=429, detail={"code": "rate_limit_exceeded", "retry_after_seconds": window_seconds})
+        raise HTTPException(
+            status_code=429,
+            detail={"code": "rate_limit_exceeded", "retry_after_seconds": window_seconds},
+            headers={"Retry-After": str(max(1, int(window_seconds)))},
+        )
 
 
 def enforce_event_window_limit(
@@ -340,6 +344,7 @@ def enforce_event_window_limit(
         raise HTTPException(
             status_code=429,
             detail={"code": "rate_limit_exceeded", "scope": clean_scope, "retry_after_seconds": window_seconds},
+            headers={"Retry-After": str(max(1, int(window_seconds)))},
         )
 
 

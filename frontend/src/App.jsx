@@ -226,6 +226,32 @@ function TurnstileChallenge({ onToken, resetKey = 0 }) {
   );
 }
 
+function secondsLabel(seconds) {
+  const total = Math.max(0, Number(seconds || 0));
+  if (!total) return "";
+  const minutes = Math.ceil(total / 60);
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return `${hours} h${rest ? ` ${rest} min` : ""}`;
+}
+
+function friendlyApiError(code, detail = {}) {
+  if (code === "rate_limit_exceeded") {
+    const wait = secondsLabel(detail?.retry_after_seconds);
+    return `Demasiados intentos. Espera${wait ? ` ${wait}` : ""} antes de volver a intentar o usa Recuperar clave.`;
+  }
+  if (code === "invalid_credentials") return "Correo o clave incorrectos. Verifica los datos o usa Recuperar clave.";
+  if (code === "account_temporarily_locked") {
+    return `Cuenta bloqueada temporalmente por intentos fallidos.${detail?.locked_until ? ` Intenta despues de ${dateLabel(detail.locked_until)}.` : " Intenta mas tarde o recupera la clave."}`;
+  }
+  if (code === "captcha_required") return "Completa la verificacion de seguridad antes de continuar.";
+  if (code === "captcha_failed") return "No pudimos validar la verificacion de seguridad. Intenta nuevamente.";
+  if (code === "captcha_not_configured") return "La verificacion de seguridad no esta configurada en el servidor.";
+  if (code === "database_busy") return "El servidor esta ocupado. Espera unos segundos y vuelve a intentar.";
+  return "";
+}
+
 function formatApiError(data, fallback) {
   const detail = data?.detail || data?.error;
   if (Array.isArray(detail)) {
@@ -235,6 +261,8 @@ function formatApiError(data, fallback) {
     }).join(" | ");
   }
   if (detail && typeof detail === "object") {
+    const friendly = friendlyApiError(detail.code, detail);
+    if (friendly) return friendly;
     if (detail.code === "plan_limit_reached") return `Limite de plan alcanzado: ${detail.metric} (${detail.used}/${detail.limit}).`;
     if (detail.code === "ai_agent_limit_reached") return `Limite de agentes AI alcanzado: ${detail.used}/${detail.limit}.`;
     if (detail.code === "active_ai_agent_limit_reached") return `Limite de agentes AI activos alcanzado: ${detail.used}/${detail.limit}. Pausa otro agente antes de activar este.`;
@@ -246,7 +274,8 @@ function formatApiError(data, fallback) {
     if (detail.code === "tenant_not_operational") return `Empresa no habilitada para operar. Estado: ${detail.status || "desconocido"}.`;
     return detail.message || detail.code || fallback;
   }
-  return typeof detail === "string" ? detail : fallback;
+  if (typeof detail === "string") return friendlyApiError(detail) || detail;
+  return fallback;
 }
 
 function advisorDisplayContent(value) {
@@ -793,6 +822,7 @@ function App() {
   const [resetCaptchaToken, setResetCaptchaToken] = useState("");
   const [mfaChallenge, setMfaChallenge] = useState(null);
   const [mfaCode, setMfaCode] = useState("");
+  const [authSubmitting, setAuthSubmitting] = useState(false);
   const [loginCaptchaReset, setLoginCaptchaReset] = useState(0);
   const [registerCaptchaReset, setRegisterCaptchaReset] = useState(0);
   const [recoveryCaptchaReset, setRecoveryCaptchaReset] = useState(0);
@@ -1978,6 +2008,8 @@ function App() {
 
   const submitLogin = async (event) => {
     event.preventDefault();
+    if (authSubmitting) return;
+    setAuthSubmitting(true);
     try {
       const data = await apiCall("/saas/v1/auth/login", { method: "POST", body: JSON.stringify({ ...login, captcha_token: loginCaptchaToken, captcha_provider: CAPTCHA_PROVIDER }) });
       if (data?.mfa_required) {
@@ -1990,6 +2022,7 @@ function App() {
       setTokens(data); setTenants(data?.tenants || []); setActiveView("dashboard"); showStatus("Ingreso correcto", "ok");
     } catch (err) { showStatus(String(err.message || err), "error"); }
     finally {
+      setAuthSubmitting(false);
       if (CAPTCHA_ENABLED) {
         setLoginCaptchaToken("");
         setLoginCaptchaReset((value) => value + 1);
@@ -2001,6 +2034,8 @@ function App() {
     event.preventDefault();
     if (!mfaChallenge?.challenge_token) return showStatus("Desafio 2FA no disponible. Ingresa nuevamente.", "error");
     if (!mfaCode.trim()) return showStatus("Ingresa el codigo de seguridad.", "error");
+    if (authSubmitting) return;
+    setAuthSubmitting(true);
     try {
       const data = await apiCall("/saas/v1/auth/login/verify-otp", {
         method: "POST",
@@ -2014,17 +2049,21 @@ function App() {
       setActiveView("dashboard");
       showStatus("Ingreso protegido correcto", "ok");
     } catch (err) { showStatus(String(err.message || err), "error"); }
+    finally { setAuthSubmitting(false); }
   };
 
   const submitRegister = async (event) => {
     event.preventDefault();
     if (register.password.length < 8) return showStatus("La clave debe tener al menos 8 caracteres.", "error");
     if (register.tenant_name.trim().length < 2) return showStatus("El nombre de la empresa debe tener al menos 2 caracteres.", "error");
+    if (authSubmitting) return;
+    setAuthSubmitting(true);
     try {
       const data = await apiCall("/saas/v1/auth/register", { method: "POST", body: JSON.stringify({ ...register, captcha_token: registerCaptchaToken, captcha_provider: CAPTCHA_PROVIDER }) });
       setTokens(data); setTenants(data?.tenants || []); setRegister(defaultRegister()); setActiveView("dashboard"); showStatus("Empresa creada", "ok");
     } catch (err) { showStatus(String(err.message || err), "error"); }
     finally {
+      setAuthSubmitting(false);
       if (CAPTCHA_ENABLED) {
         setRegisterCaptchaToken("");
         setRegisterCaptchaReset((value) => value + 1);
@@ -2035,6 +2074,8 @@ function App() {
   const submitPasswordRecovery = async (event) => {
     event.preventDefault();
     if (!passwordRecovery.email.trim()) return showStatus("Ingresa tu correo.", "error");
+    if (authSubmitting) return;
+    setAuthSubmitting(true);
     try {
       const data = await apiCall("/saas/v1/auth/password/forgot", {
         method: "POST",
@@ -2049,6 +2090,7 @@ function App() {
       }
     } catch (err) { showStatus(String(err.message || err), "error"); }
     finally {
+      setAuthSubmitting(false);
       if (CAPTCHA_ENABLED) {
         setRecoveryCaptchaToken("");
         setRecoveryCaptchaReset((value) => value + 1);
@@ -2061,6 +2103,8 @@ function App() {
     if (!passwordReset.token.trim()) return showStatus("Token requerido.", "error");
     if (passwordReset.new_password.length < 8) return showStatus("La clave debe tener al menos 8 caracteres.", "error");
     if (passwordReset.new_password !== passwordReset.confirm_password) return showStatus("Las claves no coinciden.", "error");
+    if (authSubmitting) return;
+    setAuthSubmitting(true);
     try {
       await apiCall("/saas/v1/auth/password/reset", {
         method: "POST",
@@ -2072,6 +2116,7 @@ function App() {
       showStatus("Clave actualizada. Ingresa con tu nueva clave.", "ok");
     } catch (err) { showStatus(String(err.message || err), "error"); }
     finally {
+      setAuthSubmitting(false);
       if (CAPTCHA_ENABLED) {
         setResetCaptchaToken("");
         setResetCaptchaReset((value) => value + 1);
@@ -4216,7 +4261,7 @@ function App() {
               <label>Correo</label><div className="input-wrap"><span>@</span><input autoComplete="email" inputMode="email" value={login.email} onChange={(event) => setLogin((prev) => ({ ...prev, email: event.target.value }))} /></div>
               <label>Clave</label><div className="input-wrap"><span>key</span><input autoComplete="current-password" type="password" value={login.password} onChange={(event) => setLogin((prev) => ({ ...prev, password: event.target.value }))} /></div>
               <TurnstileChallenge onToken={setLoginCaptchaToken} resetKey={loginCaptchaReset} />
-              <button className="primary auth-submit" type="submit">Entrar</button>
+              <button className="primary auth-submit" type="submit" disabled={authSubmitting}>{authSubmitting ? "Validando..." : "Entrar"}</button>
               <div className="auth-links"><button type="button" onClick={() => setMode("forgot")}>Recuperar clave</button><button type="button" onClick={() => setMode("register")}>Crear cuenta</button></div>
             </form>
           ) : mode === "mfa" ? (
@@ -4224,7 +4269,7 @@ function App() {
               <label>Codigo 2FA</label><div className="input-wrap"><span>#</span><input autoComplete="one-time-code" inputMode="numeric" value={mfaCode} onChange={(event) => setMfaCode(event.target.value)} /></div>
               <small className="field-hint">Enviado a {mfaChallenge?.email_hint || "tu correo"}. {mfaChallenge?.expires_at ? `Vence: ${dateLabel(mfaChallenge.expires_at)}.` : ""}</small>
               {mfaChallenge?.dev_otp ? <small className="field-hint">Local dev OTP: {mfaChallenge.dev_otp}</small> : null}
-              <button className="primary auth-submit" type="submit">Verificar codigo</button>
+              <button className="primary auth-submit" type="submit" disabled={authSubmitting}>{authSubmitting ? "Validando..." : "Verificar codigo"}</button>
               <div className="auth-links"><button type="button" onClick={() => { setMfaChallenge(null); setMfaCode(""); setMode("login"); }}>Volver al login</button></div>
             </form>
           ) : mode === "register" ? (
@@ -4237,7 +4282,7 @@ function App() {
               <label>Industria</label><div className="input-wrap"><span>in</span><select value={register.industry_code} onChange={(event) => setRegister((prev) => ({ ...prev, industry_code: event.target.value }))}>{publicVerticalPacks.map((pack) => <option key={pack.code} value={pack.code}>{pack.label}</option>)}</select></div>
               <small className="field-hint">Tu cuenta inicia con demo de 30 dias en el plan basico. Luego el admin puede activar el plan final.</small>
               <TurnstileChallenge onToken={setRegisterCaptchaToken} resetKey={registerCaptchaReset} />
-              <button className="primary auth-submit" type="submit">Crear demo 30 dias</button>
+              <button className="primary auth-submit" type="submit" disabled={authSubmitting}>{authSubmitting ? "Creando..." : "Crear demo 30 dias"}</button>
               <div className="auth-links"><button type="button" onClick={() => setMode("login")}>Volver al login</button></div>
             </form>
           ) : mode === "forgot" ? (
@@ -4245,7 +4290,7 @@ function App() {
               <label>Correo</label><div className="input-wrap"><span>@</span><input autoComplete="email" inputMode="email" value={passwordRecovery.email} onChange={(event) => setPasswordRecovery((prev) => ({ ...prev, email: event.target.value }))} /></div>
               <small className="field-hint">Si existe una cuenta activa, enviaremos un enlace de recuperacion.</small>
               <TurnstileChallenge onToken={setRecoveryCaptchaToken} resetKey={recoveryCaptchaReset} />
-              <button className="primary auth-submit" type="submit">Enviar recuperacion</button>
+              <button className="primary auth-submit" type="submit" disabled={authSubmitting}>{authSubmitting ? "Enviando..." : "Enviar recuperacion"}</button>
               <div className="auth-links"><button type="button" onClick={() => setMode("login")}>Volver al login</button><button type="button" onClick={() => setMode("reset")}>Ya tengo token</button></div>
             </form>
           ) : (
@@ -4254,7 +4299,7 @@ function App() {
               <label>Nueva clave</label><div className="input-wrap"><span>key</span><input autoComplete="new-password" type="password" minLength={8} value={passwordReset.new_password} onChange={(event) => setPasswordReset((prev) => ({ ...prev, new_password: event.target.value }))} /></div>
               <label>Confirmar clave</label><div className="input-wrap"><span>key</span><input autoComplete="new-password" type="password" minLength={8} value={passwordReset.confirm_password} onChange={(event) => setPasswordReset((prev) => ({ ...prev, confirm_password: event.target.value }))} /></div>
               <TurnstileChallenge onToken={setResetCaptchaToken} resetKey={resetCaptchaReset} />
-              <button className="primary auth-submit" type="submit">Actualizar clave</button>
+              <button className="primary auth-submit" type="submit" disabled={authSubmitting}>{authSubmitting ? "Actualizando..." : "Actualizar clave"}</button>
               <div className="auth-links"><button type="button" onClick={() => setMode("login")}>Volver al login</button></div>
             </form>
           )}
