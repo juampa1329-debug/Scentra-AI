@@ -239,16 +239,31 @@ function secondsLabel(seconds) {
 function friendlyApiError(code, detail = {}) {
   if (code === "rate_limit_exceeded") {
     const wait = secondsLabel(detail?.retry_after_seconds);
-    return `Demasiados intentos. Espera${wait ? ` ${wait}` : ""} antes de volver a intentar o usa Recuperar clave.`;
+    return `Proteccion activada por demasiados intentos fallidos. No es un error del sistema. Espera${wait ? ` ${wait}` : ""} antes de volver a intentar, o usa Recuperar clave para evitar mas bloqueos.`;
   }
-  if (code === "invalid_credentials") return "Correo o clave incorrectos. Verifica los datos o usa Recuperar clave.";
+  if (code === "invalid_credentials") return "No pudimos iniciar sesion. El correo o la clave no coinciden. Revisa mayusculas, espacios y que sea el correo registrado. Si no estas seguro, usa Recuperar clave antes de seguir intentando.";
   if (code === "account_temporarily_locked") {
-    return `Cuenta bloqueada temporalmente por intentos fallidos.${detail?.locked_until ? ` Intenta despues de ${dateLabel(detail.locked_until)}.` : " Intenta mas tarde o recupera la clave."}`;
+    return `Cuenta protegida temporalmente por varios intentos fallidos.${detail?.locked_until ? ` Puedes intentar despues de ${dateLabel(detail.locked_until)}.` : " Intenta mas tarde."} Tambien puedes usar Recuperar clave.`;
   }
-  if (code === "captcha_required") return "Completa la verificacion de seguridad antes de continuar.";
-  if (code === "captcha_failed") return "No pudimos validar la verificacion de seguridad. Intenta nuevamente.";
-  if (code === "captcha_not_configured") return "La verificacion de seguridad no esta configurada en el servidor.";
-  if (code === "database_busy") return "El servidor esta ocupado. Espera unos segundos y vuelve a intentar.";
+  if (code === "captcha_required") return "Falta la verificacion anti-bots. Completa el CAPTCHA y vuelve a enviar.";
+  if (code === "captcha_failed") return "La verificacion anti-bots no fue aceptada. Recarga el CAPTCHA o intenta de nuevo.";
+  if (code === "captcha_not_configured") return "La verificacion anti-bots esta activa, pero falta configurar la clave del servidor.";
+  if (code === "captcha_provider_not_supported") return "El proveedor de CAPTCHA configurado no es compatible. Revisa la configuracion del servidor.";
+  if (code === "captcha_verify_unavailable") return "No pudimos consultar el servicio anti-bots. Espera unos segundos y vuelve a intentar.";
+  if (code === "database_busy") return "El servidor esta ocupado y no pudo procesar la solicitud. Espera unos segundos y vuelve a intentar.";
+  if (code === "valid_email_required") return "Ingresa un correo valido antes de continuar.";
+  if (code === "valid_tenant_slug_required") return "El slug publico de la empresa solo puede usar letras, numeros y guiones.";
+  if (code === "email_or_tenant_already_exists") return "Ese correo o slug de empresa ya esta registrado. Inicia sesion o usa Recuperar clave.";
+  if (code === "invalid_mfa_code") return "El codigo 2FA no coincide. Revisa el ultimo correo recibido y vuelve a intentar.";
+  if (code === "invalid_mfa_challenge") return "La verificacion 2FA ya no es valida. Vuelve al login e inicia sesion otra vez.";
+  if (code === "mfa_challenge_expired") return "El codigo 2FA vencio. Vuelve al login para generar uno nuevo.";
+  if (code === "mfa_challenge_not_pending") return "Este codigo 2FA ya fue usado o bloqueado. Vuelve al login para generar uno nuevo.";
+  if (code === "invalid_or_expired_reset_token") return "El enlace o token de recuperacion no es valido o ya vencio. Solicita uno nuevo desde Recuperar clave.";
+  if (code === "invalid_current_password") return "La clave actual no coincide. Revisa la clave o usa Recuperar clave si no la recuerdas.";
+  if (code === "mfa_required_refresh") return "Tu sesion necesita confirmar 2FA otra vez. Cierra sesion e ingresa nuevamente.";
+  if (code === "no_active_tenant_membership" || code === "tenant_membership_required") return "Tu usuario no tiene una empresa activa asignada. Contacta al administrador de Scentra.";
+  if (code === "user_not_found") return "No encontramos un usuario activo para esta accion. Vuelve a iniciar sesion.";
+  if (code === "smtp_required_for_email_otp") return "El correo 2FA no puede enviarse porque falta configurar SMTP en el servidor.";
   return "";
 }
 
@@ -2008,6 +2023,8 @@ function App() {
 
   const submitLogin = async (event) => {
     event.preventDefault();
+    if (!login.email.trim()) return showStatus("Ingresa el correo con el que fue creada tu cuenta.", "error");
+    if (!login.password) return showStatus("Ingresa tu clave. Si no la recuerdas, usa Recuperar clave.", "error");
     if (authSubmitting) return;
     setAuthSubmitting(true);
     try {
@@ -4260,6 +4277,7 @@ function App() {
             <form className="auth-form" onSubmit={submitLogin}>
               <label>Correo</label><div className="input-wrap"><span>@</span><input autoComplete="email" inputMode="email" value={login.email} onChange={(event) => setLogin((prev) => ({ ...prev, email: event.target.value }))} /></div>
               <label>Clave</label><div className="input-wrap"><span>key</span><input autoComplete="current-password" type="password" value={login.password} onChange={(event) => setLogin((prev) => ({ ...prev, password: event.target.value }))} /></div>
+              <small className="field-hint">Si fallas varias veces, Scentra bloquea temporalmente nuevos intentos por seguridad. Usa Recuperar clave si no estas seguro.</small>
               <TurnstileChallenge onToken={setLoginCaptchaToken} resetKey={loginCaptchaReset} />
               <button className="primary auth-submit" type="submit" disabled={authSubmitting}>{authSubmitting ? "Validando..." : "Entrar"}</button>
               <div className="auth-links"><button type="button" onClick={() => setMode("forgot")}>Recuperar clave</button><button type="button" onClick={() => setMode("register")}>Crear cuenta</button></div>
