@@ -64,6 +64,28 @@ class PasswordChangeIn(BaseModel):
     new_password: str = Field(min_length=8, max_length=200)
 
 
+class ProfilePatchIn(BaseModel):
+    full_name: Optional[str] = Field(default=None, max_length=180)
+    email: Optional[str] = Field(default=None, max_length=240)
+    current_password: str = Field(default="", max_length=200)
+    phone: Optional[str] = Field(default=None, max_length=60)
+    role_label: Optional[str] = Field(default=None, max_length=120)
+    avatar_url: Optional[str] = Field(default=None, max_length=1000)
+
+
+class TeamUserCreateIn(BaseModel):
+    email: str = Field(min_length=3, max_length=240)
+    full_name: str = Field(default="", max_length=180)
+    password: str = Field(default="", max_length=200)
+    role: str = Field(default="agent", max_length=40)
+    send_email: bool = True
+
+
+class TeamMembershipPatchIn(BaseModel):
+    role: Optional[str] = Field(default=None, max_length=40)
+    is_active: Optional[bool] = None
+
+
 class TwoFactorPatchIn(BaseModel):
     enabled: bool = False
     method: str = Field(default="email_otp", max_length=40)
@@ -111,6 +133,7 @@ class MeOut(BaseModel):
     user_id: str
     email: str
     full_name: str = ""
+    profile_json: dict = Field(default_factory=dict)
     tenant_id: str
     role: str
     tenants: list[TenantMembershipOut] = []

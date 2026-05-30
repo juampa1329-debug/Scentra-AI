@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 from datetime import datetime, timedelta, timezone
@@ -15,12 +16,18 @@ from app_saas.admin.schemas import (
     AdminLoginIn,
     AdminMfaChallengeOut,
     AdminMfaVerifyIn,
+    AdminPasswordChangeIn,
+    AdminProfilePatchIn,
     AdminTwoFactorPatchIn,
+    AdminTenantMembershipPatchIn,
+    AdminTenantUserCreateIn,
     BillingCreditCreateIn,
     BillingInvoiceCreateIn,
     FeatureFlagPatchIn,
     PlanPatchIn,
     PlanUpsertIn,
+    PlatformAdminCreateIn,
+    PlatformAdminPatchIn,
     PlatformTokenOut,
     ReliabilityBackpressurePatchIn,
     ReliabilityRetentionPatchIn,
@@ -88,7 +95,7 @@ from app_saas.reliability.service import (
     update_retention_policy,
 )
 from app_saas.shared.captcha import verify_captcha_or_raise
-from app_saas.shared.email import smtp_is_configured
+from app_saas.shared.email import send_alert_email, send_welcome_email, smtp_is_configured
 from app_saas.shared.mfa import create_mfa_challenge, role_requires_mfa, send_security_notice, verify_mfa_code
 from app_saas.shared.security import (
     PLATFORM_ROLE_ORDER,
@@ -139,6 +146,37 @@ FEATURE_CATALOG = [
 TENANT_STATUSES = {"active", "trial", "paused", "past_due", "suspended", "cancelled"}
 SUBSCRIPTION_STATUSES = {"trial", "active", "past_due", "cancelled", "suspended"}
 IMPERSONATION_ROLES = {"owner", "admin", "supervisor", "agent", "viewer"}
+PLATFORM_ADMIN_STATUSES = {"active", "paused", "disabled"}
+TENANT_ROLE_LABELS = {
+    "owner": "Propietario",
+    "admin": "Administrador",
+    "supervisor": "Supervisor",
+    "agent": "Agente",
+    "viewer": "Lector",
+}
+PLATFORM_ROLE_LABELS = {
+    "superadmin": "Superadministrador",
+    "platform_admin": "Administrador de plataforma",
+    "billing_admin": "Administrador de facturacion",
+    "support": "Soporte",
+    "viewer": "Lector",
+}
+STATUS_LABELS = {
+    "active": "Activo",
+    "paused": "Pausado",
+    "disabled": "Deshabilitado",
+}
+
+
+def _role_label(role: object, *, platform: bool = False) -> str:
+    value = str(role or "").strip().lower()
+    labels = PLATFORM_ROLE_LABELS if platform else TENANT_ROLE_LABELS
+    return labels.get(value, value.replace("_", " ").title() if value else "Usuario")
+
+
+def _status_label(status: object) -> str:
+    value = str(status or "").strip().lower()
+    return STATUS_LABELS.get(value, value.replace("_", " ").title() if value else "Sin estado")
 
 
 def _clean(value: object, limit: int = 200) -> str:
@@ -213,6 +251,34 @@ def _platform_admin_count(conn) -> int:
         ).scalar_one()
         or 0
     )
+
+
+def _admin_app_url() -> str:
+    public_url = str(settings.scentra_app_public_url or "").rstrip("/")
+    if public_url.startswith("https://app."):
+        return public_url.replace("https://app.", "https://admin.", 1)
+    return "https://admin.scentra-ai.online"
+
+
+def _tenant_admin_contacts(conn, tenant_id: str, *, exclude_user_id: str = "") -> list[dict[str, Any]]:
+    rows = conn.execute(
+        text(
+            """
+            SELECT DISTINCT u.id::text AS user_id, u.email, u.full_name, m.role
+            FROM saas_memberships m
+            JOIN saas_users u ON u.id = m.user_id
+            WHERE m.tenant_id = CAST(:tenant_id AS uuid)
+              AND m.is_active = TRUE
+              AND m.role IN ('owner', 'admin')
+              AND u.status = 'active'
+              AND (:exclude_user_id = '' OR u.id <> CAST(NULLIF(:exclude_user_id, '') AS uuid))
+            ORDER BY m.role ASC, u.email ASC
+            LIMIT 20
+            """
+        ),
+        {"tenant_id": tenant_id, "exclude_user_id": exclude_user_id or ""},
+    ).mappings().all()
+    return [dict(row) for row in rows]
 
 
 def _ensure_ai_agent_plan_limit_table(conn) -> None:
@@ -633,7 +699,166 @@ def admin_verify_login_otp(payload: AdminMfaVerifyIn, request: Request):
 
 @router.get("/auth/me")
 def admin_me(ctx: PlatformAuthContext = Depends(get_current_platform_admin)):
-    return {"user_id": ctx.user_id, "email": ctx.email, "platform_role": ctx.platform_role}
+    with db_session() as conn:
+        row = conn.execute(
+            text(
+                """
+                SELECT email, full_name, profile_json
+                FROM saas_users
+                WHERE id = CAST(:user_id AS uuid)
+                LIMIT 1
+                """
+            ),
+            {"user_id": ctx.user_id},
+        ).mappings().first()
+    return {
+        "user_id": ctx.user_id,
+        "email": normalize_email(str((row or {}).get("email") or ctx.email)),
+        "full_name": str((row or {}).get("full_name") or "").strip(),
+        "profile_json": dict((row or {}).get("profile_json") or {}),
+        "platform_role": ctx.platform_role,
+    }
+
+
+@router.patch("/auth/profile")
+def admin_update_profile(payload: AdminProfilePatchIn, request: Request, ctx: PlatformAuthContext = Depends(get_current_platform_admin)):
+    next_email = normalize_email(payload.email or ctx.email)
+    full_name = _clean(payload.full_name, 180)
+    profile_patch = {
+        "phone": _clean(payload.phone, 60),
+        "role_label": _clean(payload.role_label, 120),
+        "avatar_url": _clean(payload.avatar_url, 1000),
+    }
+    if next_email and "@" not in next_email:
+        raise HTTPException(status_code=400, detail="valid_email_required")
+    with db_session() as conn:
+        current = conn.execute(
+            text(
+                """
+                SELECT id::text, email, password_hash, status, full_name
+                FROM saas_users
+                WHERE id = CAST(:user_id AS uuid)
+                LIMIT 1
+                """
+            ),
+            {"user_id": ctx.user_id},
+        ).mappings().first()
+        if not current or current["status"] != "active":
+            raise HTTPException(status_code=404, detail="user_not_found")
+        email_changed = next_email and next_email != normalize_email(current["email"])
+        if email_changed:
+            if not payload.current_password or not verify_password(payload.current_password, current["password_hash"]):
+                raise HTTPException(status_code=401, detail="invalid_current_password")
+            duplicate = conn.execute(
+                text("SELECT id::text FROM saas_users WHERE email = :email AND id <> CAST(:user_id AS uuid) LIMIT 1"),
+                {"email": next_email, "user_id": ctx.user_id},
+            ).mappings().first()
+            if duplicate:
+                raise HTTPException(status_code=409, detail="email_already_registered")
+        row = conn.execute(
+            text(
+                """
+                UPDATE saas_users
+                SET email = :email,
+                    full_name = :full_name,
+                    profile_json = COALESCE(profile_json, '{}'::jsonb) || CAST(:profile_json AS jsonb),
+                    updated_at = NOW()
+                WHERE id = CAST(:user_id AS uuid)
+                RETURNING id::text, email, full_name, profile_json
+                """
+            ),
+            {
+                "user_id": ctx.user_id,
+                "email": next_email or current["email"],
+                "full_name": full_name or current["full_name"] or "",
+                "profile_json": _json(profile_patch),
+            },
+        ).mappings().first()
+        record_security_event(
+            conn,
+            event_type="admin.profile_update",
+            status="success",
+            request=request,
+            principal=ctx.email,
+            user_id=ctx.user_id,
+            reason="email_changed" if email_changed else "profile_updated",
+        )
+    return {"ok": True, "user": dict(row or {})}
+
+
+@router.post("/auth/password/change")
+def admin_change_password(payload: AdminPasswordChangeIn, request: Request, ctx: PlatformAuthContext = Depends(get_current_platform_admin)):
+    rate_key = rate_limit_key(action="admin.password_change", principal=ctx.email, request=request)
+    auth_error: HTTPException | None = None
+    with db_session() as conn:
+        enforce_auth_rate_limits(
+            conn,
+            event_type="admin.password_change",
+            rate_key=rate_key,
+            combined_limit=6,
+            principal_limit=10,
+            ip_limit=30,
+            window_seconds=3600,
+            request=request,
+            principal=ctx.email,
+            count_statuses=("failed", "blocked"),
+        )
+        row = conn.execute(
+            text(
+                """
+                SELECT id::text, password_hash, status
+                FROM saas_users
+                WHERE id = CAST(:user_id AS uuid)
+                LIMIT 1
+                """
+            ),
+            {"user_id": ctx.user_id},
+        ).mappings().first()
+        if not row or row["status"] != "active" or not verify_password(payload.current_password, row["password_hash"]):
+            record_security_event(
+                conn,
+                event_type="admin.password_change",
+                status="failed",
+                request=request,
+                principal=ctx.email,
+                rate_key=rate_key,
+                user_id=ctx.user_id,
+                reason="invalid_current_password",
+            )
+            auth_error = HTTPException(status_code=401, detail="invalid_current_password")
+        if not auth_error:
+            conn.execute(
+                text(
+                    """
+                    UPDATE saas_users
+                    SET password_hash = :password_hash,
+                        password_algo = 'argon2id',
+                        password_changed_at = NOW(),
+                        failed_login_count = 0,
+                        locked_until = NULL,
+                        updated_at = NOW()
+                    WHERE id = CAST(:user_id AS uuid)
+                    """
+                ),
+                {"user_id": ctx.user_id, "password_hash": hash_password(payload.new_password)},
+            )
+            record_security_event(
+                conn,
+                event_type="admin.password_change",
+                status="success",
+                request=request,
+                principal=ctx.email,
+                rate_key=rate_key,
+                user_id=ctx.user_id,
+            )
+            send_security_notice(
+                ctx.email,
+                "Clave actualizada en Scentra Admin",
+                "Tu clave del panel Admin fue actualizada. Si no fuiste tu, contacta al superadmin.",
+            )
+    if auth_error:
+        raise auth_error
+    return {"ok": True}
 
 
 @router.get("/auth/security")
@@ -707,6 +932,350 @@ def admin_update_two_factor(payload: AdminTwoFactorPatchIn, request: Request, ct
         "password_changed_at": (row or {}).get("password_changed_at"),
         "smtp_configured": smtp_is_configured(),
     }
+
+
+@router.get("/users/platform")
+def list_platform_admins(ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin", "support"))):
+    with db_session() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT
+                    u.id::text AS user_id,
+                    u.email,
+                    u.full_name,
+                    u.status AS user_status,
+                    u.last_login_at::text,
+                    u.password_changed_at::text,
+                    u.two_factor_enabled,
+                    pa.role AS platform_role,
+                    pa.status AS platform_status,
+                    pa.notes,
+                    pa.created_at::text,
+                    pa.updated_at::text
+                FROM saas_platform_admins pa
+                JOIN saas_users u ON u.id = pa.user_id
+                ORDER BY pa.updated_at DESC
+                LIMIT 300
+                """
+            )
+        ).mappings().all()
+    return {"ok": True, "admins": [dict(row) for row in rows], "roles": sorted(PLATFORM_ROLE_ORDER.keys())}
+
+
+@router.post("/users/platform")
+def create_platform_admin_user(
+    payload: PlatformAdminCreateIn,
+    request: Request,
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin")),
+):
+    email = normalize_email(payload.email)
+    role = _clean(payload.platform_role, 40).lower() or "support"
+    status = _clean(payload.status, 40).lower() or "active"
+    if role not in PLATFORM_ROLE_ORDER:
+        raise HTTPException(status_code=400, detail="invalid_platform_role")
+    if status not in PLATFORM_ADMIN_STATUSES:
+        raise HTTPException(status_code=400, detail="invalid_platform_status")
+    if role == "superadmin" and ctx.platform_role != "superadmin":
+        raise HTTPException(status_code=403, detail="superadmin_role_requires_superadmin")
+    with db_session() as conn:
+        user = conn.execute(
+            text(
+                """
+                INSERT INTO saas_users (email, full_name, password_hash, password_algo, password_changed_at)
+                VALUES (:email, :full_name, :password_hash, 'argon2id', NOW())
+                ON CONFLICT (email)
+                DO UPDATE SET full_name = COALESCE(NULLIF(EXCLUDED.full_name, ''), saas_users.full_name), updated_at = NOW()
+                RETURNING id::text, email
+                """
+            ),
+            {"email": email, "full_name": _clean(payload.full_name, 180), "password_hash": hash_password(payload.password)},
+        ).mappings().first()
+        row = conn.execute(
+            text(
+                """
+                INSERT INTO saas_platform_admins (user_id, role, status, notes, updated_at)
+                VALUES (CAST(:user_id AS uuid), :role, :status, :notes, NOW())
+                ON CONFLICT (user_id)
+                DO UPDATE SET role = EXCLUDED.role, status = EXCLUDED.status, notes = EXCLUDED.notes, updated_at = NOW()
+                RETURNING user_id::text, role, status, notes, updated_at::text
+                """
+            ),
+            {"user_id": user["id"], "role": role, "status": status, "notes": _clean(payload.notes, 1000)},
+        ).mappings().first()
+        _audit(conn, actor=ctx, action="admin.platform_user.upsert", resource_type="platform_admin", resource_id=user["id"], details=dict(row or {}))
+        email_sent = False
+        if payload.send_email and smtp_is_configured():
+            with contextlib.suppress(Exception):
+                email_sent = send_welcome_email(
+                    to_email=email,
+                    full_name=_clean(payload.full_name, 180),
+                    tenant_name="Scentra Admin",
+                    role_label=_role_label(role, platform=True),
+                    login_url=_admin_app_url(),
+                    temporary_password=payload.password,
+                )
+    return {"ok": True, "admin": dict(row or {}), "user_id": user["id"], "email_sent": email_sent}
+
+
+@router.patch("/users/platform/{user_id}")
+def update_platform_admin_user(
+    user_id: str,
+    payload: PlatformAdminPatchIn,
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin")),
+):
+    role = _clean(payload.platform_role, 40).lower()
+    status = _clean(payload.status, 40).lower()
+    if role and role not in PLATFORM_ROLE_ORDER:
+        raise HTTPException(status_code=400, detail="invalid_platform_role")
+    if status and status not in PLATFORM_ADMIN_STATUSES:
+        raise HTTPException(status_code=400, detail="invalid_platform_status")
+    if role == "superadmin" and ctx.platform_role != "superadmin":
+        raise HTTPException(status_code=403, detail="superadmin_role_requires_superadmin")
+    if user_id == ctx.user_id and status and status != "active":
+        raise HTTPException(status_code=400, detail="cannot_disable_self")
+    with db_session() as conn:
+        current = conn.execute(
+            text(
+                """
+                SELECT u.email, u.full_name, pa.role, pa.status
+                FROM saas_platform_admins pa
+                JOIN saas_users u ON u.id = pa.user_id
+                WHERE pa.user_id = CAST(:user_id AS uuid)
+                LIMIT 1
+                """
+            ),
+            {"user_id": user_id},
+        ).mappings().first()
+        row = conn.execute(
+            text(
+                """
+                UPDATE saas_platform_admins
+                SET role = COALESCE(NULLIF(:role, ''), role),
+                    status = COALESCE(NULLIF(:status, ''), status),
+                    notes = COALESCE(:notes, notes),
+                    updated_at = NOW()
+                WHERE user_id = CAST(:user_id AS uuid)
+                RETURNING user_id::text, role, status, notes, updated_at::text
+                """
+            ),
+            {"user_id": user_id, "role": role, "status": status, "notes": payload.notes},
+        ).mappings().first()
+        if not row:
+            raise HTTPException(status_code=404, detail="platform_admin_not_found")
+        _audit(conn, actor=ctx, action="admin.platform_user.update", resource_type="platform_admin", resource_id=user_id, details=dict(row))
+        if current and smtp_is_configured():
+            changed = role or status
+            if changed:
+                body = (
+                    "Tu acceso al panel Scentra Admin fue actualizado.\n\n"
+                    f"Rol actual: {_role_label(row['role'], platform=True)}.\n"
+                    f"Estado actual: {_status_label(row['status'])}.\n"
+                    f"Acción realizada por: {ctx.email}."
+                )
+                with contextlib.suppress(Exception):
+                    send_alert_email(
+                        to_email=current["email"],
+                        subject="Cambio en tu acceso Scentra Admin",
+                        body=body,
+                        severity="warning",
+                        cta_url=_admin_app_url(),
+                    )
+    return {"ok": True, "admin": dict(row)}
+
+
+@router.get("/users/tenants")
+def list_tenant_users(
+    tenant_id: str = Query("", max_length=80),
+    search: str = Query("", max_length=160),
+    limit: int = Query(300, ge=1, le=500),
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin", "support")),
+):
+    where = ["1=1"]
+    params: dict[str, Any] = {"limit": limit, "tenant_id": tenant_id, "search": f"%{search.lower()}%"}
+    if tenant_id:
+        where.append("m.tenant_id = CAST(:tenant_id AS uuid)")
+    if search:
+        where.append("(LOWER(u.email) LIKE :search OR LOWER(u.full_name) LIKE :search OR LOWER(t.name) LIKE :search)")
+    with db_session() as conn:
+        rows = conn.execute(
+            text(
+                f"""
+                SELECT
+                    m.id::text,
+                    m.tenant_id::text,
+                    t.name AS tenant_name,
+                    m.user_id::text,
+                    u.email,
+                    u.full_name,
+                    u.status AS user_status,
+                    u.last_login_at::text,
+                    m.role,
+                    m.is_active,
+                    m.created_at::text,
+                    m.updated_at::text
+                FROM saas_memberships m
+                JOIN saas_users u ON u.id = m.user_id
+                JOIN saas_tenants t ON t.id = m.tenant_id
+                WHERE {' AND '.join(where)}
+                ORDER BY t.name ASC, u.email ASC
+                LIMIT :limit
+                """
+            ),
+            params,
+        ).mappings().all()
+    return {"ok": True, "members": [dict(row) for row in rows], "roles": sorted(IMPERSONATION_ROLES)}
+
+
+@router.post("/users/tenants")
+def create_tenant_user(
+    payload: AdminTenantUserCreateIn,
+    request: Request,
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin", "support")),
+):
+    role = _clean(payload.role, 40).lower() or "agent"
+    if role not in IMPERSONATION_ROLES:
+        raise HTTPException(status_code=400, detail="invalid_tenant_role")
+    email = normalize_email(payload.email)
+    if "@" not in email:
+        raise HTTPException(status_code=400, detail="valid_email_required")
+    with db_session() as conn:
+        tenant = _tenant_exists(conn, payload.tenant_id)
+        user = conn.execute(text("SELECT id::text, email FROM saas_users WHERE email = :email LIMIT 1"), {"email": email}).mappings().first()
+        created = False
+        if not user:
+            if not payload.password or len(payload.password) < 8:
+                raise HTTPException(status_code=400, detail="password_required_for_new_user")
+            user = conn.execute(
+                text(
+                    """
+                    INSERT INTO saas_users (email, full_name, password_hash, password_algo, password_changed_at)
+                    VALUES (:email, :full_name, :password_hash, 'argon2id', NOW())
+                    RETURNING id::text, email
+                    """
+                ),
+                {"email": email, "full_name": _clean(payload.full_name, 180), "password_hash": hash_password(payload.password)},
+            ).mappings().first()
+            created = True
+        elif payload.full_name:
+            conn.execute(
+                text("UPDATE saas_users SET full_name = :full_name, updated_at = NOW() WHERE id = CAST(:user_id AS uuid)"),
+                {"user_id": user["id"], "full_name": _clean(payload.full_name, 180)},
+            )
+        member = conn.execute(
+            text(
+                """
+                INSERT INTO saas_memberships (tenant_id, user_id, role, is_active)
+                VALUES (CAST(:tenant_id AS uuid), CAST(:user_id AS uuid), :role, TRUE)
+                ON CONFLICT (tenant_id, user_id)
+                DO UPDATE SET role = EXCLUDED.role, is_active = TRUE, updated_at = NOW()
+                RETURNING id::text, tenant_id::text, user_id::text, role, is_active, updated_at::text
+                """
+            ),
+            {"tenant_id": payload.tenant_id, "user_id": user["id"], "role": role},
+        ).mappings().first()
+        _audit(conn, actor=ctx, action="admin.tenant_user.upsert", resource_type="tenant_user", resource_id=member["id"], tenant_id=payload.tenant_id, details=dict(member))
+        record_security_event(
+            conn,
+            event_type="admin.tenant_user_upsert",
+            status="success",
+            request=request,
+            principal=email,
+            tenant_id=payload.tenant_id,
+            user_id=user["id"],
+            details={"role": role, "created": created, "actor_user_id": ctx.user_id},
+        )
+        email_sent = False
+        if payload.send_email and smtp_is_configured():
+            with contextlib.suppress(Exception):
+                email_sent = send_welcome_email(
+                    to_email=email,
+                    full_name=_clean(payload.full_name, 180),
+                    tenant_name=str(tenant.get("name") or ""),
+                    role_label=_role_label(role),
+                    login_url=str(settings.scentra_app_public_url or "").rstrip("/"),
+                    temporary_password=payload.password if created else "",
+                )
+            alert_body = (
+                f"Se {'creó' if created else 'actualizó'} el acceso de {email} en {tenant.get('name') or 'Scentra'}.\n\n"
+                f"Rol asignado: {_role_label(role)}.\n"
+                f"Acción realizada por: {ctx.email}."
+            )
+            for admin in _tenant_admin_contacts(conn, payload.tenant_id):
+                if str(admin.get("email") or "").strip().lower() == email:
+                    continue
+                with contextlib.suppress(Exception):
+                    send_alert_email(to_email=admin["email"], subject="Alerta de usuarios Scentra", body=alert_body, severity="info")
+    return {"ok": True, "created": created, "member": dict(member or {}), "user_id": user["id"], "email_sent": email_sent}
+
+
+@router.patch("/users/tenants/{membership_id}")
+def update_tenant_user(
+    membership_id: str,
+    payload: AdminTenantMembershipPatchIn,
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin", "support")),
+):
+    role = _clean(payload.role, 40).lower()
+    if role and role not in IMPERSONATION_ROLES:
+        raise HTTPException(status_code=400, detail="invalid_tenant_role")
+    with db_session() as conn:
+        current = conn.execute(
+            text(
+                """
+                SELECT
+                    m.id::text,
+                    m.tenant_id::text,
+                    m.user_id::text,
+                    m.role,
+                    m.is_active,
+                    u.email,
+                    u.full_name,
+                    t.name AS tenant_name
+                FROM saas_memberships m
+                JOIN saas_users u ON u.id = m.user_id
+                JOIN saas_tenants t ON t.id = m.tenant_id
+                WHERE m.id = CAST(:membership_id AS uuid)
+                LIMIT 1
+                """
+            ),
+            {"membership_id": membership_id},
+        ).mappings().first()
+        row = conn.execute(
+            text(
+                """
+                UPDATE saas_memberships
+                SET role = COALESCE(NULLIF(:role, ''), role),
+                    is_active = COALESCE(:is_active, is_active),
+                    updated_at = NOW()
+                WHERE id = CAST(:membership_id AS uuid)
+                RETURNING id::text, tenant_id::text, user_id::text, role, is_active, updated_at::text
+                """
+            ),
+            {"membership_id": membership_id, "role": role, "is_active": payload.is_active},
+        ).mappings().first()
+        if not row:
+            raise HTTPException(status_code=404, detail="membership_not_found")
+        _audit(conn, actor=ctx, action="admin.tenant_user.update", resource_type="tenant_user", resource_id=membership_id, tenant_id=row["tenant_id"], details=dict(row))
+        if current and smtp_is_configured():
+            changed = role or payload.is_active is not None
+            if changed:
+                affected_body = (
+                    f"Tu acceso en {current['tenant_name'] or 'Scentra'} fue actualizado.\n\n"
+                    f"Rol actual: {_role_label(row['role'])}.\n"
+                    f"Estado: {'activo' if row['is_active'] else 'inactivo'}."
+                )
+                with contextlib.suppress(Exception):
+                    send_alert_email(to_email=current["email"], subject="Cambio en tu acceso Scentra", body=affected_body, severity="warning")
+                admin_body = (
+                    f"Se actualizó el usuario {current['email']} en {current['tenant_name'] or 'Scentra'}.\n\n"
+                    f"Rol actual: {_role_label(row['role'])}.\n"
+                    f"Estado: {'activo' if row['is_active'] else 'inactivo'}.\n"
+                    f"Acción realizada por: {ctx.email}."
+                )
+                for admin in _tenant_admin_contacts(conn, row["tenant_id"], exclude_user_id=row["user_id"]):
+                    with contextlib.suppress(Exception):
+                        send_alert_email(to_email=admin["email"], subject="Alerta de roles Scentra", body=admin_body, severity="warning")
+    return {"ok": True, "member": dict(row)}
 
 
 @router.get("/feature-flags/catalog")

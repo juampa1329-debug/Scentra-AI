@@ -346,6 +346,7 @@ mark.neutral { color: var(--soft); }
 }
 .form-grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .form-grid.four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.form-grid .wide { grid-column: 1 / -1; }
 .section-chip {
   display: inline-grid;
   width: fit-content;
@@ -429,7 +430,52 @@ h3 { margin: 18px 0 10px; letter-spacing: -0.02em; }
   border-bottom: 1px solid var(--line);
   padding: 12px 0;
 }
+.row > span,
+.row strong,
+.row small {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.row select {
+  min-width: 0;
+}
+.notification-targets {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 14px;
+}
+.notification-targets > div {
+  display: grid;
+  gap: 8px;
+  max-height: 360px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 14px;
+  background: rgba(255,255,255,0.052);
+}
+.notification-targets strong {
+  position: sticky;
+  top: -14px;
+  z-index: 1;
+  padding: 6px 0;
+  background: #102027;
+}
+.notification-targets .check-row {
+  margin: 0;
+  align-items: flex-start;
+}
+.notification-targets .check-row small {
+  display: block;
+  color: var(--muted);
+}
 .row.six { grid-template-columns: 1.7fr 0.8fr 0.8fr 0.8fr 1.1fr 2.2fr; }
+.row.user-row {
+  grid-template-columns: minmax(0, 2fr) minmax(130px, 0.8fr) minmax(90px, 0.5fr) auto;
+}
+.row.notification-row {
+  grid-template-columns: minmax(0, 2fr) minmax(120px, 0.7fr) minmax(110px, 0.7fr) minmax(110px, 0.7fr);
+}
 .audit-row { grid-template-columns: 1.2fr 1.5fr 1.1fr 0.9fr 1fr; }
 .row small { display: block; color: var(--muted); margin-top: 3px; }
 .table.compact .row { grid-template-columns: 2fr 0.8fr 0.8fr; }
@@ -443,7 +489,7 @@ h3 { margin: 18px 0 10px; letter-spacing: -0.02em; }
   .admin-shell { grid-template-columns: 1fr; padding: 12px; }
   .admin-sidebar { position: relative; top: 0; height: auto; }
   .topbar { align-items: stretch; flex-direction: column; }
-  .filter-bar, .form-grid.two, .form-grid.four, .flag-grid, .plan-grid, .row, .row.six, .audit-row, .intelligence-row, .performance-row, .retention-row, .index-row, .provider-policy-row {
+  .filter-bar, .form-grid.two, .form-grid.four, .flag-grid, .plan-grid, .row, .row.six, .row.user-row, .row.notification-row, .audit-row, .intelligence-row, .performance-row, .retention-row, .index-row, .provider-policy-row {
     grid-template-columns: 1fr;
   }
 }

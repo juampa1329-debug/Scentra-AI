@@ -37,6 +37,7 @@ from app_saas.internal.router import router as internal_router
 from app_saas.intelligence.router import router as intelligence_router
 from app_saas.knowledge.router import router as knowledge_router
 from app_saas.media.router import router as media_router
+from app_saas.notifications.router import router as notifications_router
 from app_saas.social.router import router as social_router
 from app_saas.tenants.router import router as tenants_router
 from app_saas.trust_center.router import admin_router as trust_center_admin_router
@@ -333,6 +334,7 @@ app.include_router(knowledge_router, prefix="/saas/v1")
 app.include_router(diagnostics_router, prefix="/saas/v1")
 app.include_router(ai_agent_router, prefix="/saas/v1")
 app.include_router(media_router, prefix="/saas/v1")
+app.include_router(notifications_router, prefix="/saas/v1")
 app.include_router(social_router, prefix="/saas/v1")
 app.include_router(billing_router, prefix="/saas/v1")
 app.include_router(webhooks_router, prefix="/saas/v1")

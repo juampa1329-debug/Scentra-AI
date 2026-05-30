@@ -17,6 +17,8 @@ const VIEWS = [
   ["plans", t("view.plans")],
   ["subscriptions", t("view.subscriptions")],
   ["billing", t("view.billing")],
+  ["users", "Usuarios"],
+  ["notifications", "Notificaciones"],
   ["security", t("view.security")],
   ["intelligence", t("view.intelligence")],
   ["trust", t("view.trust")],
@@ -25,6 +27,29 @@ const VIEWS = [
   ["observability", t("view.observability")],
   ["audit", t("view.audit")],
 ];
+const TENANT_ROLE_LABELS = { owner: "Propietario", admin: "Administrador", supervisor: "Supervisor", agent: "Agente", viewer: "Lector" };
+const PLATFORM_ROLE_LABELS = { superadmin: "Superadministrador", platform_admin: "Administrador plataforma", billing_admin: "Facturación", support: "Soporte", viewer: "Lector" };
+const SEVERITY_LABELS = { info: "Información", success: "Confirmación", warning: "Alerta", critical: "Alerta crítica" };
+const CATEGORY_LABELS = {
+  system: "Sistema",
+  account: "Cuenta",
+  security: "Seguridad",
+  billing: "Facturación",
+  operations: "Operación",
+  ai: "IA",
+  maintenance: "Mantenimiento",
+};
+
+function roleLabel(role, platform = false) {
+  const key = String(role || "").toLowerCase();
+  const map = platform ? PLATFORM_ROLE_LABELS : TENANT_ROLE_LABELS;
+  return map[key] || (key ? key.replaceAll("_", " ") : "Usuario");
+}
+
+function categoryLabel(category) {
+  const key = String(category || "").toLowerCase();
+  return CATEGORY_LABELS[key] || (key ? key.replaceAll("_", " ") : "Sistema");
+}
 const TENANT_STATUSES = ["active", "trial", "paused", "past_due", "suspended", "cancelled"];
 const SUB_STATUSES = ["trial", "active", "past_due", "cancelled", "suspended"];
 const INDUSTRY_OPTIONS = [
@@ -338,6 +363,8 @@ export default function AdminApp() {
   const [passwordRecovery, setPasswordRecovery] = useState(emptyPasswordRecovery);
   const [passwordReset, setPasswordReset] = useState(emptyPasswordReset);
   const [bootstrap, setBootstrap] = useState({ email: "", password: "", full_name: "Scentra Admin", platform_role: "superadmin" });
+  const [adminProfileForm, setAdminProfileForm] = useState({ full_name: "", email: "", phone: "", role_label: "", avatar_url: "", current_password: "" });
+  const [adminPasswordForm, setAdminPasswordForm] = useState({ current_password: "", new_password: "", confirm_password: "" });
   const [loginCaptchaToken, setLoginCaptchaToken] = useState("");
   const [mfaChallenge, setMfaChallenge] = useState(null);
   const [mfaCode, setMfaCode] = useState("");
@@ -367,6 +394,18 @@ export default function AdminApp() {
   const [audit, setAudit] = useState([]);
   const [adminSecurity, setAdminSecurity] = useState(null);
   const [securityCompliance, setSecurityCompliance] = useState(null);
+  const [platformAdmins, setPlatformAdmins] = useState([]);
+  const [platformAdminRoles, setPlatformAdminRoles] = useState(Object.keys(PLATFORM_ROLE_LABELS));
+  const [platformAdminForm, setPlatformAdminForm] = useState({ email: "", full_name: "", password: "", platform_role: "support", status: "active", notes: "", send_email: true });
+  const [tenantUsers, setTenantUsers] = useState([]);
+  const [tenantUserRoles, setTenantUserRoles] = useState(Object.keys(TENANT_ROLE_LABELS));
+  const [tenantUserForm, setTenantUserForm] = useState({ tenant_id: "", email: "", full_name: "", password: "", role: "agent", send_email: true });
+  const [userBusy, setUserBusy] = useState("");
+  const [notificationTargets, setNotificationTargets] = useState({ tenants: [], users: [], roles: [], smtp_configured: false });
+  const [adminNotifications, setAdminNotifications] = useState([]);
+  const [notificationForm, setNotificationForm] = useState({ title: "", body: "", severity: "info", category: "system", audience_type: "selected", tenant_ids: [], user_ids: [], roles: [], email_copy: true, ai_assisted: false });
+  const [notificationDraftForm, setNotificationDraftForm] = useState({ topic: "", audience: "", tone: "claro", urgency: "normal", body_hint: "" });
+  const [notificationBusy, setNotificationBusy] = useState("");
   const [queues, setQueues] = useState(null);
   const [health, setHealth] = useState(null);
   const [deadLetters, setDeadLetters] = useState([]);
@@ -466,6 +505,15 @@ export default function AdminApp() {
     if (!token) return;
     const data = await apiCall("/saas/v1/admin/auth/me");
     setMe(data);
+    const profile = data?.profile_json || {};
+    setAdminProfileForm((prev) => ({
+      ...prev,
+      full_name: prev.full_name || data?.full_name || "",
+      email: prev.email || data?.email || "",
+      phone: prev.phone || profile.phone || "",
+      role_label: prev.role_label || profile.role_label || "",
+      avatar_url: prev.avatar_url || profile.avatar_url || "",
+    }));
   };
 
   const loadOverview = async () => {
@@ -557,6 +605,26 @@ export default function AdminApp() {
     setSecurityCompliance(complianceData || null);
   };
 
+  const loadAdminUsers = async () => {
+    const [platformData, tenantData] = await Promise.all([
+      apiCall("/saas/v1/admin/users/platform"),
+      apiCall("/saas/v1/admin/users/tenants?limit=300"),
+    ]);
+    setPlatformAdmins(platformData?.admins || []);
+    setPlatformAdminRoles(platformData?.roles || Object.keys(PLATFORM_ROLE_LABELS));
+    setTenantUsers(tenantData?.members || []);
+    setTenantUserRoles(tenantData?.roles || Object.keys(TENANT_ROLE_LABELS));
+  };
+
+  const loadAdminNotifications = async () => {
+    const [targetData, notificationData] = await Promise.all([
+      apiCall("/saas/v1/admin/notifications/targets"),
+      apiCall("/saas/v1/admin/notifications?limit=80"),
+    ]);
+    setNotificationTargets(targetData || { tenants: [], users: [], roles: [], smtp_configured: false });
+    setAdminNotifications(notificationData?.notifications || []);
+  };
+
   const loadQueues = async () => {
     const data = await apiCall("/saas/v1/admin/operations/queues");
     setQueues(data?.queues || null);
@@ -584,6 +652,8 @@ export default function AdminApp() {
       if (activeView === "plans") { await Promise.all([loadPlans(), loadFeatures()]); }
       if (activeView === "subscriptions") await Promise.all([loadSubscriptions(), loadPlans()]);
       if (activeView === "billing") await Promise.all([loadBillingAdmin(), loadTenants()]);
+      if (activeView === "users") await Promise.all([loadMe(), loadAdminUsers(), loadTenants()]);
+      if (activeView === "notifications") await Promise.all([loadAdminNotifications(), loadTenants()]);
       if (activeView === "security") await loadSecurity();
       if (activeView === "intelligence") await loadIntelligence();
       if (activeView === "trust") await loadTrust();
@@ -1117,6 +1187,94 @@ export default function AdminApp() {
     }
   };
 
+  const saveAdminProfile = async () => {
+    try {
+      const data = await apiCall("/saas/v1/admin/auth/profile", {
+        method: "PATCH",
+        body: JSON.stringify(adminProfileForm),
+      });
+      setAdminProfileForm((prev) => ({ ...prev, current_password: "" }));
+      setMe((prev) => ({ ...(prev || {}), email: data?.user?.email || prev?.email, full_name: data?.user?.full_name || prev?.full_name, profile_json: data?.user?.profile_json || prev?.profile_json || {} }));
+      showStatus("Perfil admin actualizado", "ok");
+      await loadMe();
+    } catch (err) { showStatus(String(err.message || err), "error"); }
+  };
+
+  const changeAdminPassword = async () => {
+    if (adminPasswordForm.new_password !== adminPasswordForm.confirm_password) return showStatus("La confirmacion de clave no coincide.", "error");
+    try {
+      await apiCall("/saas/v1/admin/auth/password/change", {
+        method: "POST",
+        body: JSON.stringify({ current_password: adminPasswordForm.current_password, new_password: adminPasswordForm.new_password }),
+      });
+      setAdminPasswordForm({ current_password: "", new_password: "", confirm_password: "" });
+      showStatus("Clave admin actualizada", "ok");
+    } catch (err) { showStatus(String(err.message || err), "error"); }
+  };
+
+  const createPlatformAdmin = async () => {
+    setUserBusy("platform-create");
+    try {
+      await apiCall("/saas/v1/admin/users/platform", { method: "POST", body: JSON.stringify(platformAdminForm) });
+      setPlatformAdminForm({ email: "", full_name: "", password: "", platform_role: "support", status: "active", notes: "", send_email: true });
+      showStatus("Administrador creado o actualizado", "ok");
+      await loadAdminUsers();
+    } catch (err) { showStatus(String(err.message || err), "error"); }
+    finally { setUserBusy(""); }
+  };
+
+  const patchPlatformAdmin = async (userId, patch) => {
+    setUserBusy(userId);
+    try {
+      await apiCall(`/saas/v1/admin/users/platform/${encodeURIComponent(userId)}`, { method: "PATCH", body: JSON.stringify(patch) });
+      showStatus("Administrador actualizado", "ok");
+      await loadAdminUsers();
+    } catch (err) { showStatus(String(err.message || err), "error"); }
+    finally { setUserBusy(""); }
+  };
+
+  const createTenantUser = async () => {
+    setUserBusy("tenant-create");
+    try {
+      await apiCall("/saas/v1/admin/users/tenants", { method: "POST", body: JSON.stringify(tenantUserForm) });
+      setTenantUserForm((prev) => ({ ...prev, email: "", full_name: "", password: "", role: "agent" }));
+      showStatus("Usuario de empresa creado o actualizado", "ok");
+      await loadAdminUsers();
+    } catch (err) { showStatus(String(err.message || err), "error"); }
+    finally { setUserBusy(""); }
+  };
+
+  const patchTenantUser = async (membershipId, patch) => {
+    setUserBusy(membershipId);
+    try {
+      await apiCall(`/saas/v1/admin/users/tenants/${encodeURIComponent(membershipId)}`, { method: "PATCH", body: JSON.stringify(patch) });
+      showStatus("Usuario de empresa actualizado", "ok");
+      await loadAdminUsers();
+    } catch (err) { showStatus(String(err.message || err), "error"); }
+    finally { setUserBusy(""); }
+  };
+
+  const draftNotification = async () => {
+    setNotificationBusy("draft");
+    try {
+      const data = await apiCall("/saas/v1/admin/notifications/draft-ai", { method: "POST", body: JSON.stringify(notificationDraftForm) });
+      setNotificationForm((prev) => ({ ...prev, title: data?.title || prev.title, body: data?.body || prev.body, ai_assisted: Boolean(data?.ai_assisted) }));
+      showStatus("Borrador preparado", "ok");
+    } catch (err) { showStatus(String(err.message || err), "error"); }
+    finally { setNotificationBusy(""); }
+  };
+
+  const sendAdminNotification = async () => {
+    setNotificationBusy("send");
+    try {
+      await apiCall("/saas/v1/admin/notifications", { method: "POST", body: JSON.stringify(notificationForm) });
+      setNotificationForm({ title: "", body: "", severity: "info", category: "system", audience_type: "selected", tenant_ids: [], user_ids: [], roles: [], email_copy: true, ai_assisted: false });
+      showStatus("Notificación enviada", "ok");
+      await loadAdminNotifications();
+    } catch (err) { showStatus(String(err.message || err), "error"); }
+    finally { setNotificationBusy(""); }
+  };
+
   const downloadAuditCsv = async () => {
     try {
       await downloadApiFile("/saas/v1/admin/audit/export.csv?limit=2000", "scentra-admin-audit.csv");
@@ -1245,6 +1403,8 @@ export default function AdminApp() {
         {activeView === "plans" ? <PlansView plans={plans} features={features} planForm={planForm} setPlanForm={setPlanForm} savePlan={savePlan} editPlan={editPlan} /> : null}
         {activeView === "subscriptions" ? <SubscriptionsView subscriptions={subscriptions} plans={plans} patchSubscription={patchSubscription} /> : null}
         {activeView === "billing" ? <BillingView tenants={tenants} invoices={billingInvoices} credits={billingCredits} billingForm={billingForm} setBillingForm={setBillingForm} applyBillingCredit={applyBillingCredit} syncBillingLifecycle={syncBillingLifecycle} downloadInvoice={downloadAdminInvoice} /> : null}
+        {activeView === "users" ? <UsersAdminView me={me} profileForm={adminProfileForm} setProfileForm={setAdminProfileForm} passwordForm={adminPasswordForm} setPasswordForm={setAdminPasswordForm} saveProfile={saveAdminProfile} changePassword={changeAdminPassword} platformAdmins={platformAdmins} platformRoles={platformAdminRoles} platformForm={platformAdminForm} setPlatformForm={setPlatformAdminForm} createPlatformAdmin={createPlatformAdmin} patchPlatformAdmin={patchPlatformAdmin} tenantUsers={tenantUsers} tenantRoles={tenantUserRoles} tenantForm={tenantUserForm} setTenantForm={setTenantUserForm} tenants={tenants} createTenantUser={createTenantUser} patchTenantUser={patchTenantUser} busy={userBusy} /> : null}
+        {activeView === "notifications" ? <NotificationsAdminView targets={notificationTargets} notifications={adminNotifications} form={notificationForm} setForm={setNotificationForm} draftForm={notificationDraftForm} setDraftForm={setNotificationDraftForm} draftNotification={draftNotification} sendNotification={sendAdminNotification} busy={notificationBusy} /> : null}
         {activeView === "security" ? <SecurityView security={adminSecurity} compliance={securityCompliance} updateAdminTwoFactor={updateAdminTwoFactor} downloadAuditCsv={downloadAuditCsv} /> : null}
         {activeView === "intelligence" ? <IntelligenceView tenants={intelligenceTenants} catalog={intelligenceCatalog} metrics={intelligenceMetrics} models={intelligenceModels} training={intelligenceTraining} mlops={intelligenceMlops} realtime={intelligenceRealtime} gating={intelligenceGating} providerPolicyForm={providerPolicyForm} setProviderPolicyForm={setProviderPolicyForm} saveProviderPolicy={saveProviderPolicy} setIntelligencePlanFeature={setIntelligencePlanFeature} dataForm={intelligenceDataForm} setDataForm={setIntelligenceDataForm} generateAutoLabels={generateAutoLabels} recomputeFeaturePipelines={recomputeFeaturePipelines} buildMlDataset={buildMlDataset} trainForm={intelligenceTrainForm} setTrainForm={setIntelligenceTrainForm} runTraining={runSyntheticMlTraining} runAutoLabelTraining={runAutoLabelMlTraining} modelForm={intelligenceModelForm} setModelForm={setIntelligenceModelForm} registerModel={registerIntelligenceModel} setIntelligenceFeature={setIntelligenceFeature} processQueue={processQueue} recomputeMetrics={recomputeIntelligenceMetrics} refreshRealtimeMetrics={refreshRealtimeMetrics} updateModel={updateIntelligenceModel} /> : null}
         {activeView === "trust" ? <TrustAdminView overview={trustOverview} /> : null}
@@ -2189,6 +2349,113 @@ function QueueSummary({ queues }) {
       <div><span>Remarketing active</span><strong>{number(queueTotal(remarketing, "active"))}</strong></div>
       <div><span>Agent queued</span><strong>{number(queueTotal(agentOrchestrator, "queued"))}</strong></div>
     </div>
+  );
+}
+
+function UsersAdminView({ me, profileForm, setProfileForm, passwordForm, setPasswordForm, saveProfile, changePassword, platformAdmins, platformRoles, platformForm, setPlatformForm, createPlatformAdmin, patchPlatformAdmin, tenantUsers, tenantRoles, tenantForm, setTenantForm, tenants, createTenantUser, patchTenantUser, busy }) {
+  return (
+    <section className="stack">
+      <div className="grid">
+        <article className="panel glass-card">
+          <div className="panel-head"><h2>Mi perfil Admin</h2><span>{roleLabel(me?.platform_role, true)}</span></div>
+          <div className="form-grid two">
+            <label>Nombre<input value={profileForm.full_name} onChange={(event) => setProfileForm((prev) => ({ ...prev, full_name: event.target.value }))} /></label>
+            <label>Correo<input value={profileForm.email} onChange={(event) => setProfileForm((prev) => ({ ...prev, email: event.target.value }))} /></label>
+            <label>Telefono<input value={profileForm.phone} onChange={(event) => setProfileForm((prev) => ({ ...prev, phone: event.target.value }))} /></label>
+            <label>Cargo visible<input value={profileForm.role_label} onChange={(event) => setProfileForm((prev) => ({ ...prev, role_label: event.target.value }))} /></label>
+            <label className="wide">URL avatar<input value={profileForm.avatar_url} onChange={(event) => setProfileForm((prev) => ({ ...prev, avatar_url: event.target.value }))} /></label>
+            <label className="wide">Clave actual para cambiar correo<input type="password" value={profileForm.current_password} onChange={(event) => setProfileForm((prev) => ({ ...prev, current_password: event.target.value }))} /></label>
+          </div>
+          <button type="button" className="primary" onClick={saveProfile}>Guardar perfil</button>
+        </article>
+        <article className="panel glass-card">
+          <div className="panel-head"><h2>Cambiar clave</h2><span>seguridad</span></div>
+          <label>Clave actual<input type="password" value={passwordForm.current_password} onChange={(event) => setPasswordForm((prev) => ({ ...prev, current_password: event.target.value }))} /></label>
+          <label>Nueva clave<input type="password" value={passwordForm.new_password} onChange={(event) => setPasswordForm((prev) => ({ ...prev, new_password: event.target.value }))} /></label>
+          <label>Confirmar clave<input type="password" value={passwordForm.confirm_password} onChange={(event) => setPasswordForm((prev) => ({ ...prev, confirm_password: event.target.value }))} /></label>
+          <button type="button" className="primary" onClick={changePassword}>Actualizar clave</button>
+        </article>
+      </div>
+      <div className="grid">
+        <article className="panel glass-card">
+          <div className="panel-head"><h2>Crear Admin</h2><span>plataforma</span></div>
+          <label>Nombre<input value={platformForm.full_name} onChange={(event) => setPlatformForm((prev) => ({ ...prev, full_name: event.target.value }))} /></label>
+          <label>Email<input value={platformForm.email} onChange={(event) => setPlatformForm((prev) => ({ ...prev, email: event.target.value }))} /></label>
+          <label>Clave temporal<input type="password" value={platformForm.password} onChange={(event) => setPlatformForm((prev) => ({ ...prev, password: event.target.value }))} /></label>
+          <label>Rol<select value={platformForm.platform_role} onChange={(event) => setPlatformForm((prev) => ({ ...prev, platform_role: event.target.value }))}>{platformRoles.map((role) => <option key={role} value={role}>{roleLabel(role, true)}</option>)}</select></label>
+          <label>Estado<select value={platformForm.status} onChange={(event) => setPlatformForm((prev) => ({ ...prev, status: event.target.value }))}><option value="active">Activo</option><option value="paused">Pausado</option><option value="disabled">Deshabilitado</option></select></label>
+          <label>Notas<input value={platformForm.notes} onChange={(event) => setPlatformForm((prev) => ({ ...prev, notes: event.target.value }))} /></label>
+          <label className="check-row"><input type="checkbox" checked={platformForm.send_email} onChange={(event) => setPlatformForm((prev) => ({ ...prev, send_email: event.target.checked }))} /> Enviar bienvenida</label>
+          <button type="button" className="primary" disabled={busy === "platform-create"} onClick={createPlatformAdmin}>{busy === "platform-create" ? "Guardando..." : "Crear admin"}</button>
+        </article>
+        <article className="panel glass-card">
+          <div className="panel-head"><h2>Crear usuario tenant</h2><span>empresa</span></div>
+          <label>Empresa<select value={tenantForm.tenant_id} onChange={(event) => setTenantForm((prev) => ({ ...prev, tenant_id: event.target.value }))}><option value="">Seleccionar empresa</option>{tenants.map((tenant) => <option key={tenant.id} value={tenant.id}>{tenant.name}</option>)}</select></label>
+          <label>Nombre<input value={tenantForm.full_name} onChange={(event) => setTenantForm((prev) => ({ ...prev, full_name: event.target.value }))} /></label>
+          <label>Email<input value={tenantForm.email} onChange={(event) => setTenantForm((prev) => ({ ...prev, email: event.target.value }))} /></label>
+          <label>Clave temporal<input type="password" value={tenantForm.password} onChange={(event) => setTenantForm((prev) => ({ ...prev, password: event.target.value }))} /></label>
+          <label>Rol<select value={tenantForm.role} onChange={(event) => setTenantForm((prev) => ({ ...prev, role: event.target.value }))}>{tenantRoles.map((role) => <option key={role} value={role}>{roleLabel(role)}</option>)}</select></label>
+          <label className="check-row"><input type="checkbox" checked={tenantForm.send_email} onChange={(event) => setTenantForm((prev) => ({ ...prev, send_email: event.target.checked }))} /> Enviar bienvenida</label>
+          <button type="button" className="primary" disabled={busy === "tenant-create" || !tenantForm.tenant_id} onClick={createTenantUser}>{busy === "tenant-create" ? "Guardando..." : "Crear usuario"}</button>
+        </article>
+      </div>
+      <article className="panel glass-card">
+        <div className="panel-head"><h2>Administradores plataforma</h2><span>{number(platformAdmins.length)}</span></div>
+        <div className="table">{platformAdmins.map((admin) => <div className="row" key={admin.user_id}><span><strong>{admin.full_name || admin.email}</strong><small>{admin.email}</small></span><span><select value={admin.platform_role} disabled={busy === admin.user_id} onChange={(event) => patchPlatformAdmin(admin.user_id, { platform_role: event.target.value })}>{platformRoles.map((role) => <option key={role} value={role}>{roleLabel(role, true)}</option>)}</select></span><span><select value={admin.platform_status} disabled={busy === admin.user_id || admin.user_id === me?.user_id} onChange={(event) => patchPlatformAdmin(admin.user_id, { status: event.target.value })}><option value="active">Activo</option><option value="paused">Pausado</option><option value="disabled">Deshabilitado</option></select></span></div>)}</div>
+      </article>
+      <article className="panel glass-card">
+        <div className="panel-head"><h2>Usuarios de empresas</h2><span>{number(tenantUsers.length)}</span></div>
+        <div className="table">{tenantUsers.map((member) => <div className="row user-row" key={member.id}><span><strong>{member.full_name || member.email}</strong><small>{member.email} / {member.tenant_name}</small></span><span><select value={member.role} disabled={busy === member.id} onChange={(event) => patchTenantUser(member.id, { role: event.target.value })}>{tenantRoles.map((role) => <option key={role} value={role}>{roleLabel(role)}</option>)}</select></span><span>{member.is_active ? "Activo" : "Inactivo"}</span><span><button type="button" disabled={busy === member.id} onClick={() => patchTenantUser(member.id, { is_active: !member.is_active })}>{member.is_active ? "Desactivar" : "Activar"}</button></span></div>)}</div>
+      </article>
+    </section>
+  );
+}
+
+function NotificationsAdminView({ targets, notifications, form, setForm, draftForm, setDraftForm, draftNotification, sendNotification, busy }) {
+  const toggleListValue = (key, value) => {
+    setForm((prev) => {
+      const current = new Set(prev[key] || []);
+      if (current.has(value)) current.delete(value);
+      else current.add(value);
+      return { ...prev, [key]: Array.from(current), audience_type: "selected" };
+    });
+  };
+  return (
+    <section className="stack">
+      <div className="grid">
+        <article className="panel glass-card">
+          <div className="panel-head"><h2>Borrador asistido</h2><span>humano revisa y envía</span></div>
+          <label>Tema<input value={draftForm.topic} onChange={(event) => setDraftForm((prev) => ({ ...prev, topic: event.target.value }))} placeholder="Mantenimiento, cambio de rol, aviso comercial..." /></label>
+          <label>Audiencia<input value={draftForm.audience} onChange={(event) => setDraftForm((prev) => ({ ...prev, audience: event.target.value }))} placeholder="administradores de empresas, agentes..." /></label>
+          <label>Tono<input value={draftForm.tone} onChange={(event) => setDraftForm((prev) => ({ ...prev, tone: event.target.value }))} /></label>
+          <label>Contexto<textarea rows={4} value={draftForm.body_hint} onChange={(event) => setDraftForm((prev) => ({ ...prev, body_hint: event.target.value }))} /></label>
+          <button type="button" onClick={draftNotification} disabled={busy === "draft"}>{busy === "draft" ? "Generando..." : "Preparar borrador"}</button>
+        </article>
+        <article className="panel glass-card">
+          <div className="panel-head"><h2>Enviar notificación</h2><span>{targets.smtp_configured ? "correo activo" : "solo app"}</span></div>
+          <label>Titulo<input value={form.title} onChange={(event) => setForm((prev) => ({ ...prev, title: event.target.value }))} /></label>
+          <label>Mensaje<textarea rows={6} value={form.body} onChange={(event) => setForm((prev) => ({ ...prev, body: event.target.value }))} /></label>
+          <div className="form-grid two">
+            <label>Severidad<select value={form.severity} onChange={(event) => setForm((prev) => ({ ...prev, severity: event.target.value }))}>{Object.entries(SEVERITY_LABELS).map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select></label>
+            <label>Categoría<select value={form.category} onChange={(event) => setForm((prev) => ({ ...prev, category: event.target.value }))}>{Object.entries(CATEGORY_LABELS).map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select></label>
+          </div>
+          <label className="check-row"><input type="checkbox" checked={form.email_copy} onChange={(event) => setForm((prev) => ({ ...prev, email_copy: event.target.checked }))} /> Enviar copia por correo</label>
+          <button type="button" className="primary" onClick={sendNotification} disabled={busy === "send"}>{busy === "send" ? "Enviando..." : "Enviar"}</button>
+        </article>
+      </div>
+      <article className="panel glass-card">
+        <div className="panel-head"><h2>Destinatarios</h2><span>sin mensajes de cliente</span></div>
+        <div className="notification-targets">
+          <div><strong>Empresas</strong>{(targets.tenants || []).slice(0, 80).map((tenant) => <label className="check-row" key={tenant.id}><input type="checkbox" checked={(form.tenant_ids || []).includes(tenant.id)} onChange={() => toggleListValue("tenant_ids", tenant.id)} /> {tenant.name}</label>)}</div>
+          <div><strong>Roles</strong>{(targets.roles || Object.keys(TENANT_ROLE_LABELS)).map((role) => <label className="check-row" key={role}><input type="checkbox" checked={(form.roles || []).includes(role)} onChange={() => toggleListValue("roles", role)} /> {roleLabel(role)}</label>)}</div>
+          <div><strong>Usuarios</strong>{(targets.users || []).slice(0, 120).map((user) => <label className="check-row" key={`${user.tenant_id}-${user.user_id}`}><input type="checkbox" checked={(form.user_ids || []).includes(user.user_id)} onChange={() => toggleListValue("user_ids", user.user_id)} /> {user.full_name || user.email} <small>{user.tenant_name}</small></label>)}</div>
+        </div>
+      </article>
+      <article className="panel glass-card">
+        <div className="panel-head"><h2>Historial</h2><span>{number(notifications.length)}</span></div>
+        <div className="table">{notifications.map((item) => <div className="row notification-row" key={item.id}><span><strong>{item.title}</strong><small>{SEVERITY_LABELS[item.severity] || item.severity} / {categoryLabel(item.category)}</small></span><span>{number(item.recipients)} destinatarios</span><span>{number(item.read_count)} leídas</span><span>{number(item.email_sent_count)} correos</span></div>)}</div>
+      </article>
+    </section>
   );
 }
 

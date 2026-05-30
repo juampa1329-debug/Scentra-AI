@@ -55,6 +55,50 @@ class AdminTwoFactorPatchIn(BaseModel):
     method: str = Field(default="email_otp", max_length=40)
 
 
+class AdminProfilePatchIn(BaseModel):
+    full_name: str | None = Field(default=None, max_length=180)
+    email: str | None = Field(default=None, max_length=240)
+    current_password: str = Field(default="", max_length=200)
+    phone: str | None = Field(default=None, max_length=60)
+    role_label: str | None = Field(default=None, max_length=120)
+    avatar_url: str | None = Field(default=None, max_length=1000)
+
+
+class AdminPasswordChangeIn(BaseModel):
+    current_password: str = Field(min_length=1, max_length=200)
+    new_password: str = Field(min_length=8, max_length=200)
+
+
+class PlatformAdminCreateIn(BaseModel):
+    email: str = Field(min_length=3, max_length=240)
+    full_name: str = Field(default="", max_length=180)
+    password: str = Field(min_length=8, max_length=200)
+    platform_role: str = Field(default="support", max_length=40)
+    status: str = Field(default="active", max_length=40)
+    notes: str = Field(default="", max_length=1000)
+    send_email: bool = True
+
+
+class PlatformAdminPatchIn(BaseModel):
+    platform_role: str | None = Field(default=None, max_length=40)
+    status: str | None = Field(default=None, max_length=40)
+    notes: str | None = Field(default=None, max_length=1000)
+
+
+class AdminTenantUserCreateIn(BaseModel):
+    tenant_id: str = Field(min_length=20, max_length=80)
+    email: str = Field(min_length=3, max_length=240)
+    full_name: str = Field(default="", max_length=180)
+    password: str = Field(default="", max_length=200)
+    role: str = Field(default="agent", max_length=40)
+    send_email: bool = True
+
+
+class AdminTenantMembershipPatchIn(BaseModel):
+    role: str | None = Field(default=None, max_length=40)
+    is_active: bool | None = None
+
+
 class TenantPatchIn(BaseModel):
     name: str | None = Field(default=None, min_length=2, max_length=160)
     status: str | None = Field(default=None, max_length=40)

@@ -99,6 +99,19 @@ const SETTINGS_TABS = [
   ["plan", t("settings.tab.plan")],
 ];
 
+const TEAM_ROLE_LABELS = {
+  owner: "Propietario",
+  admin: "Administrador",
+  supervisor: "Supervisor",
+  agent: "Agente",
+  viewer: "Lector",
+};
+
+function teamRoleLabel(role) {
+  const key = String(role || "").toLowerCase();
+  return TEAM_ROLE_LABELS[key] || (key ? key.replaceAll("_", " ") : "Usuario");
+}
+
 const defaultRegister = () => ({ email: "", password: "", full_name: "", tenant_name: "", tenant_slug: "", industry_code: "general" });
 const defaultPasswordRecovery = () => ({ email: "" });
 const defaultPasswordReset = () => ({ token: "", new_password: "", confirm_password: "" });
@@ -871,7 +884,10 @@ function App() {
   const [aiTesterOpen, setAiTesterOpen] = useState(false);
   const [aiTest, setAiTest] = useState({ phone: "", message: "" });
   const [aiTestResult, setAiTestResult] = useState("");
-  const [profileForm, setProfileForm] = useState({ fullName: "", email: "", phone: "", role: "", avatarUrl: "" });
+  const [profileForm, setProfileForm] = useState({ fullName: "", email: "", phone: "", role: "", avatarUrl: "", currentPassword: "" });
+  const [teamMembers, setTeamMembers] = useState([]);
+  const [teamUserForm, setTeamUserForm] = useState({ email: "", full_name: "", password: "", role: "agent", send_email: true });
+  const [teamBusy, setTeamBusy] = useState("");
   const [securityForm, setSecurityForm] = useState({ currentPassword: "", newPassword: "", confirmPassword: "", twoFactorEnabled: false, twoFactorMethod: "email_otp", passwordChangedAt: "" });
   const [apiCredentials, setApiCredentials] = useState([]);
   const [knowledgeSources, setKnowledgeSources] = useState([]);
@@ -977,6 +993,8 @@ function App() {
   const [inboxRefreshing, setInboxRefreshing] = useState(false);
   const [inboxLastSyncAt, setInboxLastSyncAt] = useState("");
   const [inboxSyncError, setInboxSyncError] = useState("");
+  const [systemNotifications, setSystemNotifications] = useState([]);
+  const [systemNotificationPopup, setSystemNotificationPopup] = useState(null);
   const [isRecording, setIsRecording] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
   const [recordingLevels, setRecordingLevels] = useState(EMPTY_WAVEFORM);
@@ -1022,6 +1040,8 @@ function App() {
   const currentIndustryCode = verticalState?.tenant?.industry_code || activeCompany?.industry_code || register.industry_code || "general";
   const selectedVerticalPack = verticalPacks.find((pack) => pack.code === verticalApply.industry_code) || verticalPacks.find((pack) => pack.code === currentIndustryCode) || FALLBACK_VERTICAL_PACKS[0];
   const unreadTotal = conversations.reduce((sum, item) => sum + Number(item.unread_count || 0), 0);
+  const unreadSystemNotifications = systemNotifications.filter((item) => !item.read_at);
+  const systemNotificationUnreadTotal = unreadSystemNotifications.length;
   const connectedIntegrations = integrations.filter((item) => item.status !== "disconnected").length;
   const activeWebhooks = webhooks.filter((item) => item.is_active).length;
   const activeWhatsappIntegration = integrations.find((item) => item.channel === "whatsapp" && item.status === "connected");
@@ -1445,6 +1465,7 @@ function App() {
     setIntegrationSecretModal(null);
     setMilestoneNotice(null);
     setWhatsappPhones([]); setPhoneRegisterForm({ phone_number_id: "", pin: "" });
+    setSystemNotifications([]); setSystemNotificationPopup(null); setTeamMembers([]);
   };
 
   const clearTokens = () => {
@@ -1458,8 +1479,50 @@ function App() {
     try {
       const data = await apiCall("/saas/v1/auth/me");
       setMe(data); setTenants(data?.tenants || []);
-      setProfileForm((prev) => ({ ...prev, fullName: prev.fullName || data?.full_name || "", email: prev.email || data?.email || "" }));
+      const profile = data?.profile_json || {};
+      setProfileForm((prev) => ({
+        ...prev,
+        fullName: prev.fullName || data?.full_name || "",
+        email: prev.email || data?.email || "",
+        phone: prev.phone || profile.phone || "",
+        role: prev.role || profile.role_label || "",
+        avatarUrl: prev.avatarUrl || profile.avatar_url || "",
+      }));
     } catch (err) { showStatus(String(err.message || err), "error"); }
+  };
+
+  const loadSystemNotifications = async (silent = true) => {
+    if (!accessToken) return;
+    try {
+      const data = await apiCall("/saas/v1/notifications?limit=40");
+      const items = data?.notifications || [];
+      setSystemNotifications(items);
+      const popup = items.find((item) => !item.read_at && item.popup_until_read);
+      setSystemNotificationPopup((prev) => prev || popup || null);
+      if (!silent) showStatus("Notificaciones actualizadas", "ok");
+    } catch (err) {
+      if (!silent) showStatus(String(err.message || err), "error");
+    }
+  };
+
+  const markSystemNotificationRead = async (recipientId) => {
+    if (!recipientId) return;
+    try {
+      await apiCall(`/saas/v1/notifications/${encodeURIComponent(recipientId)}/read`, { method: "POST" });
+      setSystemNotificationPopup((prev) => (prev?.recipient_id === recipientId ? null : prev));
+      await loadSystemNotifications(true);
+    } catch (err) { showStatus(String(err.message || err), "error"); }
+  };
+
+  const loadTeamMembers = async (silent = true) => {
+    if (!accessToken) return;
+    try {
+      const data = await apiCall("/saas/v1/auth/team");
+      setTeamMembers(data?.members || []);
+      if (!silent) showStatus("Usuarios actualizados", "ok");
+    } catch (err) {
+      if (!silent) showStatus(String(err.message || err), "error");
+    }
   };
 
   const loadSecurityStatus = async () => {
@@ -1839,6 +1902,7 @@ function App() {
       if (!items.length) { setSelectedConversation(null); setConversationMemory(null); setConversationTasks([]); setMessageStatusEvents([]); setWebSearchRuns([]); setMultimodalMemoryEvents([]); setMessages([]); setReplyText(""); clearComposerAttachment(); setCatalogDraft(null); }
       setInboxLastSyncAt(new Date().toISOString());
       setInboxSyncError("");
+      if (!lightweight) loadSystemNotifications(true);
     })()
       .catch((err) => {
         const message = String(err.message || err);
@@ -1877,6 +1941,7 @@ function App() {
   }, [browserNotificationsEnabled, notificationPermission]);
   useEffect(() => {
     if (accessToken) loadAdvisorSignals(true);
+    if (accessToken) loadSystemNotifications(true);
     if (accessToken && ["dashboard", "customers", "labels", "campaigns", "broadcast", "ads"].includes(activeView)) loadDashboard(true);
     if (accessToken && activeView === "settings") Promise.all([loadIntegrations(), loadWebhooks(), loadBilling(), loadApiCredentials(), loadAiSettings(), loadKnowledgeSources(), loadDiagnostics(true), loadAiGateway(true), loadVerticalState(true)]);
     if (accessToken && activeView === "inbox") loadInbox();
@@ -1892,6 +1957,7 @@ function App() {
 
   useEffect(() => {
     if (accessToken && activeView === "settings" && settingsTab === "security") loadSecurityStatus();
+    if (accessToken && activeView === "settings" && settingsTab === "users") loadTeamMembers(true);
   }, [accessToken, activeView, settingsTab]);
 
   useEffect(() => {
@@ -3801,7 +3867,54 @@ function App() {
       setDiagnosticsRunning(false);
     }
   };
-  const saveProfileLocal = () => showStatus("Perfil preparado. Falta conectar persistencia de usuario y foto.", "ok");
+  const saveProfile = async () => {
+    try {
+      const data = await apiCall("/saas/v1/auth/profile", {
+        method: "PATCH",
+        body: JSON.stringify({
+          full_name: profileForm.fullName,
+          email: profileForm.email,
+          current_password: profileForm.currentPassword,
+          phone: profileForm.phone,
+          role_label: profileForm.role,
+          avatar_url: profileForm.avatarUrl,
+        }),
+      });
+      setProfileForm((prev) => ({ ...prev, currentPassword: "" }));
+      setMe((prev) => ({ ...(prev || {}), email: data?.user?.email || prev?.email, full_name: data?.user?.full_name || prev?.full_name, profile_json: data?.user?.profile_json || prev?.profile_json || {} }));
+      showStatus("Perfil actualizado", "ok");
+      await loadSession();
+    } catch (err) { showStatus(String(err.message || err), "error"); }
+  };
+
+  const createTeamUser = async () => {
+    setTeamBusy("create");
+    try {
+      await apiCall("/saas/v1/auth/team/users", {
+        method: "POST",
+        body: JSON.stringify(teamUserForm),
+      });
+      setTeamUserForm({ email: "", full_name: "", password: "", role: "agent", send_email: true });
+      showStatus("Usuario creado o actualizado", "ok");
+      await loadTeamMembers(true);
+      await loadSystemNotifications(true);
+    } catch (err) { showStatus(String(err.message || err), "error"); }
+    finally { setTeamBusy(""); }
+  };
+
+  const updateTeamMember = async (membershipId, patch) => {
+    setTeamBusy(membershipId);
+    try {
+      await apiCall(`/saas/v1/auth/team/memberships/${encodeURIComponent(membershipId)}`, {
+        method: "PATCH",
+        body: JSON.stringify(patch),
+      });
+      showStatus("Usuario actualizado", "ok");
+      await loadTeamMembers(true);
+      await loadSystemNotifications(true);
+    } catch (err) { showStatus(String(err.message || err), "error"); }
+    finally { setTeamBusy(""); }
+  };
   const savePasswordChange = async () => {
     if (!securityForm.currentPassword) return showStatus("Ingresa tu clave actual.", "error");
     if (securityForm.newPassword.length < 8) return showStatus("La nueva clave debe tener al menos 8 caracteres.", "error");
@@ -4342,6 +4455,20 @@ function App() {
           <div className="top-actions"><select value={me.tenant_id || ""} onChange={(event) => switchCompany(event.target.value)} aria-label="Empresa activa">{tenants.map((company) => <option key={company.tenant_id} value={company.tenant_id}>{company.tenant_name || company.name} / {company.role}</option>)}</select><button type="button" onClick={clearTokens}>Salir</button></div>
         </header>
         {status ? <div className={`status floating-status ${statusTone}`}>{status}</div> : null}
+        {systemNotificationPopup ? (
+          <div className={`system-notification-popup glass-card ${systemNotificationPopup.severity || "info"}`}>
+            <div>
+              <span>Scentra</span>
+              <strong>{systemNotificationPopup.title}</strong>
+              <p>{systemNotificationPopup.body}</p>
+              <small>{compactDateTimeLabel(systemNotificationPopup.created_at)}</small>
+            </div>
+            <div className="system-notification-actions">
+              <button type="button" onClick={() => { setActiveView("inbox"); setSystemNotificationPopup(null); }}>Ver en Inbox</button>
+              <button type="button" className="primary" onClick={() => markSystemNotificationRead(systemNotificationPopup.recipient_id)}>Marcar leída</button>
+            </div>
+          </div>
+        ) : null}
         {lifecycleStatus === "trial" && activeView !== "dashboard" ? <div className="trial-strip glass-card"><strong>Demo activa</strong><span>{trialEndLabel ? `Hasta ${trialEndLabel}` : "30 dias de prueba"}</span><small>Configura Meta, IA y plantillas antes de pasar a pago.</small></div> : null}
 
         {activeView === "dashboard" ? (
@@ -4383,8 +4510,16 @@ function App() {
         ) : activeView === "inbox" ? (
           <section className={`inbox-grid ${crmPanelOpen ? "crm-open" : "crm-closed"}`}>
             <div className="panel glass-card inbox-list">
-              <div className="panel-head inbox-list-head"><h2>Inbox</h2><span>{inboxMode === "comments" ? `${filteredSocialComments.length} comentarios` : unreadTotal ? `${number(unreadTotal)} sin leer` : `${filteredConversations.length} chats`}</span></div>
+              <div className="panel-head inbox-list-head"><h2>Inbox</h2><span>{inboxMode === "comments" ? `${filteredSocialComments.length} comentarios` : (unreadTotal + systemNotificationUnreadTotal) ? `${number(unreadTotal + systemNotificationUnreadTotal)} sin leer` : `${filteredConversations.length} chats`}</span></div>
               <div className="conversation-list">
+                {inboxMode === "dms" ? unreadSystemNotifications.map((notice) => (
+                  <button type="button" className="conversation-item system-notification-item active" key={`notice-${notice.recipient_id}`} onClick={() => setSystemNotificationPopup(notice)}>
+                    <span className="conversation-title"><strong>{notice.title}</strong><em>!</em></span>
+                    <span className="conversation-meta"><b>Scentra</b><small>{notice.severity === "critical" ? "Alerta crítica" : notice.severity === "warning" ? "Alerta" : "Notificación"}</small></span>
+                    <small>{notice.body}</small>
+                    <span className="conversation-badges"><mark>Interno</mark><mark>Sin respuesta</mark></span>
+                  </button>
+                )) : null}
                 {inboxMode === "dms" ? filteredConversations.map((conversation) => (
                   <button type="button" className={`conversation-item ${selectedConversation?.id === conversation.id ? "active" : ""}`} key={conversation.id} onClick={() => loadMessages(conversation)}>
                     <span className="conversation-title"><strong>{conversation.display_name || conversation.phone || conversation.external_contact_id}</strong>{Number(conversation.unread_count || 0) > 0 ? <em>{number(conversation.unread_count)}</em> : null}</span>
@@ -5806,9 +5941,39 @@ function App() {
                 <div className="debug-table">{(diagnostics?.webhooks?.last_events || []).map((item, idx) => <div className="debug-row" key={`${item.received_at}-${idx}`}><strong>{item.provider} / {item.status}</strong><span>{fullDateTimeLabel(item.received_at)}</span><small>Endpoint: {item.endpoint_key || "-"}{item.endpoint_fallback ? " / fallback URL antigua" : ""} / Procesado: {item.processed_at ? fullDateTimeLabel(item.processed_at) : "pendiente"} / {item.error || "sin error"}</small></div>)}{!diagnostics?.webhooks?.last_events?.length ? <div className="empty">No hay eventos webhook recientes. Si escribes por WhatsApp y esto sigue vacio, Meta no esta llegando a Scentra o el callback/token esta mal configurado.</div> : null}</div>
               </article>
             </div> : null}
-            {settingsTab === "users" ? <div className="settings-grid"><article className="panel glass-card"><div className="panel-head"><h2>Usuarios</h2><span>equipo</span></div><div className="table"><div className="row"><span>{me.email}</span><span>{me.role}</span><span>activo</span></div></div></article><article className="panel glass-card"><div className="panel-head"><h2>Invitar usuario</h2><span>proximo</span></div><label>Email<input placeholder="correo@empresa.com" /></label><label>Rol<select><option>agent</option><option>supervisor</option><option>admin</option></select></label><button type="button" className="primary" onClick={() => showStatus("Invitaciones de usuarios pendientes de backend.", "neutral")}>Enviar invitacion</button></article></div> : null}
+            {settingsTab === "users" ? <div className="settings-grid">
+              <article className="panel glass-card wide-panel">
+                <div className="panel-head"><h2>Usuarios</h2><button type="button" onClick={() => loadTeamMembers(false)}>Refrescar</button></div>
+                <div className="table team-table">
+                  {teamMembers.map((member) => (
+                    <div className="row" key={member.id}>
+                      <span><strong>{member.full_name || member.email}</strong><small>{member.email}</small></span>
+                      <span>
+                        <select value={member.role || "agent"} disabled={teamBusy === member.id || (member.user_id === me.user_id && member.role === "owner")} onChange={(event) => updateTeamMember(member.id, { role: event.target.value })}>
+                          {Object.keys(TEAM_ROLE_LABELS).map((role) => <option key={role} value={role}>{teamRoleLabel(role)}</option>)}
+                        </select>
+                      </span>
+                      <span>{member.is_active ? "Activo" : "Inactivo"}</span>
+                      <span className="row-actions">
+                        <button type="button" disabled={teamBusy === member.id || member.user_id === me.user_id} onClick={() => updateTeamMember(member.id, { is_active: !member.is_active })}>{member.is_active ? "Desactivar" : "Activar"}</button>
+                      </span>
+                    </div>
+                  ))}
+                  {!teamMembers.length ? <div className="empty">Aun no hay usuarios cargados para esta empresa.</div> : null}
+                </div>
+              </article>
+              <article className="panel glass-card">
+                <div className="panel-head"><h2>Crear usuario</h2><span>correo de bienvenida</span></div>
+                <label>Nombre<input value={teamUserForm.full_name} onChange={(event) => setTeamUserForm((prev) => ({ ...prev, full_name: event.target.value }))} placeholder="Nombre visible" /></label>
+                <label>Email<input value={teamUserForm.email} onChange={(event) => setTeamUserForm((prev) => ({ ...prev, email: event.target.value }))} placeholder="correo@empresa.com" /></label>
+                <label>Clave temporal<input type="password" value={teamUserForm.password} onChange={(event) => setTeamUserForm((prev) => ({ ...prev, password: event.target.value }))} placeholder="Minimo 8 caracteres para usuarios nuevos" /></label>
+                <label>Rol<select value={teamUserForm.role} onChange={(event) => setTeamUserForm((prev) => ({ ...prev, role: event.target.value }))}>{Object.keys(TEAM_ROLE_LABELS).map((role) => <option key={role} value={role}>{teamRoleLabel(role)}</option>)}</select></label>
+                <label className="check-row"><input type="checkbox" checked={teamUserForm.send_email} onChange={(event) => setTeamUserForm((prev) => ({ ...prev, send_email: event.target.checked }))} /> Enviar correo bonito de bienvenida</label>
+                <button type="button" className="primary" disabled={teamBusy === "create"} onClick={createTeamUser}>{teamBusy === "create" ? "Guardando..." : "Crear o actualizar"}</button>
+              </article>
+            </div> : null}
             {settingsTab === "profile" ? <div className="settings-grid profile-grid">
-              <article className="panel glass-card profile-card"><div className="panel-head"><h2>Perfil</h2><span>datos personales</span></div><div className="avatar-editor"><div className="avatar-preview">{(profileForm.fullName || me.email || "S").slice(0,1).toUpperCase()}</div><div><strong>{profileForm.fullName || me.email}</strong><p className="soft-copy">Foto de perfil, nombre visible y datos de contacto.</p></div></div><label>URL foto de perfil<input placeholder="https://..." value={profileForm.avatarUrl} onChange={(event) => setProfileForm((prev) => ({ ...prev, avatarUrl: event.target.value }))} /></label><div className="form-grid two"><label>Nombre completo<input value={profileForm.fullName} placeholder={me.email} onChange={(event) => setProfileForm((prev) => ({ ...prev, fullName: event.target.value }))} /></label><label>Email<input value={profileForm.email} placeholder={me.email} onChange={(event) => setProfileForm((prev) => ({ ...prev, email: event.target.value }))} /></label><label>Telefono<input value={profileForm.phone} placeholder="+57..." onChange={(event) => setProfileForm((prev) => ({ ...prev, phone: event.target.value }))} /></label><label>Cargo / rol visible<input value={profileForm.role} placeholder={me.role} onChange={(event) => setProfileForm((prev) => ({ ...prev, role: event.target.value }))} /></label></div><div className="panel-actions"><button type="button" className="primary" onClick={saveProfileLocal}>Guardar perfil</button></div></article>
+              <article className="panel glass-card profile-card"><div className="panel-head"><h2>Perfil</h2><span>datos personales</span></div><div className="avatar-editor"><div className="avatar-preview">{(profileForm.fullName || me.email || "S").slice(0,1).toUpperCase()}</div><div><strong>{profileForm.fullName || me.email}</strong><p className="soft-copy">Foto de perfil, nombre visible y datos de contacto.</p></div></div><label>URL foto de perfil<input placeholder="https://..." value={profileForm.avatarUrl} onChange={(event) => setProfileForm((prev) => ({ ...prev, avatarUrl: event.target.value }))} /></label><div className="form-grid two"><label>Nombre completo<input value={profileForm.fullName} placeholder={me.email} onChange={(event) => setProfileForm((prev) => ({ ...prev, fullName: event.target.value }))} /></label><label>Email<input value={profileForm.email} placeholder={me.email} onChange={(event) => setProfileForm((prev) => ({ ...prev, email: event.target.value }))} /></label><label>Telefono<input value={profileForm.phone} placeholder="+57..." onChange={(event) => setProfileForm((prev) => ({ ...prev, phone: event.target.value }))} /></label><label>Cargo / rol visible<input value={profileForm.role} placeholder={teamRoleLabel(me.role)} onChange={(event) => setProfileForm((prev) => ({ ...prev, role: event.target.value }))} /></label><label className="full-width">Clave actual para cambiar email<input type="password" value={profileForm.currentPassword} onChange={(event) => setProfileForm((prev) => ({ ...prev, currentPassword: event.target.value }))} placeholder="Solo requerida si cambias el correo" /></label></div><div className="panel-actions"><button type="button" className="primary" onClick={saveProfile}>Guardar perfil</button></div></article>
               <article className="panel glass-card"><div className="panel-head"><h2>Empresa</h2><span>workspace activo</span></div><div className="company-profile"><span>Empresa</span><strong>{activeCompany?.tenant_name || activeCompany?.name || "Scentra"}</strong><span>Rol</span><strong>{me.role}</strong><span>Plan</span><strong>{billingPlan.plan_code || activeCompany?.plan_code || "starter"}</strong><span>Industria</span><strong>{selectedVerticalPack?.label || currentIndustryCode}</strong></div></article>
             </div> : null}
             {settingsTab === "security" ? <div className="settings-grid security-grid">

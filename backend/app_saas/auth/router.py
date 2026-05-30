@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import secrets
+from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -16,20 +18,23 @@ from app_saas.auth.schemas import (
     PasswordChangeIn,
     PasswordForgotIn,
     PasswordForgotOut,
+    ProfilePatchIn,
     PasswordResetIn,
     RefreshIn,
     RegisterIn,
     SecurityStatusOut,
     SwitchTenantIn,
+    TeamMembershipPatchIn,
+    TeamUserCreateIn,
     TenantMembershipOut,
     TwoFactorPatchIn,
     TokenOut,
 )
 from app_saas.billing.trials import configured_trial_plan_code, create_trial_subscription
 from app_saas.config import settings
-from app_saas.db import db_session
+from app_saas.db import db_session, set_tenant_context
 from app_saas.shared.captcha import verify_captcha_or_raise
-from app_saas.shared.email import send_plain_email, smtp_is_configured
+from app_saas.shared.email import send_alert_email, send_password_reset_email, send_welcome_email, smtp_is_configured
 from app_saas.shared.mfa import create_mfa_challenge, role_requires_mfa, send_security_notice, verify_mfa_code
 from app_saas.shared.request_meta import client_ip, user_agent
 from app_saas.shared.security import (
@@ -52,6 +57,24 @@ from app_saas.verticals.service import apply_industry_pack
 router = APIRouter(prefix="/auth", tags=["saas-auth"])
 
 TWO_FACTOR_METHODS = {"none", "email_otp"}
+TEAM_ROLES = {"owner", "admin", "supervisor", "agent", "viewer"}
+TEAM_ADMIN_ROLES = {"owner", "admin"}
+TEAM_ROLE_LABELS = {
+    "owner": "Propietario",
+    "admin": "Administrador",
+    "supervisor": "Supervisor",
+    "agent": "Agente",
+    "viewer": "Lector",
+}
+
+
+def _role_label(role: object) -> str:
+    value = str(role or "").strip().lower()
+    return TEAM_ROLE_LABELS.get(value, value.replace("_", " ").title() if value else "Usuario")
+
+
+def _json(value) -> str:
+    return json.dumps(value if value is not None else {}, ensure_ascii=False, default=str)
 
 
 def _reset_url(raw_token: str) -> str:
@@ -62,15 +85,10 @@ def _reset_url(raw_token: str) -> str:
     return f"{base}{path}{quote(raw_token)}"
 
 
-def _send_password_reset_email(*, email: str, reset_url: str) -> bool:
-    body = (
-        "Hola,\n\n"
-        "Recibimos una solicitud para recuperar tu cuenta de Scentra +AI.\n\n"
-        f"Restablece tu clave aqui: {reset_url}\n\n"
-        f"Este enlace vence en {settings.saas_password_reset_minutes} minutos. "
-        "Si no solicitaste este cambio, ignora este mensaje.\n"
-    )
-    return send_plain_email(to_email=email, subject="Recupera tu cuenta de Scentra +AI", body=body)
+def _expiry_label(expires_at: datetime) -> str:
+    bogota = timezone(timedelta(hours=-5), name="America/Bogota")
+    local = expires_at.astimezone(bogota)
+    return local.strftime("%d/%m/%Y %I:%M %p hora Colombia")
 
 
 def _tenant_rows(conn, user_id: str) -> list[dict]:
@@ -125,6 +143,37 @@ def _select_membership(rows: list[dict], tenant_id: str | None = None) -> dict:
                 return row
         raise HTTPException(status_code=403, detail="tenant_membership_required")
     return rows[0]
+
+
+def _tenant_admin_contacts(conn, tenant_id: str, *, exclude_user_id: str = "") -> list[dict]:
+    rows = conn.execute(
+        text(
+            """
+            SELECT DISTINCT u.id::text AS user_id, u.email, u.full_name, m.role
+            FROM saas_memberships m
+            JOIN saas_users u ON u.id = m.user_id
+            WHERE m.tenant_id = CAST(:tenant_id AS uuid)
+              AND m.is_active = TRUE
+              AND m.role IN ('owner', 'admin')
+              AND u.status = 'active'
+              AND (:exclude_user_id = '' OR u.id <> CAST(NULLIF(:exclude_user_id, '') AS uuid))
+            ORDER BY m.role ASC, u.email ASC
+            LIMIT 20
+            """
+        ),
+        {"tenant_id": tenant_id, "exclude_user_id": exclude_user_id or ""},
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+def _tenant_name(conn, tenant_id: str) -> str:
+    return str(
+        conn.execute(
+            text("SELECT name FROM saas_tenants WHERE id = CAST(:tenant_id AS uuid) LIMIT 1"),
+            {"tenant_id": tenant_id},
+        ).scalar()
+        or ""
+    )
 
 
 def _mfa_required_for_user(user: dict, membership: dict) -> bool:
@@ -544,6 +593,8 @@ def forgot_password(payload: PasswordForgotIn, request: Request):
                 raw_token = secrets.token_urlsafe(36)
                 token_hash = hash_secret(raw_token)
                 reset_url = _reset_url(raw_token)
+                expires_minutes = max(5, int(settings.saas_password_reset_minutes or 30))
+                expires_at = datetime.now(timezone.utc) + timedelta(minutes=expires_minutes)
                 conn.execute(
                     text(
                         """
@@ -561,10 +612,7 @@ def forgot_password(payload: PasswordForgotIn, request: Request):
                         INSERT INTO saas_password_reset_tokens (
                             user_id, email, token_hash, requested_ip, user_agent, expires_at
                         )
-                        VALUES (
-                            CAST(:user_id AS uuid), :email, :token_hash, :requested_ip, :user_agent,
-                            NOW() + make_interval(mins => :expires_minutes)
-                        )
+                        VALUES (CAST(:user_id AS uuid), :email, :token_hash, :requested_ip, :user_agent, :expires_at)
                         """
                     ),
                     {
@@ -573,14 +621,14 @@ def forgot_password(payload: PasswordForgotIn, request: Request):
                         "token_hash": token_hash,
                         "requested_ip": client_ip(request)[:120],
                         "user_agent": user_agent(request),
-                        "expires_minutes": max(5, int(settings.saas_password_reset_minutes or 30)),
+                        "expires_at": expires_at.replace(tzinfo=None),
                     },
                 )
                 email_sent = False
                 email_error = ""
                 if smtp_is_configured():
                     try:
-                        email_sent = _send_password_reset_email(email=email, reset_url=reset_url)
+                        email_sent = send_password_reset_email(to_email=email, reset_url=reset_url, expires_label=_expiry_label(expires_at))
                     except Exception as exc:
                         email_error = str(exc)[:240]
                 response.email_sent = email_sent
@@ -793,6 +841,257 @@ def change_password(payload: PasswordChangeIn, request: Request, ctx: AuthContex
     return {"ok": True}
 
 
+@router.patch("/profile")
+def update_profile(payload: ProfilePatchIn, request: Request, ctx: AuthContext = Depends(get_current_user)):
+    full_name = str(payload.full_name or "").strip()
+    next_email = normalize_email(payload.email or ctx.email)
+    profile_patch = {
+        "phone": str(payload.phone or "").strip(),
+        "role_label": str(payload.role_label or "").strip(),
+        "avatar_url": str(payload.avatar_url or "").strip(),
+    }
+    if next_email and "@" not in next_email:
+        raise HTTPException(status_code=400, detail="valid_email_required")
+    with db_session() as conn:
+        row = conn.execute(
+            text(
+                """
+                SELECT id::text, email, password_hash, status, full_name, profile_json
+                FROM saas_users
+                WHERE id = CAST(:user_id AS uuid)
+                LIMIT 1
+                """
+            ),
+            {"user_id": ctx.user_id},
+        ).mappings().first()
+        if not row or row["status"] != "active":
+            raise HTTPException(status_code=404, detail="user_not_found")
+        email_changed = next_email and next_email != normalize_email(row["email"])
+        if email_changed:
+            if not payload.current_password or not verify_password(payload.current_password, row["password_hash"]):
+                raise HTTPException(status_code=401, detail="invalid_current_password")
+            duplicate = conn.execute(
+                text("SELECT id::text FROM saas_users WHERE email = :email AND id <> CAST(:user_id AS uuid) LIMIT 1"),
+                {"email": next_email, "user_id": ctx.user_id},
+            ).mappings().first()
+            if duplicate:
+                raise HTTPException(status_code=409, detail="email_already_registered")
+        updated = conn.execute(
+            text(
+                """
+                UPDATE saas_users
+                SET email = :email,
+                    full_name = :full_name,
+                    profile_json = COALESCE(profile_json, '{}'::jsonb) || CAST(:profile_json AS jsonb),
+                    updated_at = NOW()
+                WHERE id = CAST(:user_id AS uuid)
+                RETURNING id::text, email, full_name, profile_json
+                """
+            ),
+            {
+                "user_id": ctx.user_id,
+                "email": next_email or row["email"],
+                "full_name": full_name or row["full_name"] or "",
+                "profile_json": _json(profile_patch),
+            },
+        ).mappings().first()
+        record_security_event(
+            conn,
+            event_type="auth.profile_update",
+            status="success",
+            request=request,
+            principal=ctx.email,
+            tenant_id=ctx.tenant_id,
+            user_id=ctx.user_id,
+            reason="email_changed" if email_changed else "profile_updated",
+        )
+    return {"ok": True, "user": dict(updated or {})}
+
+
+@router.get("/team")
+def list_team(ctx: AuthContext = Depends(get_current_user)):
+    with db_session() as conn:
+        set_tenant_context(conn, ctx.tenant_id)
+        rows = conn.execute(
+            text(
+                """
+                SELECT m.id::text, m.role, m.is_active, m.created_at::text, m.updated_at::text,
+                       u.id::text AS user_id, u.email, u.full_name, u.status AS user_status,
+                       u.last_login_at::text, u.profile_json
+                FROM saas_memberships m
+                JOIN saas_users u ON u.id = m.user_id
+                WHERE m.tenant_id = CAST(:tenant_id AS uuid)
+                ORDER BY
+                  CASE m.role WHEN 'owner' THEN 1 WHEN 'admin' THEN 2 WHEN 'supervisor' THEN 3 WHEN 'agent' THEN 4 ELSE 5 END,
+                  u.email ASC
+                """
+            ),
+            {"tenant_id": ctx.tenant_id},
+        ).mappings().all()
+    return {"ok": True, "members": [dict(row) for row in rows], "roles": sorted(TEAM_ROLES)}
+
+
+@router.post("/team/users")
+def create_team_user(payload: TeamUserCreateIn, request: Request, ctx: AuthContext = Depends(get_current_user)):
+    if ctx.role not in TEAM_ADMIN_ROLES:
+        raise HTTPException(status_code=403, detail="insufficient_role")
+    role = str(payload.role or "agent").strip().lower()
+    if role not in TEAM_ROLES:
+        raise HTTPException(status_code=400, detail="invalid_team_role")
+    if role == "owner" and ctx.role != "owner":
+        raise HTTPException(status_code=403, detail="owner_role_requires_owner")
+    email = normalize_email(payload.email)
+    if "@" not in email:
+        raise HTTPException(status_code=400, detail="valid_email_required")
+    created = False
+    with db_session() as conn:
+        set_tenant_context(conn, ctx.tenant_id)
+        user = conn.execute(
+            text("SELECT id::text, email FROM saas_users WHERE email = :email LIMIT 1"),
+            {"email": email},
+        ).mappings().first()
+        if not user:
+            if not payload.password or len(payload.password) < 8:
+                raise HTTPException(status_code=400, detail="password_required_for_new_user")
+            user = conn.execute(
+                text(
+                    """
+                    INSERT INTO saas_users (email, full_name, password_hash, password_algo, password_changed_at)
+                    VALUES (:email, :full_name, :password_hash, 'argon2id', NOW())
+                    RETURNING id::text, email
+                    """
+                ),
+                {
+                    "email": email,
+                    "full_name": str(payload.full_name or "").strip(),
+                    "password_hash": hash_password(payload.password),
+                },
+            ).mappings().first()
+            created = True
+        elif payload.full_name:
+            conn.execute(
+                text("UPDATE saas_users SET full_name = :full_name, updated_at = NOW() WHERE id = CAST(:user_id AS uuid)"),
+                {"user_id": user["id"], "full_name": str(payload.full_name or "").strip()},
+            )
+        membership = conn.execute(
+            text(
+                """
+                INSERT INTO saas_memberships (tenant_id, user_id, role, is_active)
+                VALUES (CAST(:tenant_id AS uuid), CAST(:user_id AS uuid), :role, TRUE)
+                ON CONFLICT (tenant_id, user_id)
+                DO UPDATE SET role = EXCLUDED.role, is_active = TRUE, updated_at = NOW()
+                RETURNING id::text, role, is_active, updated_at::text
+                """
+            ),
+            {"tenant_id": ctx.tenant_id, "user_id": user["id"], "role": role},
+        ).mappings().first()
+        record_security_event(
+            conn,
+            event_type="auth.team_user_upsert",
+            status="success",
+            request=request,
+            principal=email,
+            tenant_id=ctx.tenant_id,
+            user_id=user["id"],
+            reason="created" if created else "membership_upserted",
+            details={"role": role, "actor_user_id": ctx.user_id},
+        )
+        email_sent = False
+        if payload.send_email and smtp_is_configured():
+            tenant_name = _tenant_name(conn, ctx.tenant_id)
+            with contextlib.suppress(Exception):
+                email_sent = send_welcome_email(
+                    to_email=email,
+                    full_name=str(payload.full_name or "").strip(),
+                    tenant_name=tenant_name,
+                    role_label=_role_label(role),
+                    login_url=str(settings.scentra_app_public_url or "").rstrip("/"),
+                    temporary_password=payload.password if created else "",
+                )
+            alert_body = (
+                f"Se {'creó' if created else 'actualizó'} el acceso de {email} en {tenant_name or 'tu empresa'}.\n\n"
+                f"Rol asignado: {_role_label(role)}.\n"
+                f"Acción realizada por: {ctx.email}."
+            )
+            for admin in _tenant_admin_contacts(conn, ctx.tenant_id, exclude_user_id=ctx.user_id):
+                with contextlib.suppress(Exception):
+                    send_alert_email(to_email=admin["email"], subject="Alerta de usuarios Scentra", body=alert_body, severity="info")
+    return {"ok": True, "created": created, "email_sent": email_sent, "membership": dict(membership or {}), "user_id": user["id"]}
+
+
+@router.patch("/team/memberships/{membership_id}")
+def update_team_membership(membership_id: str, payload: TeamMembershipPatchIn, request: Request, ctx: AuthContext = Depends(get_current_user)):
+    if ctx.role not in TEAM_ADMIN_ROLES:
+        raise HTTPException(status_code=403, detail="insufficient_role")
+    role = str(payload.role or "").strip().lower()
+    if role and role not in TEAM_ROLES:
+        raise HTTPException(status_code=400, detail="invalid_team_role")
+    if role == "owner" and ctx.role != "owner":
+        raise HTTPException(status_code=403, detail="owner_role_requires_owner")
+    with db_session() as conn:
+        set_tenant_context(conn, ctx.tenant_id)
+        current = conn.execute(
+            text(
+                """
+                SELECT m.id::text, m.user_id::text, m.role, m.is_active, u.email, u.full_name
+                FROM saas_memberships m
+                JOIN saas_users u ON u.id = m.user_id
+                WHERE m.id = CAST(:membership_id AS uuid)
+                  AND m.tenant_id = CAST(:tenant_id AS uuid)
+                LIMIT 1
+                """
+            ),
+            {"membership_id": membership_id, "tenant_id": ctx.tenant_id},
+        ).mappings().first()
+        if not current:
+            raise HTTPException(status_code=404, detail="membership_not_found")
+        if str(current["user_id"]) == str(ctx.user_id) and payload.is_active is False:
+            raise HTTPException(status_code=400, detail="cannot_deactivate_self")
+        row = conn.execute(
+            text(
+                """
+                UPDATE saas_memberships
+                SET role = COALESCE(NULLIF(:role, ''), role),
+                    is_active = COALESCE(:is_active, is_active),
+                    updated_at = NOW()
+                WHERE id = CAST(:membership_id AS uuid)
+                  AND tenant_id = CAST(:tenant_id AS uuid)
+                RETURNING id::text, user_id::text, role, is_active, updated_at::text
+                """
+            ),
+            {"membership_id": membership_id, "tenant_id": ctx.tenant_id, "role": role, "is_active": payload.is_active},
+        ).mappings().first()
+        record_security_event(
+            conn,
+            event_type="auth.team_membership_update",
+            status="success",
+            request=request,
+            principal=ctx.email,
+            tenant_id=ctx.tenant_id,
+            user_id=row["user_id"],
+            details={"role": row["role"], "is_active": row["is_active"], "actor_user_id": ctx.user_id},
+        )
+        if smtp_is_configured():
+            tenant_name = _tenant_name(conn, ctx.tenant_id)
+            affected_body = (
+                f"Tu acceso en {tenant_name or 'Scentra'} fue actualizado.\n\n"
+                f"Rol actual: {_role_label(row['role'])}.\n"
+                f"Estado: {'activo' if row['is_active'] else 'inactivo'}."
+            )
+            with contextlib.suppress(Exception):
+                send_alert_email(to_email=current["email"], subject="Cambio en tu acceso Scentra", body=affected_body, severity="warning")
+            admin_body = (
+                f"Se actualizó el usuario {current['email']} en {tenant_name or 'tu empresa'}.\n\n"
+                f"Rol actual: {_role_label(row['role'])}.\n"
+                f"Estado: {'activo' if row['is_active'] else 'inactivo'}.\n"
+                f"Acción realizada por: {ctx.email}."
+            )
+            for admin in _tenant_admin_contacts(conn, ctx.tenant_id, exclude_user_id=ctx.user_id):
+                with contextlib.suppress(Exception):
+                    send_alert_email(to_email=admin["email"], subject="Alerta de roles Scentra", body=admin_body, severity="warning")
+    return {"ok": True, "membership": dict(row or {})}
+
+
 @router.get("/security", response_model=SecurityStatusOut)
 def security_status(ctx: AuthContext = Depends(get_current_user)):
     with db_session() as conn:
@@ -920,7 +1219,7 @@ def me(ctx: AuthContext = Depends(get_current_user)):
         user = conn.execute(
             text(
                 """
-                SELECT full_name
+                SELECT email, full_name, profile_json
                 FROM saas_users
                 WHERE id = CAST(:user_id AS uuid)
                 LIMIT 1
@@ -930,8 +1229,9 @@ def me(ctx: AuthContext = Depends(get_current_user)):
         ).mappings().first()
     return MeOut(
         user_id=ctx.user_id,
-        email=ctx.email,
+        email=normalize_email(str((user or {}).get("email") or ctx.email)),
         full_name=str((user or {}).get("full_name") or "").strip(),
+        profile_json=dict((user or {}).get("profile_json") or {}),
         tenant_id=ctx.tenant_id,
         role=ctx.role,
         tenants=[TenantMembershipOut(**row) for row in tenants],

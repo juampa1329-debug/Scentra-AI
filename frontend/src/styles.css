@@ -22,6 +22,70 @@
   --blur: blur(22px) saturate(140%);
 }
 
+.system-notification-popup {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+  border-color: rgba(94, 234, 212, 0.35);
+  padding: 16px 18px;
+  margin-bottom: 14px;
+}
+.system-notification-popup.warning {
+  border-color: rgba(251, 191, 36, 0.45);
+}
+.system-notification-popup.critical {
+  border-color: rgba(251, 113, 133, 0.50);
+}
+.system-notification-popup span,
+.system-notification-popup small {
+  color: var(--muted);
+  font-size: 12px;
+}
+.system-notification-popup strong {
+  display: block;
+  margin: 4px 0;
+  font-size: 18px;
+}
+.system-notification-popup p {
+  margin: 0;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.system-notification-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+.system-notification-item {
+  border-color: rgba(94, 234, 212, 0.50);
+  background: linear-gradient(135deg, rgba(20, 184, 166, 0.22), rgba(59, 130, 246, 0.10));
+}
+.system-notification-item small {
+  -webkit-line-clamp: 3;
+}
+.team-table .row {
+  grid-template-columns: minmax(0, 2fr) minmax(140px, 0.8fr) auto auto;
+}
+.team-table select {
+  min-height: 38px;
+}
+.form-grid .full-width {
+  grid-column: 1 / -1;
+}
+
+@media (max-width: 760px) {
+  .system-notification-popup,
+  .team-table .row {
+    grid-template-columns: 1fr;
+    flex-direction: column;
+  }
+  .system-notification-actions {
+    justify-content: flex-start;
+  }
+}
+
 * { box-sizing: border-box; }
 html { min-width: 320px; background: var(--bg); }
 body {

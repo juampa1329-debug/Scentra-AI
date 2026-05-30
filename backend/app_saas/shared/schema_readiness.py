@@ -64,6 +64,8 @@ REQUIRED_TABLES = (
     "saas_web_search_intelligence_runs",
     "saas_web_search_intelligence_results",
     "saas_multimodal_memory_events",
+    "saas_system_notifications",
+    "saas_system_notification_recipients",
 )
 
 REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
@@ -90,6 +92,32 @@ REQUIRED_COLUMNS: dict[str, tuple[str, ...]] = {
         "two_factor_method",
         "two_factor_secret_ref",
         "two_factor_recovery_hashes_json",
+        "profile_json",
+    ),
+    "saas_memberships": ("id", "tenant_id", "user_id", "role", "is_active", "created_at", "updated_at"),
+    "saas_system_notifications": (
+        "id",
+        "sender_user_id",
+        "title",
+        "body",
+        "severity",
+        "category",
+        "audience_type",
+        "ai_assisted",
+        "email_copy",
+        "status",
+        "created_at",
+    ),
+    "saas_system_notification_recipients": (
+        "id",
+        "notification_id",
+        "tenant_id",
+        "user_id",
+        "membership_role",
+        "popup_until_read",
+        "pinned_until_read",
+        "read_at",
+        "created_at",
     ),
     "saas_integrations": (
         "id",
