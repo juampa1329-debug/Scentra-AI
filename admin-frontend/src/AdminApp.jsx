@@ -401,11 +401,14 @@ export default function AdminApp() {
   const [tenantUserRoles, setTenantUserRoles] = useState(Object.keys(TENANT_ROLE_LABELS));
   const [tenantUserForm, setTenantUserForm] = useState({ tenant_id: "", email: "", full_name: "", password: "", role: "agent", send_email: true });
   const [userBusy, setUserBusy] = useState("");
+  const [usersAdminTab, setUsersAdminTab] = useState("profile");
+  const [tenantUserSearch, setTenantUserSearch] = useState("");
   const [notificationTargets, setNotificationTargets] = useState({ tenants: [], users: [], roles: [], smtp_configured: false });
   const [adminNotifications, setAdminNotifications] = useState([]);
   const [notificationForm, setNotificationForm] = useState({ title: "", body: "", severity: "info", category: "system", audience_type: "selected", tenant_ids: [], user_ids: [], roles: [], email_copy: true, ai_assisted: false });
   const [notificationDraftForm, setNotificationDraftForm] = useState({ topic: "", audience: "", tone: "claro", urgency: "normal", body_hint: "" });
   const [notificationBusy, setNotificationBusy] = useState("");
+  const [notificationTargetSearch, setNotificationTargetSearch] = useState("");
   const [queues, setQueues] = useState(null);
   const [health, setHealth] = useState(null);
   const [deadLetters, setDeadLetters] = useState([]);
@@ -1403,8 +1406,8 @@ export default function AdminApp() {
         {activeView === "plans" ? <PlansView plans={plans} features={features} planForm={planForm} setPlanForm={setPlanForm} savePlan={savePlan} editPlan={editPlan} /> : null}
         {activeView === "subscriptions" ? <SubscriptionsView subscriptions={subscriptions} plans={plans} patchSubscription={patchSubscription} /> : null}
         {activeView === "billing" ? <BillingView tenants={tenants} invoices={billingInvoices} credits={billingCredits} billingForm={billingForm} setBillingForm={setBillingForm} applyBillingCredit={applyBillingCredit} syncBillingLifecycle={syncBillingLifecycle} downloadInvoice={downloadAdminInvoice} /> : null}
-        {activeView === "users" ? <UsersAdminView me={me} profileForm={adminProfileForm} setProfileForm={setAdminProfileForm} passwordForm={adminPasswordForm} setPasswordForm={setAdminPasswordForm} saveProfile={saveAdminProfile} changePassword={changeAdminPassword} platformAdmins={platformAdmins} platformRoles={platformAdminRoles} platformForm={platformAdminForm} setPlatformForm={setPlatformAdminForm} createPlatformAdmin={createPlatformAdmin} patchPlatformAdmin={patchPlatformAdmin} tenantUsers={tenantUsers} tenantRoles={tenantUserRoles} tenantForm={tenantUserForm} setTenantForm={setTenantUserForm} tenants={tenants} createTenantUser={createTenantUser} patchTenantUser={patchTenantUser} busy={userBusy} /> : null}
-        {activeView === "notifications" ? <NotificationsAdminView targets={notificationTargets} notifications={adminNotifications} form={notificationForm} setForm={setNotificationForm} draftForm={notificationDraftForm} setDraftForm={setNotificationDraftForm} draftNotification={draftNotification} sendNotification={sendAdminNotification} busy={notificationBusy} /> : null}
+        {activeView === "users" ? <UsersAdminView me={me} activeTab={usersAdminTab} setActiveTab={setUsersAdminTab} tenantUserSearch={tenantUserSearch} setTenantUserSearch={setTenantUserSearch} profileForm={adminProfileForm} setProfileForm={setAdminProfileForm} passwordForm={adminPasswordForm} setPasswordForm={setAdminPasswordForm} saveProfile={saveAdminProfile} changePassword={changeAdminPassword} platformAdmins={platformAdmins} platformRoles={platformAdminRoles} platformForm={platformAdminForm} setPlatformForm={setPlatformAdminForm} createPlatformAdmin={createPlatformAdmin} patchPlatformAdmin={patchPlatformAdmin} tenantUsers={tenantUsers} tenantRoles={tenantUserRoles} tenantForm={tenantUserForm} setTenantForm={setTenantUserForm} tenants={tenants} createTenantUser={createTenantUser} patchTenantUser={patchTenantUser} busy={userBusy} /> : null}
+        {activeView === "notifications" ? <NotificationsAdminView targets={notificationTargets} notifications={adminNotifications} form={notificationForm} setForm={setNotificationForm} draftForm={notificationDraftForm} setDraftForm={setNotificationDraftForm} targetSearch={notificationTargetSearch} setTargetSearch={setNotificationTargetSearch} draftNotification={draftNotification} sendNotification={sendAdminNotification} busy={notificationBusy} /> : null}
         {activeView === "security" ? <SecurityView security={adminSecurity} compliance={securityCompliance} updateAdminTwoFactor={updateAdminTwoFactor} downloadAuditCsv={downloadAuditCsv} /> : null}
         {activeView === "intelligence" ? <IntelligenceView tenants={intelligenceTenants} catalog={intelligenceCatalog} metrics={intelligenceMetrics} models={intelligenceModels} training={intelligenceTraining} mlops={intelligenceMlops} realtime={intelligenceRealtime} gating={intelligenceGating} providerPolicyForm={providerPolicyForm} setProviderPolicyForm={setProviderPolicyForm} saveProviderPolicy={saveProviderPolicy} setIntelligencePlanFeature={setIntelligencePlanFeature} dataForm={intelligenceDataForm} setDataForm={setIntelligenceDataForm} generateAutoLabels={generateAutoLabels} recomputeFeaturePipelines={recomputeFeaturePipelines} buildMlDataset={buildMlDataset} trainForm={intelligenceTrainForm} setTrainForm={setIntelligenceTrainForm} runTraining={runSyntheticMlTraining} runAutoLabelTraining={runAutoLabelMlTraining} modelForm={intelligenceModelForm} setModelForm={setIntelligenceModelForm} registerModel={registerIntelligenceModel} setIntelligenceFeature={setIntelligenceFeature} processQueue={processQueue} recomputeMetrics={recomputeIntelligenceMetrics} refreshRealtimeMetrics={refreshRealtimeMetrics} updateModel={updateIntelligenceModel} /> : null}
         {activeView === "trust" ? <TrustAdminView overview={trustOverview} /> : null}
@@ -2352,7 +2355,7 @@ function QueueSummary({ queues }) {
   );
 }
 
-function UsersAdminView({ me, profileForm, setProfileForm, passwordForm, setPasswordForm, saveProfile, changePassword, platformAdmins, platformRoles, platformForm, setPlatformForm, createPlatformAdmin, patchPlatformAdmin, tenantUsers, tenantRoles, tenantForm, setTenantForm, tenants, createTenantUser, patchTenantUser, busy }) {
+function LegacyUsersAdminView({ me, profileForm, setProfileForm, passwordForm, setPasswordForm, saveProfile, changePassword, platformAdmins, platformRoles, platformForm, setPlatformForm, createPlatformAdmin, patchPlatformAdmin, tenantUsers, tenantRoles, tenantForm, setTenantForm, tenants, createTenantUser, patchTenantUser, busy }) {
   return (
     <section className="stack">
       <div className="grid">
@@ -2411,7 +2414,7 @@ function UsersAdminView({ me, profileForm, setProfileForm, passwordForm, setPass
   );
 }
 
-function NotificationsAdminView({ targets, notifications, form, setForm, draftForm, setDraftForm, draftNotification, sendNotification, busy }) {
+function LegacyNotificationsAdminView({ targets, notifications, form, setForm, draftForm, setDraftForm, draftNotification, sendNotification, busy }) {
   const toggleListValue = (key, value) => {
     setForm((prev) => {
       const current = new Set(prev[key] || []);
@@ -2454,6 +2457,186 @@ function NotificationsAdminView({ targets, notifications, form, setForm, draftFo
       <article className="panel glass-card">
         <div className="panel-head"><h2>Historial</h2><span>{number(notifications.length)}</span></div>
         <div className="table">{notifications.map((item) => <div className="row notification-row" key={item.id}><span><strong>{item.title}</strong><small>{SEVERITY_LABELS[item.severity] || item.severity} / {categoryLabel(item.category)}</small></span><span>{number(item.recipients)} destinatarios</span><span>{number(item.read_count)} leídas</span><span>{number(item.email_sent_count)} correos</span></div>)}</div>
+      </article>
+    </section>
+  );
+}
+
+function UsersAdminView({ me, activeTab, setActiveTab, tenantUserSearch, setTenantUserSearch, profileForm, setProfileForm, passwordForm, setPasswordForm, saveProfile, changePassword, platformAdmins, platformRoles, platformForm, setPlatformForm, createPlatformAdmin, patchPlatformAdmin, tenantUsers, tenantRoles, tenantForm, setTenantForm, tenants, createTenantUser, patchTenantUser, busy }) {
+  const normalizedTenantSearch = tenantUserSearch.trim().toLowerCase();
+  const filteredTenantUsers = tenantUsers.filter((member) => {
+    if (!normalizedTenantSearch) return true;
+    return [
+      member.full_name,
+      member.email,
+      member.tenant_name,
+      member.role,
+      member.is_active ? "activo" : "inactivo",
+    ].some((value) => String(value || "").toLowerCase().includes(normalizedTenantSearch));
+  });
+  const tabs = [
+    ["profile", "Mi perfil", "datos y clave"],
+    ["platform", "Admins plataforma", `${number(platformAdmins.length)} admins`],
+    ["tenant", "Usuarios empresa", `${number(tenantUsers.length)} usuarios`],
+  ];
+  return (
+    <section className="stack admin-section">
+      <div className="admin-tabs" role="tablist" aria-label="Gestion de usuarios">
+        {tabs.map(([key, label, hint]) => (
+          <button type="button" key={key} className={activeTab === key ? "active" : ""} onClick={() => setActiveTab(key)}>
+            <strong>{label}</strong>
+            <small>{hint}</small>
+          </button>
+        ))}
+      </div>
+
+      {activeTab === "profile" ? (
+        <div className="admin-split">
+          <article className="panel glass-card">
+            <div className="panel-head"><h2>Mi perfil Admin</h2><span>{roleLabel(me?.platform_role, true)}</span></div>
+            <p className="panel-hint">Actualiza tus datos visibles dentro del Admin. Si cambias el correo, confirma con tu clave actual.</p>
+            <div className="form-grid two">
+              <label>Nombre<input value={profileForm.full_name} onChange={(event) => setProfileForm((prev) => ({ ...prev, full_name: event.target.value }))} /></label>
+              <label>Correo<input value={profileForm.email} onChange={(event) => setProfileForm((prev) => ({ ...prev, email: event.target.value }))} /></label>
+              <label>Telefono<input value={profileForm.phone} onChange={(event) => setProfileForm((prev) => ({ ...prev, phone: event.target.value }))} /></label>
+              <label>Cargo visible<input value={profileForm.role_label} onChange={(event) => setProfileForm((prev) => ({ ...prev, role_label: event.target.value }))} /></label>
+              <label className="wide">URL avatar<input value={profileForm.avatar_url} onChange={(event) => setProfileForm((prev) => ({ ...prev, avatar_url: event.target.value }))} /></label>
+              <label className="wide">Clave actual para cambiar correo<input type="password" value={profileForm.current_password} onChange={(event) => setProfileForm((prev) => ({ ...prev, current_password: event.target.value }))} /></label>
+            </div>
+            <button type="button" className="primary" onClick={saveProfile}>Guardar perfil</button>
+          </article>
+          <article className="panel glass-card">
+            <div className="panel-head"><h2>Cambiar clave</h2><span>seguridad</span></div>
+            <p className="panel-hint">Usa una clave nueva fuerte. Este cambio afecta solo tu acceso al panel Admin.</p>
+            <label>Clave actual<input type="password" value={passwordForm.current_password} onChange={(event) => setPasswordForm((prev) => ({ ...prev, current_password: event.target.value }))} /></label>
+            <label>Nueva clave<input type="password" value={passwordForm.new_password} onChange={(event) => setPasswordForm((prev) => ({ ...prev, new_password: event.target.value }))} /></label>
+            <label>Confirmar clave<input type="password" value={passwordForm.confirm_password} onChange={(event) => setPasswordForm((prev) => ({ ...prev, confirm_password: event.target.value }))} /></label>
+            <button type="button" className="primary" onClick={changePassword}>Actualizar clave</button>
+          </article>
+        </div>
+      ) : null}
+
+      {activeTab === "platform" ? (
+        <div className="admin-split wide-left">
+          <article className="panel glass-card">
+            <div className="panel-head"><h2>Crear admin</h2><span>plataforma</span></div>
+            <p className="panel-hint">Crea usuarios para operar Scentra Admin. Estos usuarios no entran al Inbox de las empresas.</p>
+            <div className="form-grid two">
+              <label>Nombre<input value={platformForm.full_name} onChange={(event) => setPlatformForm((prev) => ({ ...prev, full_name: event.target.value }))} /></label>
+              <label>Email<input value={platformForm.email} onChange={(event) => setPlatformForm((prev) => ({ ...prev, email: event.target.value }))} /></label>
+              <label>Clave temporal<input type="password" value={platformForm.password} onChange={(event) => setPlatformForm((prev) => ({ ...prev, password: event.target.value }))} /></label>
+              <label>Rol<select value={platformForm.platform_role} onChange={(event) => setPlatformForm((prev) => ({ ...prev, platform_role: event.target.value }))}>{platformRoles.map((role) => <option key={role} value={role}>{roleLabel(role, true)}</option>)}</select></label>
+              <label>Estado<select value={platformForm.status} onChange={(event) => setPlatformForm((prev) => ({ ...prev, status: event.target.value }))}><option value="active">Activo</option><option value="paused">Pausado</option><option value="disabled">Deshabilitado</option></select></label>
+              <label>Notas<input value={platformForm.notes} onChange={(event) => setPlatformForm((prev) => ({ ...prev, notes: event.target.value }))} /></label>
+            </div>
+            <label className="check-row compact-check"><input type="checkbox" checked={platformForm.send_email} onChange={(event) => setPlatformForm((prev) => ({ ...prev, send_email: event.target.checked }))} /><span>Enviar bienvenida por correo</span></label>
+            <button type="button" className="primary" disabled={busy === "platform-create"} onClick={createPlatformAdmin}>{busy === "platform-create" ? "Guardando..." : "Crear admin"}</button>
+          </article>
+          <article className="panel glass-card">
+            <div className="panel-head"><h2>Administradores plataforma</h2><span>{number(platformAdmins.length)}</span></div>
+            <div className="table">{platformAdmins.map((admin) => <div className="row platform-user-row" key={admin.user_id}><span><strong>{admin.full_name || admin.email}</strong><small>{admin.email}</small></span><span><select value={admin.platform_role} disabled={busy === admin.user_id} onChange={(event) => patchPlatformAdmin(admin.user_id, { platform_role: event.target.value })}>{platformRoles.map((role) => <option key={role} value={role}>{roleLabel(role, true)}</option>)}</select></span><span><select value={admin.platform_status} disabled={busy === admin.user_id || admin.user_id === me?.user_id} onChange={(event) => patchPlatformAdmin(admin.user_id, { status: event.target.value })}><option value="active">Activo</option><option value="paused">Pausado</option><option value="disabled">Deshabilitado</option></select></span></div>)}</div>
+          </article>
+        </div>
+      ) : null}
+
+      {activeTab === "tenant" ? (
+        <div className="admin-split wide-left">
+          <article className="panel glass-card">
+            <div className="panel-head"><h2>Crear usuario tenant</h2><span>empresa</span></div>
+            <p className="panel-hint">Crea usuarios para una empresa especifica. Su rol define que puede ver y operar dentro del SaaS.</p>
+            <div className="form-grid two">
+              <label className="wide">Empresa<select value={tenantForm.tenant_id} onChange={(event) => setTenantForm((prev) => ({ ...prev, tenant_id: event.target.value }))}><option value="">Seleccionar empresa</option>{tenants.map((tenant) => <option key={tenant.id} value={tenant.id}>{tenant.name}</option>)}</select></label>
+              <label>Nombre<input value={tenantForm.full_name} onChange={(event) => setTenantForm((prev) => ({ ...prev, full_name: event.target.value }))} /></label>
+              <label>Email<input value={tenantForm.email} onChange={(event) => setTenantForm((prev) => ({ ...prev, email: event.target.value }))} /></label>
+              <label>Clave temporal<input type="password" value={tenantForm.password} onChange={(event) => setTenantForm((prev) => ({ ...prev, password: event.target.value }))} /></label>
+              <label>Rol<select value={tenantForm.role} onChange={(event) => setTenantForm((prev) => ({ ...prev, role: event.target.value }))}>{tenantRoles.map((role) => <option key={role} value={role}>{roleLabel(role)}</option>)}</select></label>
+            </div>
+            <label className="check-row compact-check"><input type="checkbox" checked={tenantForm.send_email} onChange={(event) => setTenantForm((prev) => ({ ...prev, send_email: event.target.checked }))} /><span>Enviar bienvenida por correo</span></label>
+            <button type="button" className="primary" disabled={busy === "tenant-create" || !tenantForm.tenant_id} onClick={createTenantUser}>{busy === "tenant-create" ? "Guardando..." : "Crear usuario"}</button>
+          </article>
+          <article className="panel glass-card">
+            <div className="panel-head"><h2>Usuarios por empresa</h2><span>{number(filteredTenantUsers.length)} / {number(tenantUsers.length)}</span></div>
+            <div className="table-tools">
+              <input value={tenantUserSearch} onChange={(event) => setTenantUserSearch(event.target.value)} placeholder="Buscar por nombre, correo, empresa, rol o estado..." />
+              <button type="button" onClick={() => setTenantUserSearch("")}>Limpiar</button>
+            </div>
+            <div className="table">{filteredTenantUsers.map((member) => <div className="row user-row" key={member.id}><span><strong>{member.full_name || member.email}</strong><small>{member.email} / {member.tenant_name}</small></span><span><select value={member.role} disabled={busy === member.id} onChange={(event) => patchTenantUser(member.id, { role: event.target.value })}>{tenantRoles.map((role) => <option key={role} value={role}>{roleLabel(role)}</option>)}</select></span><span><mark className={member.is_active ? "ok" : "warn"}>{member.is_active ? "Activo" : "Inactivo"}</mark></span><span><button type="button" disabled={busy === member.id} onClick={() => patchTenantUser(member.id, { is_active: !member.is_active })}>{member.is_active ? "Desactivar" : "Activar"}</button></span></div>)}</div>
+            {filteredTenantUsers.length === 0 ? <div className="empty">No hay usuarios que coincidan con la busqueda.</div> : null}
+          </article>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function NotificationsAdminView({ targets, notifications, form, setForm, draftForm, setDraftForm, targetSearch, setTargetSearch, draftNotification, sendNotification, busy }) {
+  const targetNeedle = targetSearch.trim().toLowerCase();
+  const targetMatches = (values) => !targetNeedle || values.some((value) => String(value || "").toLowerCase().includes(targetNeedle));
+  const filteredTenants = (targets.tenants || []).filter((tenant) => targetMatches([tenant.name, tenant.status, tenant.plan_code]));
+  const filteredRoles = (targets.roles || Object.keys(TENANT_ROLE_LABELS)).filter((role) => targetMatches([role, roleLabel(role)]));
+  const filteredUsers = (targets.users || []).filter((user) => targetMatches([user.full_name, user.email, user.tenant_name, user.role]));
+  const selectedCount = form.audience_type === "all"
+    ? number((targets.users || []).length)
+    : number(new Set([...(form.user_ids || []), ...(form.tenant_ids || []), ...(form.roles || [])]).size);
+  const toggleListValue = (key, value) => {
+    setForm((prev) => {
+      const current = new Set(prev[key] || []);
+      if (current.has(value)) current.delete(value);
+      else current.add(value);
+      return { ...prev, [key]: Array.from(current), audience_type: "selected" };
+    });
+  };
+  const setAudienceAll = () => setForm((prev) => ({ ...prev, audience_type: "all", tenant_ids: [], user_ids: [], roles: [] }));
+  const setAudienceSelected = () => setForm((prev) => ({ ...prev, audience_type: "selected" }));
+  return (
+    <section className="stack admin-section">
+      <div className="notification-compose-grid">
+        <article className="panel glass-card">
+          <div className="panel-head"><h2>Borrador asistido</h2><span>humano revisa y envia</span></div>
+          <p className="panel-hint">La IA solo prepara un texto base segun el contexto. No se envia nada hasta que revises el mensaje y pulses Enviar.</p>
+          <div className="form-grid two">
+            <label>Tema<input value={draftForm.topic} onChange={(event) => setDraftForm((prev) => ({ ...prev, topic: event.target.value }))} placeholder="Mantenimiento, cambio de rol, aviso comercial..." /></label>
+            <label>Audiencia<input value={draftForm.audience} onChange={(event) => setDraftForm((prev) => ({ ...prev, audience: event.target.value }))} placeholder="administradores, agentes, empresas..." /></label>
+            <label>Tono<input value={draftForm.tone} onChange={(event) => setDraftForm((prev) => ({ ...prev, tone: event.target.value }))} /></label>
+            <label>Urgencia<input value={draftForm.urgency} onChange={(event) => setDraftForm((prev) => ({ ...prev, urgency: event.target.value }))} /></label>
+            <label className="wide">Contexto<textarea rows={4} value={draftForm.body_hint} onChange={(event) => setDraftForm((prev) => ({ ...prev, body_hint: event.target.value }))} /></label>
+          </div>
+          <button type="button" onClick={draftNotification} disabled={busy === "draft"}>{busy === "draft" ? "Generando..." : "Preparar borrador"}</button>
+        </article>
+        <article className="panel glass-card">
+          <div className="panel-head"><h2>Enviar notificacion</h2><span>{targets.smtp_configured ? "correo disponible" : "solo app"}</span></div>
+          <p className="panel-hint">Siempre se crea una notificacion interna en el Inbox del usuario. Si activas correo, tambien se envia una copia por email cuando SMTP este configurado.</p>
+          <label>Titulo<input value={form.title} onChange={(event) => setForm((prev) => ({ ...prev, title: event.target.value }))} /></label>
+          <label>Mensaje<textarea rows={6} value={form.body} onChange={(event) => setForm((prev) => ({ ...prev, body: event.target.value }))} /></label>
+          <div className="form-grid two">
+            <label>Severidad<select value={form.severity} onChange={(event) => setForm((prev) => ({ ...prev, severity: event.target.value }))}>{Object.entries(SEVERITY_LABELS).map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select></label>
+            <label>Categoria<select value={form.category} onChange={(event) => setForm((prev) => ({ ...prev, category: event.target.value }))}>{Object.entries(CATEGORY_LABELS).map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select></label>
+          </div>
+          <label className="check-row compact-check"><input type="checkbox" checked={form.email_copy} onChange={(event) => setForm((prev) => ({ ...prev, email_copy: event.target.checked }))} /><span>Enviar copia por correo</span></label>
+          <button type="button" className="primary" onClick={sendNotification} disabled={busy === "send"}>{busy === "send" ? "Enviando..." : "Enviar"}</button>
+        </article>
+      </div>
+      <article className="panel glass-card">
+        <div className="panel-head"><h2>Destinatarios</h2><span>{form.audience_type === "all" ? `Todos (${selectedCount})` : `${selectedCount} reglas`}</span></div>
+        <div className="notification-help">
+          <strong>Destino interno seguro</strong>
+          <span>Estos avisos aparecen en el Inbox de Scentra, no son chats de clientes, no admiten respuesta y no activan IA, triggers ni remarketing.</span>
+        </div>
+        <div className="audience-toolbar">
+          <button type="button" className={form.audience_type === "all" ? "active" : ""} onClick={setAudienceAll}>Para todos</button>
+          <button type="button" className={form.audience_type !== "all" ? "active" : ""} onClick={setAudienceSelected}>Seleccionar</button>
+          <input value={targetSearch} onChange={(event) => setTargetSearch(event.target.value)} placeholder="Buscar empresa, usuario, correo o rol..." />
+          <button type="button" onClick={() => setTargetSearch("")}>Limpiar</button>
+        </div>
+        <div className="notification-targets">
+          <div><strong>Empresas</strong>{filteredTenants.slice(0, 100).map((tenant) => <label className="check-row" key={tenant.id}><input type="checkbox" checked={(form.tenant_ids || []).includes(tenant.id)} onChange={() => toggleListValue("tenant_ids", tenant.id)} /><span>{tenant.name}<small>{tenant.plan_code || "plan"} / {tenant.status || "estado"}</small></span></label>)}{filteredTenants.length === 0 ? <small>Sin coincidencias.</small> : null}</div>
+          <div><strong>Roles</strong>{filteredRoles.map((role) => <label className="check-row" key={role}><input type="checkbox" checked={(form.roles || []).includes(role)} onChange={() => toggleListValue("roles", role)} /><span>{roleLabel(role)}<small>{role}</small></span></label>)}{filteredRoles.length === 0 ? <small>Sin coincidencias.</small> : null}</div>
+          <div><strong>Usuarios</strong>{filteredUsers.slice(0, 180).map((user) => <label className="check-row" key={`${user.tenant_id}-${user.user_id}`}><input type="checkbox" checked={(form.user_ids || []).includes(user.user_id)} onChange={() => toggleListValue("user_ids", user.user_id)} /><span>{user.full_name || user.email}<small>{user.email} / {user.tenant_name}</small></span></label>)}{filteredUsers.length === 0 ? <small>Sin coincidencias.</small> : null}</div>
+        </div>
+      </article>
+      <article className="panel glass-card">
+        <div className="panel-head"><h2>Historial</h2><span>{number(notifications.length)}</span></div>
+        <div className="table">{notifications.map((item) => <div className="row notification-row" key={item.id}><span><strong>{item.title}</strong><small>{SEVERITY_LABELS[item.severity] || item.severity} / {categoryLabel(item.category)}</small></span><span>{number(item.recipients)} destinatarios</span><span>{number(item.read_count)} leidas</span><span>{number(item.email_sent_count)} correos</span></div>)}</div>
       </article>
     </section>
   );

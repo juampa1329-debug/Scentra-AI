@@ -339,6 +339,82 @@ mark.neutral { color: var(--soft); }
   margin: 12px 0;
 }
 .admin-actions button, .row-actions button { min-height: 34px; border-radius: 12px; font-size: 12px; }
+.admin-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+.admin-tabs button {
+  display: grid;
+  justify-items: start;
+  gap: 3px;
+  min-height: 58px;
+  text-align: left;
+  border-radius: 16px;
+}
+.admin-tabs button.active {
+  border-color: rgba(52,211,153,0.58);
+  background: linear-gradient(135deg, rgba(20,184,166,0.22), rgba(96,165,250,0.12));
+}
+.admin-tabs strong,
+.admin-tabs small {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.admin-tabs small,
+.panel-hint,
+.notification-help span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.panel-hint {
+  margin: -4px 0 12px;
+}
+.admin-split,
+.notification-compose-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 0.82fr);
+  gap: 16px;
+  align-items: start;
+}
+.admin-split.wide-left {
+  grid-template-columns: minmax(320px, 0.78fr) minmax(0, 1.22fr);
+}
+.table-tools,
+.audience-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+.table-tools input,
+.audience-toolbar input {
+  flex: 1 1 260px;
+}
+.table-tools button,
+.audience-toolbar button {
+  min-height: 38px;
+}
+.audience-toolbar button.active {
+  border-color: rgba(52,211,153,0.55);
+  background: rgba(20,184,166,0.22);
+  color: var(--mint);
+  font-weight: 900;
+}
+.notification-help {
+  display: grid;
+  gap: 3px;
+  margin: -2px 0 12px;
+  border: 1px solid rgba(96,165,250,0.22);
+  border-radius: 16px;
+  padding: 12px;
+  background: rgba(37,99,235,0.10);
+}
+.notification-help strong {
+  color: var(--soft);
+}
 .form-grid {
   display: grid;
   gap: 12px;
@@ -420,6 +496,31 @@ h3 { margin: 18px 0 10px; letter-spacing: -0.02em; }
   align-items: center;
   margin-right: 14px;
 }
+.check-row,
+.compact-check {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 9px;
+  align-items: start;
+  width: 100%;
+  margin: 8px 0;
+  color: var(--soft);
+  line-height: 1.35;
+}
+.check-row input,
+.compact-check input {
+  width: 16px;
+  min-width: 16px;
+  height: 16px;
+  min-height: 16px;
+  margin: 2px 0 0;
+  accent-color: var(--mint);
+}
+.check-row span,
+.compact-check span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 .plan-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .plan-form { display: grid; gap: 12px; }
 .row {
@@ -468,8 +569,12 @@ h3 { margin: 18px 0 10px; letter-spacing: -0.02em; }
 .notification-targets .check-row small {
   display: block;
   color: var(--muted);
+  margin-top: 2px;
 }
 .row.six { grid-template-columns: 1.7fr 0.8fr 0.8fr 0.8fr 1.1fr 2.2fr; }
+.row.platform-user-row {
+  grid-template-columns: minmax(0, 1.7fr) minmax(140px, 0.8fr) minmax(140px, 0.8fr);
+}
 .row.user-row {
   grid-template-columns: minmax(0, 2fr) minmax(130px, 0.8fr) minmax(90px, 0.5fr) auto;
 }
@@ -481,7 +586,7 @@ h3 { margin: 18px 0 10px; letter-spacing: -0.02em; }
 .table.compact .row { grid-template-columns: 2fr 0.8fr 0.8fr; }
 .empty { color: var(--muted); }
 @media (max-width: 1180px) {
-  .metric-grid, .queue-grid, .dashboard-grid, .dashboard-grid.wide-left, .plans-layout, .tenant-layout, .usage-box {
+  .metric-grid, .queue-grid, .dashboard-grid, .dashboard-grid.wide-left, .plans-layout, .tenant-layout, .usage-box, .admin-split, .admin-split.wide-left, .notification-compose-grid {
     grid-template-columns: 1fr;
   }
 }
@@ -489,7 +594,15 @@ h3 { margin: 18px 0 10px; letter-spacing: -0.02em; }
   .admin-shell { grid-template-columns: 1fr; padding: 12px; }
   .admin-sidebar { position: relative; top: 0; height: auto; }
   .topbar { align-items: stretch; flex-direction: column; }
-  .filter-bar, .form-grid.two, .form-grid.four, .flag-grid, .plan-grid, .row, .row.six, .row.user-row, .row.notification-row, .audit-row, .intelligence-row, .performance-row, .retention-row, .index-row, .provider-policy-row {
+  .admin-tabs {
+    grid-template-columns: 1fr;
+  }
+  .table-tools,
+  .audience-toolbar {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+  .filter-bar, .form-grid.two, .form-grid.four, .flag-grid, .plan-grid, .row, .row.six, .row.user-row, .row.platform-user-row, .row.notification-row, .audit-row, .intelligence-row, .performance-row, .retention-row, .index-row, .provider-policy-row {
     grid-template-columns: 1fr;
   }
 }

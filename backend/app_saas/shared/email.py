@@ -6,7 +6,7 @@ from email.message import EmailMessage
 
 from app_saas.config import settings
 
-SCENTRA_LOGO_URL = "https://scentra-ai.online/scentra-logo.png"
+SCENTRA_LOGO_URL = "https://scentra-ai.online/logo-blanco.png"
 SCENTRA_FAVICON_URL = "https://scentra-ai.online/favicon.png"
 
 

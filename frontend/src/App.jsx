@@ -1140,6 +1140,39 @@ function App() {
       conversation.tags,
     ].some((value) => String(value || "").toLowerCase().includes(needle));
   });
+  const filteredSystemNotifications = systemNotifications.filter((notice) => {
+    const needle = inboxSearch.trim().toLowerCase();
+    const channelOk = inboxChannelFilter === "all";
+    const agentOk = inboxAgentFilter === "all";
+    const queueOk = inboxQueueFilter === "all" || (inboxQueueFilter === "unread" && !notice.read_at);
+    if (!channelOk || !agentOk || !queueOk) return false;
+    if (!needle) return true;
+    return [
+      notice.title,
+      notice.body,
+      notice.severity,
+      notice.category,
+    ].some((value) => String(value || "").toLowerCase().includes(needle));
+  });
+  const inboxListItems = [
+    ...filteredSystemNotifications.map((notice) => ({
+      key: `notice-${notice.recipient_id}`,
+      kind: "notice",
+      notice,
+      pinned: !notice.read_at && notice.pinned_until_read !== false,
+      timestamp: notice.created_at || "",
+    })),
+    ...filteredConversations.map((conversation) => ({
+      key: conversation.id,
+      kind: "conversation",
+      conversation,
+      pinned: false,
+      timestamp: conversation.updated_at || conversation.last_message_at || "",
+    })),
+  ].sort((a, b) => {
+    if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+    return new Date(b.timestamp || 0).getTime() - new Date(a.timestamp || 0).getTime();
+  });
   const filteredSocialComments = socialComments.filter((comment) => {
     const channelOk = inboxChannelFilter === "all" || String(comment.channel || "").toLowerCase() === inboxChannelFilter;
     const needle = inboxSearch.trim().toLowerCase();
@@ -4465,7 +4498,11 @@ function App() {
             </div>
             <div className="system-notification-actions">
               <button type="button" onClick={() => { setActiveView("inbox"); setSystemNotificationPopup(null); }}>Ver en Inbox</button>
-              <button type="button" className="primary" onClick={() => markSystemNotificationRead(systemNotificationPopup.recipient_id)}>Marcar leída</button>
+              {systemNotificationPopup.read_at ? (
+                <button type="button" className="primary" onClick={() => setSystemNotificationPopup(null)}>Cerrar</button>
+              ) : (
+                <button type="button" className="primary" onClick={() => markSystemNotificationRead(systemNotificationPopup.recipient_id)}>Marcar leída</button>
+              )}
             </div>
           </div>
         ) : null}
@@ -4512,36 +4549,42 @@ function App() {
             <div className="panel glass-card inbox-list">
               <div className="panel-head inbox-list-head"><h2>Inbox</h2><span>{inboxMode === "comments" ? `${filteredSocialComments.length} comentarios` : (unreadTotal + systemNotificationUnreadTotal) ? `${number(unreadTotal + systemNotificationUnreadTotal)} sin leer` : `${filteredConversations.length} chats`}</span></div>
               <div className="conversation-list">
-                {inboxMode === "dms" ? unreadSystemNotifications.map((notice) => (
-                  <button type="button" className="conversation-item system-notification-item active" key={`notice-${notice.recipient_id}`} onClick={() => setSystemNotificationPopup(notice)}>
-                    <span className="conversation-title"><strong>{notice.title}</strong><em>!</em></span>
-                    <span className="conversation-meta"><b>Scentra</b><small>{notice.severity === "critical" ? "Alerta crítica" : notice.severity === "warning" ? "Alerta" : "Notificación"}</small></span>
-                    <small>{notice.body}</small>
-                    <span className="conversation-badges"><mark>Interno</mark><mark>Sin respuesta</mark></span>
-                  </button>
-                )) : null}
-                {inboxMode === "dms" ? filteredConversations.map((conversation) => (
-                  <button type="button" className={`conversation-item ${selectedConversation?.id === conversation.id ? "active" : ""}`} key={conversation.id} onClick={() => loadMessages(conversation)}>
-                    <span className="conversation-title"><strong>{conversation.display_name || conversation.phone || conversation.external_contact_id}</strong>{Number(conversation.unread_count || 0) > 0 ? <em>{number(conversation.unread_count)}</em> : null}</span>
-                    <span className="conversation-meta"><b>{channelLabel(conversation.channel)}</b>{Number(conversation.unread_count || 0) > 0 ? <small>Sin leer</small> : <small>Leido</small>}</span>
-                    <span className="conversation-badges">
-                      {Number(conversation.lead_score || 0) > 0 ? <mark className={`lead-${conversation.lead_temperature || "cold"}`}>{leadTemperatureLabel(conversation.lead_temperature, conversation.lead_score)} {number(conversation.lead_score)}</mark> : null}
-                      {conversation.predictive_intelligence?.source === "intelligence_prediction" ? <mark>ML {number(conversation.predictive_intelligence?.conversion_probability || 0)}%</mark> : null}
-                      {Number(conversation.predictive_intelligence?.churn_risk || 0) >= 40 ? <mark className={Number(conversation.predictive_intelligence?.churn_risk || 0) >= 70 ? "danger" : ""}>Churn {number(conversation.predictive_intelligence?.churn_risk || 0)}</mark> : null}
-                      {conversation.assigned_user_name ? <mark>{conversation.assigned_user_name}</mark> : <mark>Sin asignar</mark>}
-                      {conversation.assigned_ai_agent_name ? <mark>IA: {conversation.assigned_ai_agent_name}</mark> : null}
-                      {conversation.sla_due_at || conversation.first_response_due_at ? <mark className={isPastDate(conversation.sla_due_at || conversation.first_response_due_at) ? "danger" : ""}>SLA {compactDateTimeLabel(conversation.sla_due_at || conversation.first_response_due_at)}</mark> : null}
-                    </span>
-                    <small>{conversation.last_message_text || "-"}</small>
-                  </button>
-                )) : filteredSocialComments.map((comment) => (
+                {inboxMode === "dms" ? inboxListItems.map((item) => {
+                  if (item.kind === "notice") {
+                    const notice = item.notice;
+                    return (
+                      <button type="button" className={`conversation-item system-notification-item ${notice.read_at ? "read" : "active unread"}`} key={item.key} onClick={() => setSystemNotificationPopup(notice)}>
+                        <span className="conversation-title"><strong>{notice.title}</strong>{notice.read_at ? null : <em>!</em>}</span>
+                        <span className="conversation-meta"><b>Scentra</b><small>{notice.read_at ? "Leida" : notice.severity === "critical" ? "Alerta critica" : notice.severity === "warning" ? "Alerta" : "Notificacion"}</small></span>
+                        <small>{notice.body}</small>
+                        <span className="conversation-badges"><mark>Interno</mark><mark>Sin respuesta</mark>{notice.read_at ? <mark>Leida</mark> : <mark>Fijada</mark>}</span>
+                      </button>
+                    );
+                  }
+                  const conversation = item.conversation;
+                  return (
+                    <button type="button" className={`conversation-item ${selectedConversation?.id === conversation.id ? "active" : ""}`} key={item.key} onClick={() => loadMessages(conversation)}>
+                      <span className="conversation-title"><strong>{conversation.display_name || conversation.phone || conversation.external_contact_id}</strong>{Number(conversation.unread_count || 0) > 0 ? <em>{number(conversation.unread_count)}</em> : null}</span>
+                      <span className="conversation-meta"><b>{channelLabel(conversation.channel)}</b>{Number(conversation.unread_count || 0) > 0 ? <small>Sin leer</small> : <small>Leido</small>}</span>
+                      <span className="conversation-badges">
+                        {Number(conversation.lead_score || 0) > 0 ? <mark className={`lead-${conversation.lead_temperature || "cold"}`}>{leadTemperatureLabel(conversation.lead_temperature, conversation.lead_score)} {number(conversation.lead_score)}</mark> : null}
+                        {conversation.predictive_intelligence?.source === "intelligence_prediction" ? <mark>ML {number(conversation.predictive_intelligence?.conversion_probability || 0)}%</mark> : null}
+                        {Number(conversation.predictive_intelligence?.churn_risk || 0) >= 40 ? <mark className={Number(conversation.predictive_intelligence?.churn_risk || 0) >= 70 ? "danger" : ""}>Churn {number(conversation.predictive_intelligence?.churn_risk || 0)}</mark> : null}
+                        {conversation.assigned_user_name ? <mark>{conversation.assigned_user_name}</mark> : <mark>Sin asignar</mark>}
+                        {conversation.assigned_ai_agent_name ? <mark>IA: {conversation.assigned_ai_agent_name}</mark> : null}
+                        {conversation.sla_due_at || conversation.first_response_due_at ? <mark className={isPastDate(conversation.sla_due_at || conversation.first_response_due_at) ? "danger" : ""}>SLA {compactDateTimeLabel(conversation.sla_due_at || conversation.first_response_due_at)}</mark> : null}
+                      </span>
+                      <small>{conversation.last_message_text || "-"}</small>
+                    </button>
+                  );
+                }) : filteredSocialComments.map((comment) => (
                   <button type="button" className={`conversation-item comment-item ${selectedComment?.id === comment.id ? "active" : ""}`} key={comment.id} onClick={() => { setSelectedComment(comment); setCommentReplyText(comment.ai_suggestion || ""); setCommentEmojiOpen(false); setCommentReactionOpen(false); }}>
                     <span className="conversation-title"><strong>{comment.author_name || comment.author_username || comment.author_external_id || "Comentario"}</strong>{comment.status === "open" ? <em>1</em> : null}</span>
                     <span className="conversation-meta"><b>{channelLabel(comment.channel)}</b><small>{comment.status === "replied" ? "Respondido" : "Pendiente"}</small></span>
                     <small>{comment.message || "-"}</small>
                   </button>
                 ))}
-                {inboxMode === "dms" && filteredConversations.length === 0 ? <div className="empty">Sin conversaciones para este filtro.</div> : null}
+                {inboxMode === "dms" && inboxListItems.length === 0 ? <div className="empty">Sin conversaciones para este filtro.</div> : null}
                 {inboxMode === "comments" && filteredSocialComments.length === 0 ? <div className="empty">Sin comentarios para este filtro.</div> : null}
               </div>
             </div>
