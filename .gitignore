@@ -2,6 +2,9 @@ backend/.env
 frontend/.env
 frontend/node_modules/
 frontend/dist/
+admin-frontend/.env
+admin-frontend/node_modules/
+admin-frontend/dist/
 *.log
 **/__pycache__/
 *.pyc

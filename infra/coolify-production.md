@@ -111,6 +111,17 @@ VITE_API_BASE=https://api.scentra-ai.online
 ```
 
 ## Variables portal admin
+
+Si publicas el Admin como una app Dockerfile separada en Coolify, usa el contexto del propio frontend admin para que Docker encuentre `package.json`, `src/` y `nginx.conf`:
+
+```text
+Base Directory: /admin-frontend
+Dockerfile Location: /Dockerfile
+Port Exposes: 80
+```
+
+No uses `Base Directory: /` con `Dockerfile Location: /admin-frontend/Dockerfile` para el Admin. Ese modo hace que `COPY nginx.conf` busque el archivo en la raiz del repo y puede fallar. El Admin tambien incluye `.dockerignore` para excluir `node_modules`, `dist` y `.env` del contexto Docker; no subas dependencias locales al repo.
+
 Estas variables de Vite deben estar disponibles en buildtime:
 
 ```env
