@@ -203,6 +203,46 @@ const PROVIDER_POLICY_DEFAULT = {
   currency: "USD",
   notes: "",
 };
+const PAYMENT_PROVIDER_META = {
+  wompi: {
+    name: "Wompi",
+    description: "Checkout Web de Wompi para pagos con tarjetas, PSE y medios locales.",
+    fields: [
+      ["public_key", "Llave publica"],
+      ["private_key", "Llave privada"],
+      ["event_key", "Llave privada de eventos"],
+      ["integrity_key", "Llave de integridad"],
+    ],
+  },
+  mercadopago: {
+    name: "Mercado Pago",
+    description: "Checkout de Mercado Pago para pagos con tarjetas y metodos disponibles por pais.",
+    fields: [
+      ["access_token", "Token de acceso"],
+      ["webhook_secret", "Secreto de webhook"],
+    ],
+  },
+};
+const PAYMENT_PROVIDER_DEFAULT_FORM = {
+  display_name: "",
+  title: "",
+  is_enabled: false,
+  is_default: false,
+  test_mode: true,
+  debug_logging: false,
+  test_public_key: "",
+  test_private_key: "",
+  test_event_key: "",
+  test_integrity_key: "",
+  live_public_key: "",
+  live_private_key: "",
+  live_event_key: "",
+  live_integrity_key: "",
+  test_access_token: "",
+  test_webhook_secret: "",
+  live_access_token: "",
+  live_webhook_secret: "",
+};
 const DEFAULT_AGENT_TYPES = [
   "advisor",
   "sales",
@@ -334,6 +374,29 @@ function emptyPlan() {
   };
 }
 
+function emptyPaymentProviderForms() {
+  return {
+    wompi: { ...PAYMENT_PROVIDER_DEFAULT_FORM, display_name: "Wompi", title: "Paga con Wompi" },
+    mercadopago: { ...PAYMENT_PROVIDER_DEFAULT_FORM, display_name: "Mercado Pago", title: "Paga con Mercado Pago" },
+  };
+}
+
+function paymentProviderFormFromApi(provider) {
+  const key = String(provider?.provider || "").toLowerCase();
+  const base = emptyPaymentProviderForms()[key] || { ...PAYMENT_PROVIDER_DEFAULT_FORM };
+  return {
+    ...base,
+    display_name: provider?.display_name || base.display_name,
+    title: provider?.title || base.title,
+    is_enabled: Boolean(provider?.is_enabled),
+    is_default: Boolean(provider?.is_default),
+    test_mode: provider?.test_mode !== false,
+    debug_logging: Boolean(provider?.debug_logging),
+    test_public_key: provider?.test?.public_key || "",
+    live_public_key: provider?.live?.public_key || "",
+  };
+}
+
 function formatApiError(data, fallback) {
   const detail = data?.detail || data?.error;
   if (typeof detail === "string") return detail;
@@ -391,6 +454,9 @@ export default function AdminApp() {
   const [billingInvoices, setBillingInvoices] = useState([]);
   const [billingCredits, setBillingCredits] = useState([]);
   const [billingForm, setBillingForm] = useState({ tenant_id: "", metric_code: "monthly_messages", amount: 1000, reason: "Credito manual", expires_at: "" });
+  const [billingProviders, setBillingProviders] = useState([]);
+  const [billingProviderForms, setBillingProviderForms] = useState(emptyPaymentProviderForms);
+  const [billingProviderBusy, setBillingProviderBusy] = useState("");
   const [audit, setAudit] = useState([]);
   const [adminSecurity, setAdminSecurity] = useState(null);
   const [securityCompliance, setSecurityCompliance] = useState(null);
@@ -555,12 +621,23 @@ export default function AdminApp() {
   };
 
   const loadBillingAdmin = async () => {
-    const [invoiceData, creditData] = await Promise.all([
+    const [invoiceData, creditData, providerData] = await Promise.all([
       apiCall("/saas/v1/admin/billing/invoices?limit=120"),
       apiCall("/saas/v1/admin/billing/credits?limit=120"),
+      apiCall("/saas/v1/admin/billing/providers/settings"),
     ]);
     setBillingInvoices(invoiceData?.invoices || []);
     setBillingCredits(creditData?.credits || []);
+    const providers = providerData?.providers || [];
+    setBillingProviders(providers);
+    setBillingProviderForms((prev) => {
+      const next = { ...prev };
+      providers.forEach((provider) => {
+        const key = String(provider?.provider || "").toLowerCase();
+        if (key) next[key] = paymentProviderFormFromApi(provider);
+      });
+      return next;
+    });
   };
 
   const loadIntelligence = async () => {
@@ -888,6 +965,30 @@ export default function AdminApp() {
       await Promise.all([loadBillingAdmin(), loadSubscriptions(), loadTenants()]);
     } catch (err) {
       showStatus(String(err.message || err), "error");
+    }
+  };
+
+  const updateBillingProviderForm = (provider, patch) => {
+    setBillingProviderForms((prev) => ({
+      ...prev,
+      [provider]: { ...(prev[provider] || PAYMENT_PROVIDER_DEFAULT_FORM), ...patch },
+    }));
+  };
+
+  const saveBillingProvider = async (provider) => {
+    try {
+      setBillingProviderBusy(provider);
+      const payload = billingProviderForms[provider] || {};
+      await apiCall(`/saas/v1/admin/billing/providers/${encodeURIComponent(provider)}`, {
+        method: "PATCH",
+        body: JSON.stringify(payload),
+      });
+      showStatus(`${PAYMENT_PROVIDER_META[provider]?.name || provider} actualizado`, "ok");
+      await loadBillingAdmin();
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    } finally {
+      setBillingProviderBusy("");
     }
   };
 
@@ -1405,7 +1506,7 @@ export default function AdminApp() {
         ) : null}
         {activeView === "plans" ? <PlansView plans={plans} features={features} planForm={planForm} setPlanForm={setPlanForm} savePlan={savePlan} editPlan={editPlan} /> : null}
         {activeView === "subscriptions" ? <SubscriptionsView subscriptions={subscriptions} plans={plans} patchSubscription={patchSubscription} /> : null}
-        {activeView === "billing" ? <BillingView tenants={tenants} invoices={billingInvoices} credits={billingCredits} billingForm={billingForm} setBillingForm={setBillingForm} applyBillingCredit={applyBillingCredit} syncBillingLifecycle={syncBillingLifecycle} downloadInvoice={downloadAdminInvoice} /> : null}
+        {activeView === "billing" ? <BillingView tenants={tenants} invoices={billingInvoices} credits={billingCredits} billingForm={billingForm} setBillingForm={setBillingForm} applyBillingCredit={applyBillingCredit} syncBillingLifecycle={syncBillingLifecycle} downloadInvoice={downloadAdminInvoice} providers={billingProviders} providerForms={billingProviderForms} updateProviderForm={updateBillingProviderForm} saveProvider={saveBillingProvider} providerBusy={billingProviderBusy} /> : null}
         {activeView === "users" ? <UsersAdminView me={me} activeTab={usersAdminTab} setActiveTab={setUsersAdminTab} tenantUserSearch={tenantUserSearch} setTenantUserSearch={setTenantUserSearch} profileForm={adminProfileForm} setProfileForm={setAdminProfileForm} passwordForm={adminPasswordForm} setPasswordForm={setAdminPasswordForm} saveProfile={saveAdminProfile} changePassword={changeAdminPassword} platformAdmins={platformAdmins} platformRoles={platformAdminRoles} platformForm={platformAdminForm} setPlatformForm={setPlatformAdminForm} createPlatformAdmin={createPlatformAdmin} patchPlatformAdmin={patchPlatformAdmin} tenantUsers={tenantUsers} tenantRoles={tenantUserRoles} tenantForm={tenantUserForm} setTenantForm={setTenantUserForm} tenants={tenants} createTenantUser={createTenantUser} patchTenantUser={patchTenantUser} busy={userBusy} /> : null}
         {activeView === "notifications" ? <NotificationsAdminView targets={notificationTargets} notifications={adminNotifications} form={notificationForm} setForm={setNotificationForm} draftForm={notificationDraftForm} setDraftForm={setNotificationDraftForm} targetSearch={notificationTargetSearch} setTargetSearch={setNotificationTargetSearch} draftNotification={draftNotification} sendNotification={sendAdminNotification} busy={notificationBusy} /> : null}
         {activeView === "security" ? <SecurityView security={adminSecurity} compliance={securityCompliance} updateAdminTwoFactor={updateAdminTwoFactor} downloadAuditCsv={downloadAuditCsv} /> : null}
@@ -1616,10 +1717,87 @@ function SubscriptionsView({ subscriptions, plans, patchSubscription }) {
   );
 }
 
-function BillingView({ tenants, invoices, credits, billingForm, setBillingForm, applyBillingCredit, syncBillingLifecycle, downloadInvoice }) {
+function BillingProviderSettings({ providers, providerForms, updateProviderForm, saveProvider, providerBusy }) {
+  const providerMap = Object.fromEntries((providers || []).map((item) => [item.provider, item]));
+  const renderField = (providerKey, mode, field, label) => {
+    const formKey = `${mode}_${field}`;
+    const form = providerForms?.[providerKey] || PAYMENT_PROVIDER_DEFAULT_FORM;
+    const provider = providerMap[providerKey] || {};
+    const storedValue = provider?.[mode]?.[field] || "";
+    const isPublic = field === "public_key";
+    return (
+      <label key={formKey}>{label}
+        <input
+          type={isPublic ? "text" : "password"}
+          value={form[formKey] || ""}
+          placeholder={storedValue ? `${storedValue} guardado` : `Pega ${label.toLowerCase()}`}
+          onChange={(event) => updateProviderForm(providerKey, { [formKey]: event.target.value })}
+        />
+      </label>
+    );
+  };
+  return (
+    <article className="panel glass-card billing-provider-panel">
+      <div className="panel-head">
+        <div>
+          <h2>Pasarelas de pago</h2>
+          <span>Configura prueba/produccion sin entrar a Coolify</span>
+        </div>
+      </div>
+      <div className="provider-settings-grid">
+        {Object.entries(PAYMENT_PROVIDER_META).map(([providerKey, meta]) => {
+          const provider = providerMap[providerKey] || {};
+          const form = providerForms?.[providerKey] || PAYMENT_PROVIDER_DEFAULT_FORM;
+          return (
+            <form className="payment-provider-card" key={providerKey} onSubmit={(event) => { event.preventDefault(); saveProvider(providerKey); }}>
+              <div className="payment-provider-head">
+                <div>
+                  <strong>{meta.name}</strong>
+                  <small>{meta.description}</small>
+                </div>
+                <mark className={provider.checkout_ready ? "ok" : provider.is_enabled ? "warn" : "neutral"}>{provider.checkout_ready ? "listo" : provider.is_enabled ? "incompleto" : "apagado"}</mark>
+              </div>
+              <div className="payment-provider-webhook">
+                <span>Webhook para copiar en {meta.name}</span>
+                <code>{provider.webhook_url || "-"}</code>
+              </div>
+              <label>Titulo visible en checkout
+                <input value={form.title || ""} onChange={(event) => updateProviderForm(providerKey, { title: event.target.value })} />
+              </label>
+              <div className="payment-switch-grid">
+                <label className="check-row"><input type="checkbox" checked={Boolean(form.is_enabled)} onChange={(event) => updateProviderForm(providerKey, { is_enabled: event.target.checked })} /><span><strong>Habilitar {meta.name}</strong><small>Permite crear checkouts con esta pasarela.</small></span></label>
+                <label className="check-row"><input type="checkbox" checked={Boolean(form.test_mode)} onChange={(event) => updateProviderForm(providerKey, { test_mode: event.target.checked })} /><span><strong>Modo prueba</strong><small>Usa credenciales sandbox/test para ensayos.</small></span></label>
+                <label className="check-row"><input type="checkbox" checked={Boolean(form.is_default)} onChange={(event) => updateProviderForm(providerKey, { is_default: event.target.checked })} /><span><strong>Predeterminado</strong><small>Se usa cuando el cliente deja proveedor automatico.</small></span></label>
+                <label className="check-row"><input type="checkbox" checked={Boolean(form.debug_logging)} onChange={(event) => updateProviderForm(providerKey, { debug_logging: event.target.checked })} /><span><strong>Registro debug</strong><small>Solo para diagnostico temporal.</small></span></label>
+              </div>
+              <div className="payment-credential-grid">
+                <div className="payment-credential-box">
+                  <span className="section-chip">Prueba</span>
+                  {meta.fields.map(([field, label]) => renderField(providerKey, "test", field, label))}
+                </div>
+                <div className="payment-credential-box">
+                  <span className="section-chip">Produccion</span>
+                  {meta.fields.map(([field, label]) => renderField(providerKey, "live", field, label))}
+                </div>
+              </div>
+              <div className="payment-provider-foot">
+                <small>{provider.source === "environment" ? "Usando respaldo de variables del servidor hasta guardar aqui." : "Guardado cifrado en la base de datos."}</small>
+                <button type="submit" className="primary" disabled={providerBusy === providerKey}>{providerBusy === providerKey ? "Guardando..." : `Guardar ${meta.name}`}</button>
+              </div>
+            </form>
+          );
+        })}
+      </div>
+    </article>
+  );
+}
+
+function BillingView({ tenants, invoices, credits, billingForm, setBillingForm, applyBillingCredit, syncBillingLifecycle, downloadInvoice, providers, providerForms, updateProviderForm, saveProvider, providerBusy }) {
   const selectedTenant = tenants.find((tenant) => tenant.id === billingForm.tenant_id);
   return (
-    <section className="dashboard-grid wide-left">
+    <section className="stack">
+      <BillingProviderSettings providers={providers} providerForms={providerForms} updateProviderForm={updateProviderForm} saveProvider={saveProvider} providerBusy={providerBusy} />
+      <div className="dashboard-grid wide-left">
       <article className="panel glass-card">
         <div className="panel-head"><h2>Facturacion</h2><button type="button" onClick={syncBillingLifecycle}>Sincronizar lifecycle</button></div>
         <div className="table observability-table">
@@ -1649,6 +1827,7 @@ function BillingView({ tenants, invoices, credits, billingForm, setBillingForm, 
           {credits.slice(0, 8).map((item) => <div className="row" key={item.id}><span>{item.tenant_name}</span><span>{item.metric_code}</span><span>{number(item.remaining_amount)} / {number(item.amount)}</span></div>)}
         </div>
       </article>
+      </div>
     </section>
   );
 }

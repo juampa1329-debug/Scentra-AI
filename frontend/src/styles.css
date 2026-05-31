@@ -1799,6 +1799,48 @@ nav { display: grid; gap: 8px; width: 100%; }
 .plan-card.active { border-color: rgba(94,234,212,0.55); box-shadow: 0 0 0 4px rgba(20,184,166,0.12); }
 .plan-card strong { font-size: 24px; text-transform: capitalize; }
 .plan-card span { color: var(--muted); font-size: 13px; }
+.payment-trust-footer {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+  border: 1px solid rgba(94,234,212,0.22);
+  border-radius: 18px;
+  padding: 14px;
+  background: rgba(20,184,166,0.08);
+}
+.payment-trust-footer > div:first-child,
+.payment-card-logos {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.payment-trust-footer span,
+.payment-trust-footer small {
+  color: var(--muted);
+  font-size: 12px;
+}
+.payment-trust-footer strong,
+.payment-card-logos em {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  border: 1px solid rgba(255,255,255,0.16);
+  border-radius: 999px;
+  padding: 4px 10px;
+  background: rgba(255,255,255,0.08);
+  color: var(--soft);
+  font-style: normal;
+  font-weight: 900;
+}
+.payment-trust-footer strong:first-of-type {
+  border-color: rgba(34,211,238,0.35);
+  color: #a7f3d0;
+}
+.payment-trust-footer strong:last-of-type {
+  border-color: rgba(96,165,250,0.35);
+  color: #bfdbfe;
+}
 .feature-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));

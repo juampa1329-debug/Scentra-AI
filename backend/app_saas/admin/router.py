@@ -23,6 +23,7 @@ from app_saas.admin.schemas import (
     AdminTenantUserCreateIn,
     BillingCreditCreateIn,
     BillingInvoiceCreateIn,
+    BillingProviderSettingsPatchIn,
     FeatureFlagPatchIn,
     PlanPatchIn,
     PlanUpsertIn,
@@ -36,6 +37,7 @@ from app_saas.admin.schemas import (
     TenantPatchIn,
 )
 from app_saas.billing.limits import billing_overview
+from app_saas.billing.provider_settings import list_billing_provider_settings, update_billing_provider_settings
 from app_saas.billing.service import apply_manual_credit, create_manual_invoice, get_invoice, invoice_pdf_bytes, sync_billing_lifecycle
 from app_saas.config import settings
 from app_saas.db import db_session, set_tenant_context
@@ -2487,6 +2489,46 @@ def admin_sync_billing_lifecycle(
         result = sync_billing_lifecycle(conn)
         _audit(conn, actor=ctx, action="admin.billing.lifecycle.sync", resource_type="billing", resource_id="lifecycle", details=result)
     return {"ok": True, "result": result}
+
+
+@router.get("/billing/providers/settings")
+def admin_billing_provider_settings(
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin", "billing_admin")),
+):
+    with db_session() as conn:
+        providers = list_billing_provider_settings(conn)
+    return {"providers": providers}
+
+
+@router.patch("/billing/providers/{provider}")
+def admin_update_billing_provider_settings(
+    provider: str,
+    payload: BillingProviderSettingsPatchIn,
+    ctx: PlatformAuthContext = Depends(require_platform_role("superadmin", "platform_admin", "billing_admin")),
+):
+    with db_session() as conn:
+        provider_settings = update_billing_provider_settings(
+            conn,
+            provider,
+            payload.model_dump(exclude_unset=True),
+            actor_user_id=ctx.user_id,
+        )
+        _audit(
+            conn,
+            actor=ctx,
+            action="admin.billing.provider.update",
+            resource_type="billing_provider",
+            resource_id=provider_settings.get("provider", provider),
+            details={
+                "provider": provider_settings.get("provider"),
+                "is_enabled": provider_settings.get("is_enabled"),
+                "is_default": provider_settings.get("is_default"),
+                "test_mode": provider_settings.get("test_mode"),
+                "checkout_ready": provider_settings.get("checkout_ready"),
+                "webhook_ready": provider_settings.get("webhook_ready"),
+            },
+        )
+    return {"ok": True, "provider": provider_settings}
 
 
 @router.get("/audit")

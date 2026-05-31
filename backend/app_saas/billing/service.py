@@ -15,6 +15,11 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection
 
 from app_saas.config import settings
+from app_saas.billing.provider_settings import (
+    billing_default_provider,
+    billing_provider_runtime_settings,
+    ensure_billing_provider_ready,
+)
 from app_saas.intelligence.capture import record_inline_event
 from app_saas.shared.email import send_plain_email
 
@@ -131,8 +136,10 @@ def _stripe_request(path: str, payload: dict[str, Any]) -> dict[str, Any]:
         raise HTTPException(status_code=502, detail=f"stripe_unavailable:{str(exc)[:300]}") from exc
 
 
-def _mercadopago_request(path: str, payload: dict[str, Any]) -> dict[str, Any]:
-    token = settings.mercadopago_access_token.strip()
+def _mercadopago_request(conn: Connection, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    provider_config = billing_provider_runtime_settings(conn, "mercadopago")
+    ensure_billing_provider_ready(provider_config, action="checkout")
+    token = str(provider_config.get("access_token") or "").strip()
     if not token:
         raise HTTPException(status_code=501, detail="mercadopago_access_token_missing")
     request = urllib.request.Request(
@@ -154,8 +161,10 @@ def _mercadopago_request(path: str, payload: dict[str, Any]) -> dict[str, Any]:
         raise HTTPException(status_code=502, detail=f"mercadopago_unavailable:{str(exc)[:300]}") from exc
 
 
-def _mercadopago_get(path: str) -> dict[str, Any]:
-    token = settings.mercadopago_access_token.strip()
+def _mercadopago_get(conn: Connection, path: str) -> dict[str, Any]:
+    provider_config = billing_provider_runtime_settings(conn, "mercadopago")
+    ensure_billing_provider_ready(provider_config, action="checkout")
+    token = str(provider_config.get("access_token") or "").strip()
     if not token:
         raise HTTPException(status_code=501, detail="mercadopago_access_token_missing")
     request = urllib.request.Request(
@@ -176,20 +185,19 @@ def _mercadopago_get(path: str) -> dict[str, Any]:
         raise HTTPException(status_code=502, detail=f"mercadopago_unavailable:{str(exc)[:300]}") from exc
 
 
-def _wompi_checkout_base() -> str:
-    env = settings.wompi_environment.strip().lower()
+def _wompi_checkout_base(provider_config: dict[str, Any] | None = None) -> str:
     return "https://checkout.wompi.co/p/"
 
 
-def _wompi_transaction_base() -> str:
-    env = settings.wompi_environment.strip().lower()
+def _wompi_transaction_base(provider_config: dict[str, Any] | None = None) -> str:
+    env = str((provider_config or {}).get("environment") or settings.wompi_environment).strip().lower()
     if env in {"sandbox", "test", "testing", "dev"}:
         return "https://sandbox.wompi.co"
     return "https://production.wompi.co"
 
 
-def _wompi_integrity_signature(reference: str, amount_cents: int, currency: str) -> str:
-    secret = settings.wompi_integrity_key.strip()
+def _wompi_integrity_signature(reference: str, amount_cents: int, currency: str, provider_config: dict[str, Any]) -> str:
+    secret = str(provider_config.get("integrity_key") or "").strip()
     if not secret:
         raise HTTPException(status_code=501, detail="wompi_integrity_key_missing")
     raw = f"{reference}{int(amount_cents)}{currency.upper()}{secret}"
@@ -205,8 +213,9 @@ def _wompi_event_value(data: dict[str, Any], dotted_path: str) -> str:
     return "" if cursor is None else str(cursor)
 
 
-def verify_wompi_event(payload: dict[str, Any], header_checksum: str = "") -> bool:
-    secret = settings.wompi_events_key.strip()
+def verify_wompi_event(conn: Connection, payload: dict[str, Any], header_checksum: str = "") -> bool:
+    provider_config = billing_provider_runtime_settings(conn, "wompi")
+    secret = str(provider_config.get("event_key") or "").strip()
     if not secret:
         return settings.is_local
     signature = payload.get("signature") if isinstance(payload.get("signature"), dict) else {}
@@ -239,8 +248,9 @@ def verify_stripe_event(raw_body: bytes, signature_header: str) -> bool:
     return _safe_compare_digest(expected, received)
 
 
-def verify_mercadopago_event(*, data_id: str, x_request_id: str, x_signature: str) -> bool:
-    secret = settings.mercadopago_webhook_secret.strip()
+def verify_mercadopago_event(conn: Connection, *, data_id: str, x_request_id: str, x_signature: str) -> bool:
+    provider_config = billing_provider_runtime_settings(conn, "mercadopago")
+    secret = str(provider_config.get("webhook_secret") or "").strip()
     if not secret:
         return settings.is_local
     parts = _parse_signature_header(x_signature)
@@ -256,8 +266,9 @@ def verify_mercadopago_event(*, data_id: str, x_request_id: str, x_signature: st
     return _safe_compare_digest(expected, received)
 
 
-def _wompi_checkout_url(*, reference: str, amount_cents: int, currency: str, redirect_url: str, owner: dict[str, Any]) -> str:
-    public_key = settings.wompi_public_key.strip()
+def _wompi_checkout_url(*, reference: str, amount_cents: int, currency: str, redirect_url: str, owner: dict[str, Any], provider_config: dict[str, Any]) -> str:
+    ensure_billing_provider_ready(provider_config, action="checkout")
+    public_key = str(provider_config.get("public_key") or "").strip()
     if not public_key:
         raise HTTPException(status_code=501, detail="wompi_public_key_missing")
     clean_currency = currency.upper()
@@ -268,26 +279,27 @@ def _wompi_checkout_url(*, reference: str, amount_cents: int, currency: str, red
         "currency": clean_currency,
         "amount-in-cents": str(int(amount_cents)),
         "reference": reference,
-        "signature:integrity": _wompi_integrity_signature(reference, amount_cents, clean_currency),
+        "signature:integrity": _wompi_integrity_signature(reference, amount_cents, clean_currency, provider_config),
         "redirect-url": redirect_url,
     }
     if owner.get("email"):
         query["customer-data:email"] = str(owner["email"])
     if owner.get("full_name"):
         query["customer-data:full-name"] = str(owner["full_name"])
-    return f"{_wompi_checkout_base()}?{urllib.parse.urlencode(query)}"
+    return f"{_wompi_checkout_base(provider_config)}?{urllib.parse.urlencode(query)}"
 
 
-def fetch_wompi_transaction(transaction_id: str) -> dict[str, Any]:
+def fetch_wompi_transaction(conn: Connection, transaction_id: str) -> dict[str, Any]:
     clean_id = _clean(transaction_id, 220)
     if not clean_id:
         raise HTTPException(status_code=400, detail="wompi_transaction_id_required")
-    private_key = settings.wompi_private_key.strip()
+    provider_config = billing_provider_runtime_settings(conn, "wompi")
+    private_key = str(provider_config.get("private_key") or "").strip()
     headers = {"Content-Type": "application/json"}
     if private_key:
         headers["Authorization"] = f"Bearer {private_key}"
     request = urllib.request.Request(
-        f"{_wompi_transaction_base()}/v1/transactions/{urllib.parse.quote(clean_id)}",
+        f"{_wompi_transaction_base(provider_config)}/v1/transactions/{urllib.parse.quote(clean_id)}",
         method="GET",
         headers=headers,
     )
@@ -313,7 +325,7 @@ def create_checkout_session(
 ) -> dict[str, Any]:
     selected_provider = _clean(provider, 40).lower()
     if selected_provider in {"", "auto"}:
-        selected_provider = _clean(settings.billing_default_provider, 40).lower() or "manual"
+        selected_provider = billing_default_provider(conn)
     if selected_provider not in {"manual", "stripe", "mercadopago", "wompi"}:
         raise HTTPException(status_code=400, detail="unsupported_billing_provider")
 
@@ -364,7 +376,9 @@ def create_checkout_session(
     elif selected_provider == "mercadopago":
         external_reference = f"{tenant_id}:{plan['plan_code']}"
         metadata["external_reference"] = external_reference
+        provider_config = billing_provider_runtime_settings(conn, "mercadopago")
         response = _mercadopago_request(
+            conn,
             "/checkout/preferences",
             {
                 "items": [
@@ -382,11 +396,17 @@ def create_checkout_session(
             },
         )
         provider_checkout_id = _clean(response.get("id"), 220)
-        checkout_url = _clean(response.get("init_point") or response.get("sandbox_init_point"), 1500)
+        checkout_url = _clean(
+            (response.get("sandbox_init_point") if provider_config.get("test_mode") else response.get("init_point"))
+            or response.get("init_point")
+            or response.get("sandbox_init_point"),
+            1500,
+        )
         metadata["provider_response"] = response
     elif selected_provider == "wompi":
         if currency != "COP":
             raise HTTPException(status_code=400, detail="wompi_requires_cop_plan_currency")
+        provider_config = billing_provider_runtime_settings(conn, "wompi")
         reference = f"scentra-{tenant_id[:8]}-{session_uuid[:8]}".replace("-", "").upper()[:64]
         checkout_url = _clean(
             _wompi_checkout_url(
@@ -395,12 +415,13 @@ def create_checkout_session(
                 currency=currency,
                 redirect_url=success,
                 owner=owner,
+                provider_config=provider_config,
             ),
             1500,
         )
         provider_checkout_id = reference
         metadata["wompi"] = {
-            "environment": settings.wompi_environment,
+            "environment": provider_config.get("environment") or settings.wompi_environment,
             "reference": reference,
             "checkout_type": "web_checkout",
         }
@@ -1294,12 +1315,13 @@ def process_provider_event(
         data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
         data_id = clean_query.get("data.id") or clean_query.get("id") or _clean(data.get("id"), 220)
         if not verify_mercadopago_event(
+            conn,
             data_id=data_id,
             x_request_id=clean_headers.get("x-request-id", ""),
             x_signature=clean_headers.get("x-signature", ""),
         ):
             raise HTTPException(status_code=401, detail="invalid_mercadopago_signature")
-    if clean_provider == "wompi" and not verify_wompi_event(payload, header_checksum):
+    if clean_provider == "wompi" and not verify_wompi_event(conn, payload, header_checksum):
         raise HTTPException(status_code=401, detail="invalid_wompi_signature")
 
     event = record_provider_event(conn, provider=clean_provider, payload=payload)
@@ -1403,7 +1425,7 @@ def process_provider_event(
         payment_id = _clean(data.get("id") or clean_query.get("data.id") or clean_query.get("id"), 220)
         topic = _clean(payload.get("type") or payload.get("topic") or payload.get("action"), 120)
         if payment_id and ("payment" in topic or not topic):
-            payment = _mercadopago_get(f"/v1/payments/{urllib.parse.quote(payment_id)}")
+            payment = _mercadopago_get(conn, f"/v1/payments/{urllib.parse.quote(payment_id)}")
             status = _clean(payment.get("status"), 40).lower()
             tenant_id, plan_code = _tenant_plan_from_reference(_clean(payment.get("external_reference"), 220))
             metadata = payment.get("metadata") if isinstance(payment.get("metadata"), dict) else {}

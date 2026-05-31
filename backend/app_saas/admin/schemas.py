@@ -176,6 +176,27 @@ class BillingInvoiceCreateIn(BaseModel):
     due_at: str = Field(default="", max_length=80)
 
 
+class BillingProviderSettingsPatchIn(BaseModel):
+    display_name: str | None = Field(default=None, max_length=120)
+    title: str | None = Field(default=None, max_length=140)
+    is_enabled: bool | None = None
+    is_default: bool | None = None
+    test_mode: bool | None = None
+    debug_logging: bool | None = None
+    test_public_key: str | None = Field(default=None, max_length=1000)
+    test_private_key: str | None = Field(default=None, max_length=5000)
+    test_event_key: str | None = Field(default=None, max_length=5000)
+    test_integrity_key: str | None = Field(default=None, max_length=5000)
+    live_public_key: str | None = Field(default=None, max_length=1000)
+    live_private_key: str | None = Field(default=None, max_length=5000)
+    live_event_key: str | None = Field(default=None, max_length=5000)
+    live_integrity_key: str | None = Field(default=None, max_length=5000)
+    test_access_token: str | None = Field(default=None, max_length=5000)
+    test_webhook_secret: str | None = Field(default=None, max_length=5000)
+    live_access_token: str | None = Field(default=None, max_length=5000)
+    live_webhook_secret: str | None = Field(default=None, max_length=5000)
+
+
 class TenantImpersonateIn(BaseModel):
     role: str = Field(default="admin", max_length=40)
     reason: str = Field(default="support", max_length=500)

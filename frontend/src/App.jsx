@@ -526,6 +526,24 @@ const lifecycleLabel = (status) => ({
   paused: "Pausado",
   none: "Sin suscripcion",
 }[String(status || "").toLowerCase()] || String(status || "Activo"));
+
+function PaymentTrustFooter() {
+  const cards = ["Visa", "Mastercard", "AmEx", "PSE", "Nequi"];
+  return (
+    <div className="payment-trust-footer">
+      <div>
+        <span>Pagos seguros con</span>
+        <strong>Wompi</strong>
+        <strong>Mercado Pago</strong>
+      </div>
+      <div className="payment-card-logos">
+        {cards.map((item) => <em key={item}>{item}</em>)}
+      </div>
+      <small>El checkout se abre en el proveedor seleccionado y Scentra activa el plan cuando el webhook confirma el pago.</small>
+    </div>
+  );
+}
+
 const CHAT_EMOJIS = [
   "😀", "😃", "😄", "😁", "😅", "😂", "🙂", "😉", "😊", "😍", "😘", "😎",
   "🤔", "😮", "😢", "😭", "😡", "🙏", "👏", "🙌", "👍", "👎", "💪", "🔥",
@@ -6060,6 +6078,7 @@ function App() {
                     </label>
                   </div>
                   <div className="plan-cards">{billingPlans.map((plan) => <article className={`plan-card ${billingPlan.plan_code === plan.plan_code ? "active" : ""}`} key={plan.plan_code}><strong>{plan.display_name || plan.plan_code}</strong><span>{number(plan.max_monthly_messages)} mensajes/mes</span><span>{number(plan.max_campaigns)} campanas CRM</span><span>{number(plan.max_broadcasts)} broadcasts</span><span>{number(plan.max_ai_tokens)} tokens IA</span><span>{number(plan.max_integrations)} integraciones / {number(plan.max_agents)} usuarios</span><span>{(Number(plan.price_monthly_cents || 0) / 100).toLocaleString("es-CO", { style: "currency", currency: plan.currency || "USD", maximumFractionDigits: 0 })} / mes</span><button type="button" className="primary" disabled={!plan.is_active || billingCheckoutBusy === plan.plan_code} onClick={() => startPlanCheckout(plan.plan_code)}>{billingCheckoutBusy === plan.plan_code ? "Creando..." : "Pagar / activar"}</button>{billingPlan.plan_code === plan.plan_code ? <small>Plan actual</small> : null}<button type="button" className="ghost" onClick={() => changePlanDev(plan.plan_code)}>Usar en local</button></article>)}</div>
+                  <PaymentTrustFooter />
                   <p className="soft-copy">En produccion el plan se activa por checkout y webhook del proveedor. Wompi usa firma de integridad generada en backend.</p>
                   {billingCheckoutSessions.length ? <div className="billing-history"><strong>Ultimos checkouts</strong>{billingCheckoutSessions.slice(0, 4).map((item) => <div key={item.id}><span>{item.provider} / {item.plan_code}</span><small>{item.status} · {compactDateTimeLabel(item.created_at)}</small>{item.checkout_url ? <button type="button" onClick={() => window.open(item.checkout_url, "_blank", "noopener,noreferrer")}>Abrir</button> : null}</div>)}</div> : null}
                   {billingInvoices.length ? <div className="billing-history"><strong>Facturas</strong>{billingInvoices.slice(0, 6).map((item) => <div key={item.id}><span>{item.invoice_number || item.provider_invoice_id || item.id}</span><small>{item.status} · {money(item.total_cents, item.currency)} · {compactDateTimeLabel(item.paid_at || item.due_at || item.created_at)}</small><button type="button" onClick={() => downloadBillingInvoice(item)}>PDF</button></div>)}</div> : null}
