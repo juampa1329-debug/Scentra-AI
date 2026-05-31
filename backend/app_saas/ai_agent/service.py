@@ -486,14 +486,38 @@ def _recent_messages(conn: Connection, tenant_id: str, conversation_id: str, lim
     return messages
 
 
-def _knowledge_context(conn: Connection, tenant_id: str, messages: list[dict[str, Any]]) -> str:
+def _knowledge_context(
+    conn: Connection,
+    tenant_id: str,
+    messages: list[dict[str, Any]],
+    conversation: dict[str, Any] | None = None,
+    memory: dict[str, Any] | None = None,
+) -> str:
     ensure_knowledge_tables(conn)
-    last_text = " ".join(
+    parts = [
         _clean(message.get("text"), 500)
         for message in messages[-6:]
         if str(message.get("direction")).lower() == "in"
-    )
-    query = last_text or "politicas preguntas frecuentes catalogo"
+    ]
+    conversation = conversation or {}
+    memory = memory or {}
+    facts = memory.get("facts_json") if isinstance(memory.get("facts_json"), dict) else {}
+    for key in ("interests", "tags", "intent", "customer_type"):
+        value = conversation.get(key)
+        if isinstance(value, list):
+            parts.extend(_clean(item, 160) for item in value if _clean(item, 160))
+        elif _clean(value, 240):
+            parts.append(_clean(value, 240))
+    if _clean(conversation.get("notes"), 700):
+        parts.append(_clean(conversation.get("notes"), 700))
+    for key in ("need", "product_interest", "budget", "objections", "next_step"):
+        value = facts.get(key)
+        if _clean(value, 240):
+            parts.append(_clean(value, 240))
+    joined = " ".join(part for part in parts if part)
+    if re.search(r"\b(precio|precios|mayorista|mayoristas|cotiz|cotizacion|pedido|minimo|catalogo|disponibilidad)\b", joined, flags=re.IGNORECASE):
+        joined = f"{joined} precios mayoristas cotizacion catalogo disponibilidad lista actualizada"
+    query = joined or "politicas preguntas frecuentes catalogo"
     return knowledge_context_for_query(conn, tenant_id, query, limit=6, used_by="conversation_ai")
 
 
@@ -831,6 +855,11 @@ Devuelve UNICAMENTE JSON valido con esta forma:
     "custom_fields": {{"campo_configurado": "valor solo si el campo existe en CRM"}}
   }}
 }}
+
+Reglas criticas de salida:
+- No escribas razonamiento, analisis, fuentes, memoria, hechos, campos CRM ni JSON fuera del objeto.
+- El cliente solo puede ver el contenido de "reply"; nunca incluyas "memory_summary", "facts", "crm", claves o procesamiento dentro de "reply".
+- Si consultas Knowledge/RAG para precios o disponibilidad, responde solo el dato encontrado; si no esta en las fuentes, di que lo verificas sin inventar.
 """
     return system_prompt, user_prompt
 
@@ -907,23 +936,100 @@ def _call_chat_completions(provider: str, token: str, model: str, system_prompt:
     return str(message.get("content") or "").strip()
 
 
+CONTROL_JSON_KEYS = (
+    "reply",
+    "memory_summary",
+    "facts",
+    "crm",
+    "budget",
+    "product_interest",
+    "objections",
+    "next_step",
+)
+
+
+def _strip_model_fences(value: str) -> str:
+    text_value = _clean(value, 50000)
+    if text_value.startswith("```"):
+        text_value = re.sub(r"^```(?:json)?\s*", "", text_value, flags=re.IGNORECASE)
+        text_value = re.sub(r"\s*```$", "", text_value)
+    return text_value.strip()
+
+
+def _decode_visible_text(value: Any, limit: int = 4000) -> str:
+    text_value = _clean(value, limit)
+    if not text_value:
+        return ""
+    text_value = text_value.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\r", "\n").replace("\\t", " ")
+    text_value = text_value.replace('\\"', '"').replace("\\/", "/")
+    text_value = re.sub(r"[ \t]+\n", "\n", text_value)
+    text_value = re.sub(r"\n{3,}", "\n\n", text_value)
+    return text_value.strip(" \t\r\n\"'")
+
+
+def _looks_like_control_json(value: str) -> bool:
+    lowered = value.lower()
+    if not lowered.lstrip().startswith("{"):
+        return False
+    hits = sum(1 for key in CONTROL_JSON_KEYS if f'"{key}"' in lowered or f"'{key}'" in lowered)
+    return hits >= 2
+
+
+def _extract_jsonish_string_field(value: str, field: str) -> str:
+    text_value = _strip_model_fences(value)
+    pattern = re.compile(
+        rf"[\"']{re.escape(field)}[\"']\s*:\s*[\"'](?P<value>.*?)(?:[\"']\s*,\s*[\"'](?:memory_summary|facts|crm|provider_code|model|estimated_tokens|ok)[\"']\s*:|[\"']\s*}}\s*$)",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    match = pattern.search(text_value)
+    if not match:
+        return ""
+    return _decode_visible_text(match.group("value"), 4000)
+
+
+def _normalize_reply_text(value: Any) -> str:
+    text_value = _decode_visible_text(value, 4000)
+    if not text_value:
+        return ""
+    if _looks_like_control_json(text_value):
+        extracted = _extract_jsonish_string_field(text_value, "reply")
+        return extracted
+    for key in ("memory_summary", "facts", "crm"):
+        marker = re.search(rf"\n?\s*[\"']{key}[\"']\s*:", text_value, flags=re.IGNORECASE)
+        if marker:
+            text_value = text_value[: marker.start()].strip(" \t\r\n,\"'")
+            break
+    return text_value
+
+
 def _extract_json(raw: str) -> dict[str, Any]:
-    text_value = _clean(raw, 50000)
+    text_value = _strip_model_fences(raw)
     if not text_value:
         return {}
     try:
         parsed = json.loads(text_value)
-        return parsed if isinstance(parsed, dict) else {}
+        if isinstance(parsed, dict):
+            parsed["reply"] = _normalize_reply_text(parsed.get("reply"))
+            return parsed
+        return {}
     except json.JSONDecodeError:
         start = text_value.find("{")
         end = text_value.rfind("}")
         if start >= 0 and end > start:
             try:
                 parsed = json.loads(text_value[start : end + 1])
-                return parsed if isinstance(parsed, dict) else {}
+                if isinstance(parsed, dict):
+                    parsed["reply"] = _normalize_reply_text(parsed.get("reply"))
+                    return parsed
+                return {}
             except json.JSONDecodeError:
-                return {"reply": text_value}
-    return {"reply": text_value}
+                extracted = _extract_jsonish_string_field(text_value[start : end + 1], "reply")
+                if extracted:
+                    return {"reply": extracted}
+                if _looks_like_control_json(text_value):
+                    return {"reply": ""}
+                return {"reply": _normalize_reply_text(text_value)}
+    return {"reply": _normalize_reply_text(text_value)}
 
 
 def generate_agent_result(conn: Connection, tenant_id: str, conversation: dict[str, Any], messages: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1006,7 +1112,7 @@ def generate_agent_result(conn: Connection, tenant_id: str, conversation: dict[s
     settings = _runtime_settings(settings, runtime_agent)
     providers = _runtime_provider_chain(settings)
     memory = get_memory(conn, tenant_id, str(conversation["id"]))
-    knowledge_context = _knowledge_context(conn, tenant_id, messages)
+    knowledge_context = _knowledge_context(conn, tenant_id, messages, conversation, memory)
     collective_context = collective_memory_context(conn, tenant_id, runtime_agent["id"], limit=8) if runtime_agent else ""
     multimodal_context = _agent_multimodal_context(conn, tenant_id, str(conversation["id"]), runtime_agent)
     system_prompt, user_prompt = _prompt(settings, conversation, memory, messages, knowledge_context, runtime_agent, collective_context, multimodal_context)
@@ -1208,8 +1314,38 @@ def _metadata_int(metadata: dict[str, Any], key: str, default: int, minimum: int
     return max(minimum, min(maximum, value))
 
 
+def _split_long_reply_unit(unit: str, max_chars: int) -> list[str]:
+    clean = _clean(unit, 8000)
+    if not clean:
+        return []
+    if max_chars <= 0 or len(clean) <= max_chars:
+        return [clean]
+    chunks: list[str] = []
+    current = ""
+    for word in re.split(r"\s+", clean):
+        if not word:
+            continue
+        if len(word) > max_chars:
+            if current:
+                chunks.append(current.strip())
+                current = ""
+            for idx in range(0, len(word), max_chars):
+                chunks.append(word[idx : idx + max_chars].strip())
+            continue
+        candidate = f"{current} {word}".strip() if current else word
+        if len(candidate) <= max_chars:
+            current = candidate
+            continue
+        if current:
+            chunks.append(current.strip())
+        current = word
+    if current:
+        chunks.append(current.strip())
+    return [chunk for chunk in chunks if chunk]
+
+
 def _split_reply_chunks(body: str, max_chars: int) -> list[str]:
-    clean = _clean(body, 8000)
+    clean = _normalize_reply_text(body)
     if not clean:
         return []
     if max_chars <= 0 or len(clean) <= max_chars:
@@ -1220,7 +1356,7 @@ def _split_reply_chunks(body: str, max_chars: int) -> list[str]:
         if len(paragraph) <= max_chars:
             units.append(paragraph)
             continue
-        sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+", paragraph) if part.strip()]
+        sentences = [part.strip() for part in re.split(r"(?<=[.!?])\s+|\n+", paragraph) if part.strip()]
         units.extend(sentences or [paragraph])
 
     chunks: list[str] = []
@@ -1230,8 +1366,7 @@ def _split_reply_chunks(body: str, max_chars: int) -> list[str]:
             if current:
                 chunks.append(current.strip())
                 current = ""
-            for idx in range(0, len(unit), max_chars):
-                chunks.append(unit[idx : idx + max_chars].strip())
+            chunks.extend(_split_long_reply_unit(unit, max_chars))
             continue
         candidate = f"{current}\n\n{unit}".strip() if current else unit
         if len(candidate) <= max_chars:
@@ -1302,7 +1437,7 @@ def _queue_ai_reply(
     settings: dict[str, Any],
     latest_inbound: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    body = _clean(body_text, 4000)
+    body = _normalize_reply_text(body_text)
     if not body:
         return {"ok": False, "skipped": "empty_ai_reply"}
     metadata = _settings_metadata(settings.get("metadata_json"))

@@ -595,6 +595,7 @@ def _score_chunk(query: str, terms: list[str], query_vector: dict[str, float], r
     cover_haystack = _normalize_for_search(source_cover or title, 4000)
     compact_query = _compact_for_search(query, 1200)
     compact_haystack = _compact_for_search(haystack_raw, 12000)
+    compact_content = _compact_for_search(content, 10000)
     compact_cover = _compact_for_search(source_cover or title, 4000)
     lexical_score = 0.0
     clean_query = _normalize_for_search(query, 1200)
@@ -616,6 +617,12 @@ def _score_chunk(query: str, terms: list[str], query_vector: dict[str, float], r
             lexical_score += min(28, 6 + (count * 2.2))
             if term in cover_haystack:
                 lexical_score += 10
+        elif len(term) >= 6 and term in compact_content:
+            matched_terms.append(f"~{term}")
+            lexical_score += 30
+        elif len(term) >= 6 and term in compact_cover:
+            matched_terms.append(f"~{term}")
+            lexical_score += 12
     if len(compact_query) >= 6 and not compact_exact:
         best_ratio = 0.0
         best_label = ""
