@@ -571,25 +571,74 @@ def _record_ab_event(
     )
 
 
-def _text_blocks(template: dict[str, Any], variables: dict[str, Any]) -> list[str]:
+def _template_message_blocks(template: dict[str, Any], variables: dict[str, Any]) -> list[dict[str, Any]]:
     blocks = _safe_list(template.get("blocks_json"))
-    out: list[str] = []
+    out: list[dict[str, Any]] = []
     for block in blocks:
         if not isinstance(block, dict):
             continue
         kind = _norm(block.get("kind") or block.get("type") or "text")
+        if kind == "file":
+            kind = "document"
         if kind == "text":
             rendered = _render(block.get("text") or block.get("body") or block.get("content"), variables)
+            if rendered:
+                out.append({"kind": "text", "text": rendered})
+            continue
         elif kind in {"image", "video"}:
             rendered = _render(block.get("caption") or "", variables)
+            media_id = _clean(block.get("media_id"), 120)
+            media_url = _clean(block.get(f"{kind}_url") or block.get("media_url") or block.get("media_link"), 1500)
+            if media_id or media_url:
+                out.append({"kind": kind, "caption": rendered, "media_id": media_id, "media_url": media_url, "mime_type": _clean(block.get("mime_type") or block.get("content_type"), 120)})
+            elif rendered:
+                out.append({"kind": "text", "text": rendered})
+            continue
+        elif kind in {"audio", "document"}:
+            rendered = _render(block.get("caption") or "", variables)
+            media_id = _clean(block.get("media_id"), 120)
+            media_url = _clean(
+                block.get("document_url")
+                or block.get("file_url")
+                or block.get("audio_url")
+                or block.get("media_url")
+                or block.get("media_link"),
+                1500,
+            )
+            if media_id or media_url:
+                out.append(
+                    {
+                        "kind": kind,
+                        "caption": rendered if kind == "document" else "",
+                        "media_id": media_id,
+                        "media_url": media_url,
+                        "filename": _clean(block.get("filename") or block.get("name"), 240),
+                        "mime_type": _clean(block.get("mime_type") or block.get("content_type"), 120),
+                    }
+                )
+            elif rendered:
+                out.append({"kind": "text", "text": rendered})
+            continue
         else:
-            rendered = ""
-        if rendered:
-            out.append(rendered)
+            rendered = _render(block.get("caption") or block.get("text") or "", variables)
+            if rendered:
+                out.append({"kind": "text", "text": rendered})
     if out:
         return out
     fallback = _render(template.get("body") or "", variables)
-    return [fallback] if fallback else []
+    return [{"kind": "text", "text": fallback}] if fallback else []
+
+
+def _text_blocks(template: dict[str, Any], variables: dict[str, Any]) -> list[str]:
+    out: list[str] = []
+    for block in _template_message_blocks(template, variables):
+        if block.get("kind") == "text":
+            text_value = _clean(block.get("text"), 4000)
+        else:
+            text_value = _clean(block.get("caption") or block.get("filename") or f"[{block.get('kind') or 'media'}]", 4000)
+        if text_value:
+            out.append(text_value)
+    return out
 
 
 def _queue_outbound_text(
@@ -688,6 +737,130 @@ def _queue_outbound_text(
     return {"ok": True, "message_id": message["id"], "outbound_id": outbound["id"], "status": outbound["status"]}
 
 
+def _queue_outbound_media(
+    conn,
+    *,
+    tenant_id: str,
+    conversation: dict[str, Any],
+    block: dict[str, Any],
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    kind = _norm(block.get("kind") or "document")
+    if kind == "file":
+        kind = "document"
+    if kind not in {"image", "video", "audio", "document"}:
+        return _queue_outbound_text(conn, tenant_id=tenant_id, conversation=conversation, body_text=_clean(block.get("text") or block.get("caption"), 4000), payload=payload)
+
+    media_id = _clean(block.get("media_id"), 120)
+    media_url = _clean(block.get("media_url") or block.get("media_link"), 1500)
+    body = _clean(block.get("caption"), 4000) if kind in {"image", "video", "document"} else ""
+    filename = _clean(block.get("filename"), 240)
+    mime_type = _clean(block.get("mime_type"), 120)
+    if not media_id and not media_url:
+        if body:
+            return _queue_outbound_text(conn, tenant_id=tenant_id, conversation=conversation, body_text=body, payload=payload)
+        return {"ok": False, "error": "media_required", "message_type": kind}
+
+    ensure_monthly_message_quota(conn, tenant_id, requested=1)
+    channel = _clean(conversation.get("channel"), 40) or "whatsapp"
+    conversation_id = str(conversation["id"])
+    external_id = f"local:trigger:{uuid4().hex}"
+    display_text = body or (f"[Documento] {filename}" if kind == "document" and filename else f"[{kind}]")
+    message_payload = {
+        **payload,
+        "local_external_message_id": external_id,
+        "message_type": kind,
+        "media_id": media_id,
+        "media_url": media_url,
+        "media_link": media_url,
+        "filename": filename,
+        "mime_type": mime_type,
+    }
+    message = conn.execute(
+        text(
+            """
+            INSERT INTO saas_messages (
+                tenant_id, conversation_id, channel, external_message_id, direction,
+                msg_type, text, media_id, mime_type, payload_json
+            )
+            VALUES (
+                CAST(:tenant_id AS uuid), CAST(:conversation_id AS uuid), :channel, :external_message_id,
+                'out', :msg_type, :body_text, :media_id, :mime_type, CAST(:payload_json AS jsonb)
+            )
+            RETURNING id::text
+            """
+        ),
+        {
+            "tenant_id": tenant_id,
+            "conversation_id": conversation_id,
+            "channel": channel,
+            "external_message_id": external_id,
+            "msg_type": kind,
+            "body_text": display_text,
+            "media_id": media_id,
+            "mime_type": mime_type,
+            "payload_json": _json(message_payload),
+        },
+    ).mappings().first()
+    outbound = conn.execute(
+        text(
+            """
+            INSERT INTO saas_outbound_messages (
+                tenant_id, conversation_id, message_id, channel, recipient_external_id, body_text, payload_json
+            )
+            VALUES (
+                CAST(:tenant_id AS uuid), CAST(:conversation_id AS uuid), CAST(:message_id AS uuid),
+                :channel, :recipient_external_id, :body_text, CAST(:payload_json AS jsonb)
+            )
+            RETURNING id::text, status
+            """
+        ),
+        {
+            "tenant_id": tenant_id,
+            "conversation_id": conversation_id,
+            "message_id": message["id"],
+            "channel": channel,
+            "recipient_external_id": _clean(conversation.get("external_contact_id") or conversation.get("phone"), 180),
+            "body_text": body,
+            "payload_json": _json(message_payload),
+        },
+    ).mappings().first()
+    conn.execute(
+        text(
+            """
+            INSERT INTO saas_usage_counters (
+                tenant_id, metric_code, period_yyyymm, metric_value
+            )
+            VALUES (
+                CAST(:tenant_id AS uuid),
+                'outbound_messages_queued',
+                TO_CHAR(NOW(), 'YYYYMM'),
+                1
+            )
+            ON CONFLICT (tenant_id, metric_code, period_yyyymm)
+            DO UPDATE SET
+                metric_value = saas_usage_counters.metric_value + 1,
+                updated_at = NOW()
+            """
+        ),
+        {"tenant_id": tenant_id},
+    )
+    conn.execute(
+        text(
+            """
+            UPDATE saas_conversations
+            SET last_message_text = :body_text,
+                last_message_at = NOW(),
+                updated_at = NOW()
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
+              AND id = CAST(:conversation_id AS uuid)
+            """
+        ),
+        {"tenant_id": tenant_id, "conversation_id": conversation_id, "body_text": display_text},
+    )
+    return {"ok": True, "message_id": message["id"], "outbound_id": outbound["id"], "status": outbound["status"], "message_type": kind}
+
+
 def _action_send_template(conn, tenant_id: str, conversation: dict[str, Any], trigger: dict[str, Any], action: dict[str, Any], source: str) -> dict[str, Any]:
     template_id = _clean(action.get("template_id"), 120)
     template = _load_template(conn, tenant_id, template_id)
@@ -696,26 +869,39 @@ def _action_send_template(conn, tenant_id: str, conversation: dict[str, Any], tr
     if _norm(template.get("status")) not in {"draft", "approved"}:
         return {"ok": False, "error": "template_not_sendable", "template_id": template_id, "status": template.get("status") or ""}
     variables = {**_safe_dict(template.get("params_json")), **_conversation_vars(conversation), **_safe_dict(action.get("overrides"))}
-    bodies = _text_blocks(template, variables)
-    if not bodies:
-        return {"ok": False, "error": "template_without_text_blocks", "template_id": template_id}
+    blocks = _template_message_blocks(template, variables)
+    if not blocks:
+        return {"ok": False, "error": "template_without_blocks", "template_id": template_id}
     queued = []
-    for idx, body in enumerate(bodies):
-        queued.append(
-            _queue_outbound_text(
-                conn,
-                tenant_id=tenant_id,
-                conversation=conversation,
-                body_text=body,
-                payload={
-                    "source": source,
-                    "trigger_id": trigger["id"],
-                    "template_id": template_id,
-                    "template_name": template.get("name") or "",
-                    "block_index": idx,
-                },
+    for idx, block in enumerate(blocks):
+        block_payload = {
+            "source": source,
+            "trigger_id": trigger["id"],
+            "template_id": template_id,
+            "template_name": template.get("name") or "",
+            "block_index": idx,
+            "template_block_kind": block.get("kind") or "text",
+        }
+        if block.get("kind") == "text":
+            queued.append(
+                _queue_outbound_text(
+                    conn,
+                    tenant_id=tenant_id,
+                    conversation=conversation,
+                    body_text=_clean(block.get("text"), 4000),
+                    payload=block_payload,
+                )
             )
-        )
+        else:
+            queued.append(
+                _queue_outbound_media(
+                    conn,
+                    tenant_id=tenant_id,
+                    conversation=conversation,
+                    block=block,
+                    payload=block_payload,
+                )
+            )
     ok_count = sum(1 for item in queued if item.get("ok"))
     return {"ok": ok_count == len(queued), "queued": ok_count, "template_id": template_id, "messages": queued}
 
@@ -1178,7 +1364,7 @@ def simulate_trigger_draft(
                 "template_id": template_id,
                 "template_found": bool(template),
                 "template_status": (template or {}).get("status") or "",
-                "would_queue": len(_text_blocks(template, {**_safe_dict((template or {}).get("params_json")), **_conversation_vars(conversation)})) if template else 0,
+                "would_queue": len(_template_message_blocks(template, {**_safe_dict((template or {}).get("params_json")), **_conversation_vars(conversation)})) if template else 0,
             })
         elif atype == "reply_comment":
             body = action.get("reply_text") or action.get("text") or action.get("ai_prompt") or ""
