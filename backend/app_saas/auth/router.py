@@ -849,6 +849,7 @@ def update_profile(payload: ProfilePatchIn, request: Request, ctx: AuthContext =
         "phone": str(payload.phone or "").strip(),
         "role_label": str(payload.role_label or "").strip(),
         "avatar_url": str(payload.avatar_url or "").strip(),
+        "timezone": str(payload.timezone or "America/Bogota").strip() or "America/Bogota",
     }
     if next_email and "@" not in next_email:
         raise HTTPException(status_code=400, detail="valid_email_required")

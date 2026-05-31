@@ -730,6 +730,7 @@ def admin_update_profile(payload: AdminProfilePatchIn, request: Request, ctx: Pl
         "phone": _clean(payload.phone, 60),
         "role_label": _clean(payload.role_label, 120),
         "avatar_url": _clean(payload.avatar_url, 1000),
+        "timezone": _clean(payload.timezone, 80) or "America/Bogota",
     }
     if next_email and "@" not in next_email:
         raise HTTPException(status_code=400, detail="valid_email_required")

@@ -62,6 +62,7 @@ class AdminProfilePatchIn(BaseModel):
     phone: str | None = Field(default=None, max_length=60)
     role_label: str | None = Field(default=None, max_length=120)
     avatar_url: str | None = Field(default=None, max_length=1000)
+    timezone: str | None = Field(default=None, max_length=80)
 
 
 class AdminPasswordChangeIn(BaseModel):

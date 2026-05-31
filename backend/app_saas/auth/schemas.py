@@ -71,6 +71,7 @@ class ProfilePatchIn(BaseModel):
     phone: Optional[str] = Field(default=None, max_length=60)
     role_label: Optional[str] = Field(default=None, max_length=120)
     avatar_url: Optional[str] = Field(default=None, max_length=1000)
+    timezone: Optional[str] = Field(default=None, max_length=80)
 
 
 class TeamUserCreateIn(BaseModel):

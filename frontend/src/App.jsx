@@ -18,6 +18,25 @@ const SEEN_MILESTONES_KEY = "scentra_seen_milestones_v1";
 const TURNSTILE_SITE_KEY = String(import.meta.env.VITE_TURNSTILE_SITE_KEY || "").trim();
 const CAPTCHA_ENABLED = ["1", "true", "yes", "on"].includes(String(import.meta.env.VITE_CAPTCHA_ENABLED || "").toLowerCase()) || Boolean(TURNSTILE_SITE_KEY);
 const CAPTCHA_PROVIDER = "turnstile";
+const SCENTRA_FAVICON_URL = "https://scentra-ai.online/favicon.png";
+const SCENTRA_WHITE_LOGO_URL = "https://scentra-ai.online/logo-blanco.png";
+const DEFAULT_TIME_ZONE = "America/Bogota";
+const TIME_ZONE_KEY = "scentra_user_timezone";
+const TIME_ZONE_OPTIONS = [
+  ["America/Bogota", "Colombia"],
+  ["America/Lima", "Peru"],
+  ["America/Mexico_City", "Mexico"],
+  ["America/New_York", "Este USA"],
+  ["America/Los_Angeles", "Pacifico USA"],
+  ["America/Madrid", "Espana"],
+  ["UTC", "UTC"],
+];
+const PAYMENT_LOGOS = [
+  { label: "Wompi", src: "https://wompi.com/assets/downloadble/logos_wompi/Wompi_LogoPrincipal.png", wide: true },
+  { label: "Mercado Pago", src: "https://upload.wikimedia.org/wikipedia/commons/9/98/Mercado_Pago.svg", wide: true },
+  { label: "Visa", src: "https://cdn.simpleicons.org/visa/1434CB" },
+  { label: "Mastercard", src: "https://cdn.simpleicons.org/mastercard/EB001B" },
+];
 let turnstileScriptPromise = null;
 
 const AI_API_PROVIDERS = [
@@ -249,6 +268,39 @@ function secondsLabel(seconds) {
   return `${hours} h${rest ? ` ${rest} min` : ""}`;
 }
 
+function normalizeTimeZone(value) {
+  const candidate = String(value || "").trim() || DEFAULT_TIME_ZONE;
+  try {
+    new Intl.DateTimeFormat("es-CO", { timeZone: candidate }).format(new Date());
+    return candidate;
+  } catch {
+    return DEFAULT_TIME_ZONE;
+  }
+}
+
+function currentUiTimeZone() {
+  try {
+    return normalizeTimeZone(localStorage.getItem(TIME_ZONE_KEY) || DEFAULT_TIME_ZONE);
+  } catch {
+    return DEFAULT_TIME_ZONE;
+  }
+}
+
+function rememberUiTimeZone(value) {
+  const timezone = normalizeTimeZone(value);
+  try { localStorage.setItem(TIME_ZONE_KEY, timezone); } catch { /* localStorage unavailable */ }
+  return timezone;
+}
+
+function dayKey(date, timeZone = currentUiTimeZone()) {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(date);
+}
+
 function friendlyApiError(code, detail = {}) {
   if (code === "rate_limit_exceeded") {
     const wait = secondsLabel(detail?.retry_after_seconds);
@@ -267,6 +319,7 @@ function friendlyApiError(code, detail = {}) {
   if (code === "valid_email_required") return "Ingresa un correo valido antes de continuar.";
   if (code === "valid_tenant_slug_required") return "El slug publico de la empresa solo puede usar letras, numeros y guiones.";
   if (code === "email_or_tenant_already_exists") return "Ese correo o slug de empresa ya esta registrado. Inicia sesion o usa Recuperar clave.";
+  if (code === "email_already_registered") return "Ese correo ya esta registrado. Usa otro correo o Recuperar clave si es tu cuenta.";
   if (code === "invalid_mfa_code") return "El codigo 2FA no coincide. Revisa el ultimo correo recibido y vuelve a intentar.";
   if (code === "invalid_mfa_challenge") return "La verificacion 2FA ya no es valida. Vuelve al login e inicia sesion otra vez.";
   if (code === "mfa_challenge_expired") return "El codigo 2FA vencio. Vuelve al login para generar uno nuevo.";
@@ -277,7 +330,44 @@ function friendlyApiError(code, detail = {}) {
   if (code === "no_active_tenant_membership" || code === "tenant_membership_required") return "Tu usuario no tiene una empresa activa asignada. Contacta al administrador de Scentra.";
   if (code === "user_not_found") return "No encontramos un usuario activo para esta accion. Vuelve a iniciar sesion.";
   if (code === "smtp_required_for_email_otp") return "El correo 2FA no puede enviarse porque falta configurar SMTP en el servidor.";
+  if (code === "knowledge_file_too_large") return "El archivo de conocimiento supera el limite permitido. Sube un PDF/CSV mas liviano o divide el documento.";
+  if (code === "media_forbidden" || code === "forbidden" || code === "permission_denied") return "No tenemos permiso para abrir este recurso. Revisa el token, permisos del proveedor o vuelve a conectar el canal.";
+  if (code === "provider_not_configured" || code === "missing_api_key") return "Falta configurar la credencial del proveedor. Revisa Ajustes > APIs antes de volver a intentar.";
   return "";
+}
+
+function readableErrorNotice(text) {
+  const raw = String(text || "").trim();
+  const lower = raw.toLowerCase();
+  const direct = friendlyApiError(lower);
+  let message = raw || "Ocurrio un error inesperado.";
+  let suggestion = "Intenta de nuevo. Si se repite, abre Diagnostico y revisa el ultimo evento con hora y detalle.";
+  if (direct) {
+    message = direct;
+    suggestion = lower.includes("rate_limit") ? "Espera antes de intentar de nuevo o usa Recuperar clave si se trata de acceso." : suggestion;
+  } else if (lower.includes("knowledge_file_too_large") || lower.includes("archivo supera 8 mb")) {
+    message = "El archivo de Knowledge Base es demasiado grande para procesarlo.";
+    suggestion = "Divide el PDF/CSV, baja el peso del archivo o sube una version resumida de hasta 8 MB.";
+  } else if (lower.includes("phone number id") || lower.includes("phone_number_id") || lower.includes("numero de telefono")) {
+    message = "No pudimos sincronizar o registrar el telefono de WhatsApp.";
+    suggestion = "Verifica que el Phone Number ID pertenezca al WABA conectado, que el token tenga permisos y que la app de Meta este suscrita.";
+  } else if (lower.includes("instagram business account") || lower.includes("page access token") || lower.includes("page id")) {
+    message = "No pudimos validar la conexion de Instagram/Facebook.";
+    suggestion = "Revisa Page ID, Instagram Business Account ID, token de pagina y permisos en Meta Developers.";
+  } else if (lower.includes("403") || lower.includes("forbidden") || lower.includes("permission")) {
+    message = "El proveedor rechazo la solicitud por permisos.";
+    suggestion = "Actualiza el token, revisa permisos de Meta/API y vuelve a intentar desde Diagnostico o Ajustes > Canales.";
+  } else if (lower.includes("429") || lower.includes("rate_limit")) {
+    message = "Se activaron limites de seguridad por demasiados intentos.";
+    suggestion = "Espera unos minutos antes de repetir la accion. Evita insistir para no ampliar el bloqueo.";
+  } else if (lower.includes("500") || lower.includes("internal_server_error")) {
+    message = "El servidor no pudo completar la accion.";
+    suggestion = "Reintenta en unos segundos. Si persiste, revisa Diagnostico y comparte el correlation_id del error.";
+  } else if (lower.includes("session") || lower.includes("401")) {
+    message = "Tu sesion necesita validarse de nuevo.";
+    suggestion = "Vuelve a iniciar sesion y repite la accion.";
+  }
+  return { title: "Necesita revision", message, suggestion, technical: raw };
 }
 
 function formatApiError(data, fallback) {
@@ -427,7 +517,7 @@ function advisorDisplayContent(value) {
 }
 
 function todayLabel() {
-  return new Intl.DateTimeFormat("es-CO", { weekday: "short", day: "2-digit", month: "short", year: "numeric" }).format(new Date());
+  return new Intl.DateTimeFormat("es-CO", { timeZone: currentUiTimeZone(), weekday: "short", day: "2-digit", month: "short", year: "numeric" }).format(new Date());
 }
 const pct = (used, limit) => (!Number(limit || 0) ? 0 : Math.min(100, Math.round((Number(used || 0) / Number(limit || 0)) * 100)));
 const number = (value) => Number(value || 0).toLocaleString("es-CO");
@@ -442,31 +532,33 @@ const dateLabel = (value) => {
   if (!value) return "";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return String(value);
-  return new Intl.DateTimeFormat("es-CO", { day: "2-digit", month: "short", year: "numeric" }).format(date);
+  return new Intl.DateTimeFormat("es-CO", { timeZone: currentUiTimeZone(), day: "2-digit", month: "short", year: "numeric" }).format(date);
 };
 const chatTimeLabel = (value) => {
   if (!value) return "";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return String(value);
-  return new Intl.DateTimeFormat("es-CO", { hour: "numeric", minute: "2-digit", hour12: true }).format(date).toLowerCase().replace(/\s+/g, " ");
+  return new Intl.DateTimeFormat("es-CO", { timeZone: currentUiTimeZone(), hour: "numeric", minute: "2-digit", hour12: true }).format(date).toLowerCase().replace(/\s+/g, " ");
 };
 const compactDateTimeLabel = (value) => {
   if (!value) return "";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return String(value);
   const now = new Date();
-  const sameDay = date.toDateString() === now.toDateString();
+  const tz = currentUiTimeZone();
+  const sameDay = dayKey(date, tz) === dayKey(now, tz);
   if (sameDay) return chatTimeLabel(value);
   const yesterday = new Date(now);
   yesterday.setDate(now.getDate() - 1);
-  if (date.toDateString() === yesterday.toDateString()) return `ayer ${chatTimeLabel(value)}`;
-  return `${new Intl.DateTimeFormat("es-CO", { day: "2-digit", month: "short" }).format(date)} ${chatTimeLabel(value)}`;
+  if (dayKey(date, tz) === dayKey(yesterday, tz)) return `ayer ${chatTimeLabel(value)}`;
+  return `${new Intl.DateTimeFormat("es-CO", { timeZone: tz, day: "2-digit", month: "short" }).format(date)} ${chatTimeLabel(value)}`;
 };
 const fullDateTimeLabel = (value) => {
   if (!value) return "";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return String(value);
   return new Intl.DateTimeFormat("es-CO", {
+    timeZone: currentUiTimeZone(),
     day: "2-digit",
     month: "short",
     year: "numeric",
@@ -493,8 +585,8 @@ const leadTemperatureLabel = (value, score = 0) => {
   return { hot: "Caliente", warm: "Tibio", cold: "Frio" }[key] || key;
 };
 const predictionTypeLabel = (value) => ({
-  lead_scoring: "Lead scoring",
-  churn_prediction: "Churn",
+  lead_scoring: "Puntaje comercial",
+  churn_prediction: "Riesgo de abandono",
   smart_remarketing: "Remarketing",
   operational_anomaly: "Operacion",
 }[String(value || "").toLowerCase()] || "Prediccion");
@@ -527,19 +619,40 @@ const lifecycleLabel = (status) => ({
   none: "Sin suscripcion",
 }[String(status || "").toLowerCase()] || String(status || "Activo"));
 
+function PaymentLogoChip({ logo }) {
+  const [failed, setFailed] = useState(false);
+  return (
+    <span className={`payment-logo-chip ${logo.wide ? "wide" : ""}`}>
+      {logo.src && !failed ? <img src={logo.src} alt={logo.label} loading="lazy" onError={() => setFailed(true)} /> : <strong>{logo.label}</strong>}
+    </span>
+  );
+}
+
+function BrandMark({ className = "brand-mark" }) {
+  return <span className={className}><img src={SCENTRA_FAVICON_URL} alt="" loading="lazy" /></span>;
+}
+
 function PaymentTrustFooter() {
-  const cards = ["Visa", "Mastercard", "AmEx", "PSE", "Nequi"];
   return (
     <div className="payment-trust-footer">
-      <div>
-        <span>Pagos seguros con</span>
-        <strong>Wompi</strong>
-        <strong>Mercado Pago</strong>
-      </div>
-      <div className="payment-card-logos">
-        {cards.map((item) => <em key={item}>{item}</em>)}
+      <div className="payment-provider-logos" aria-label="Pasarelas y tarjetas aceptadas">
+        {PAYMENT_LOGOS.map((logo) => <PaymentLogoChip key={logo.label} logo={logo} />)}
       </div>
       <small>El checkout se abre en el proveedor seleccionado y Scentra activa el plan cuando el webhook confirma el pago.</small>
+    </div>
+  );
+}
+
+function ErrorDialog({ notice, onClose }) {
+  if (!notice) return null;
+  return (
+    <div className="modal-backdrop error-modal-backdrop" role="presentation" onMouseDown={onClose}>
+      <section className="modal-window glass-card error-modal" role="dialog" aria-modal="true" aria-label="Error de Scentra" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="panel-head"><div><span className="section-chip">Scentra</span><h2>{notice.title || "Necesita revision"}</h2></div><button type="button" onClick={onClose}>Cerrar</button></div>
+        <p>{notice.message}</p>
+        {notice.suggestion ? <div className="debug-result warn"><strong>Que puedes hacer</strong><span>{notice.suggestion}</span></div> : null}
+        {notice.technical && notice.technical !== notice.message ? <details><summary>Detalle tecnico para soporte</summary><code>{notice.technical}</code></details> : null}
+      </section>
     </div>
   );
 }
@@ -902,7 +1015,7 @@ function App() {
   const [aiTesterOpen, setAiTesterOpen] = useState(false);
   const [aiTest, setAiTest] = useState({ phone: "", message: "" });
   const [aiTestResult, setAiTestResult] = useState("");
-  const [profileForm, setProfileForm] = useState({ fullName: "", email: "", phone: "", role: "", avatarUrl: "", currentPassword: "" });
+  const [profileForm, setProfileForm] = useState({ fullName: "", email: "", phone: "", role: "", avatarUrl: "", timezone: currentUiTimeZone(), currentPassword: "" });
   const [teamMembers, setTeamMembers] = useState([]);
   const [teamUserForm, setTeamUserForm] = useState({ email: "", full_name: "", password: "", role: "agent", send_email: true });
   const [teamBusy, setTeamBusy] = useState("");
@@ -1020,6 +1133,7 @@ function App() {
   const [failedMediaIds, setFailedMediaIds] = useState({});
   const [status, setStatus] = useState("");
   const [statusTone, setStatusTone] = useState("neutral");
+  const [errorDialog, setErrorDialog] = useState(null);
   const [milestoneNotice, setMilestoneNotice] = useState(null);
 
   const activeCompany = tenants.find((company) => company.tenant_id === me?.tenant_id);
@@ -1311,7 +1425,12 @@ function App() {
     };
   };
 
-  const showStatus = (text, tone = "neutral") => { setStatus(text); setStatusTone(tone); };
+  const showStatus = (text, tone = "neutral") => {
+    const notice = tone === "error" ? readableErrorNotice(text) : null;
+    setStatus(notice?.message || text);
+    setStatusTone(tone);
+    if (notice) setErrorDialog(notice);
+  };
 
   useEffect(() => {
     const token = new URLSearchParams(window.location.search).get("reset_token") || "";
@@ -1531,6 +1650,7 @@ function App() {
       const data = await apiCall("/saas/v1/auth/me");
       setMe(data); setTenants(data?.tenants || []);
       const profile = data?.profile_json || {};
+      const timezone = rememberUiTimeZone(profile.timezone || currentUiTimeZone());
       setProfileForm((prev) => ({
         ...prev,
         fullName: prev.fullName || data?.full_name || "",
@@ -1538,6 +1658,7 @@ function App() {
         phone: prev.phone || profile.phone || "",
         role: prev.role || profile.role_label || "",
         avatarUrl: prev.avatarUrl || profile.avatar_url || "",
+        timezone,
       }));
     } catch (err) { showStatus(String(err.message || err), "error"); }
   };
@@ -3737,7 +3858,7 @@ function App() {
   const uploadKnowledgeFile = async (file) => {
     if (!file || knowledgeUploading) return;
     if (Number(file.size || 0) > 8_000_000) {
-      showStatus("knowledge_file_too_large: el archivo supera 8 MB. Divide el PDF/CSV o sube una version resumida.", "error");
+      showStatus("El archivo de Knowledge Base supera 8 MB. Divide el PDF/CSV o sube una version resumida.", "error");
       if (knowledgeFileRef.current) knowledgeFileRef.current.value = "";
       return;
     }
@@ -3929,9 +4050,11 @@ function App() {
           phone: profileForm.phone,
           role_label: profileForm.role,
           avatar_url: profileForm.avatarUrl,
+          timezone: profileForm.timezone,
         }),
       });
       setProfileForm((prev) => ({ ...prev, currentPassword: "" }));
+      rememberUiTimeZone(data?.user?.profile_json?.timezone || profileForm.timezone);
       setMe((prev) => ({ ...(prev || {}), email: data?.user?.email || prev?.email, full_name: data?.user?.full_name || prev?.full_name, profile_json: data?.user?.profile_json || prev?.profile_json || {} }));
       showStatus("Perfil actualizado", "ok");
       await loadSession();
@@ -4435,7 +4558,7 @@ function App() {
     return (
       <main className="auth-page">
         <section className="auth-card glass-card">
-          <div className="auth-brand"><span className="auth-logo">S</span><h1>Scentra +AI</h1><p>{mode === "login" ? "Control de conversaciones, IA y ventas." : mode === "register" ? "Crea tu empresa y empieza a configurar." : mode === "forgot" ? "Recupera el acceso de forma segura." : mode === "mfa" ? "Confirma el segundo factor de seguridad." : "Define una nueva clave segura."}</p></div>
+          <div className="auth-brand"><BrandMark className="auth-logo" /><img className="auth-wordmark" src={SCENTRA_WHITE_LOGO_URL} alt="Scentra +AI" /><h1>Scentra +AI</h1><p>{mode === "login" ? "Control de conversaciones, IA y ventas." : mode === "register" ? "Crea tu empresa y empieza a configurar." : mode === "forgot" ? "Recupera el acceso de forma segura." : mode === "mfa" ? "Confirma el segundo factor de seguridad." : "Define una nueva clave segura."}</p></div>
           {status ? <div className={`status ${statusTone}`}>{status}</div> : null}
           {mode === "login" ? (
             <form className="auth-form" onSubmit={submitLogin}>
@@ -4486,6 +4609,7 @@ function App() {
             </form>
           )}
         </section>
+        <ErrorDialog notice={errorDialog} onClose={() => setErrorDialog(null)} />
       </main>
     );
   }
@@ -4493,7 +4617,7 @@ function App() {
   return (
     <div className="app-shell">
       <aside className="sidebar glass-panel">
-        <div className="brand"><span className="brand-mark">S</span><div><strong>Scentra +AI</strong><small>{t("brand.subtitle")}</small></div></div>
+        <div className="brand"><BrandMark /><div><strong>Scentra +AI</strong><small>{t("brand.subtitle")}</small></div></div>
         <nav>
           {navItems.map(({ key, label, icon }) => <button key={key} className={"nav-item " + (activeView === key ? "active" : "")} onClick={() => setActiveView(key)}><span className="nav-icon">{icon}</span><span>{label}</span></button>)}
         </nav>
@@ -4587,7 +4711,7 @@ function App() {
                       <span className="conversation-badges">
                         {Number(conversation.lead_score || 0) > 0 ? <mark className={`lead-${conversation.lead_temperature || "cold"}`}>{leadTemperatureLabel(conversation.lead_temperature, conversation.lead_score)} {number(conversation.lead_score)}</mark> : null}
                         {conversation.predictive_intelligence?.source === "intelligence_prediction" ? <mark>ML {number(conversation.predictive_intelligence?.conversion_probability || 0)}%</mark> : null}
-                        {Number(conversation.predictive_intelligence?.churn_risk || 0) >= 40 ? <mark className={Number(conversation.predictive_intelligence?.churn_risk || 0) >= 70 ? "danger" : ""}>Churn {number(conversation.predictive_intelligence?.churn_risk || 0)}</mark> : null}
+                        {Number(conversation.predictive_intelligence?.churn_risk || 0) >= 40 ? <mark className={Number(conversation.predictive_intelligence?.churn_risk || 0) >= 70 ? "danger" : ""}>Abandono {number(conversation.predictive_intelligence?.churn_risk || 0)}</mark> : null}
                         {conversation.assigned_user_name ? <mark>{conversation.assigned_user_name}</mark> : <mark>Sin asignar</mark>}
                         {conversation.assigned_ai_agent_name ? <mark>IA: {conversation.assigned_ai_agent_name}</mark> : null}
                         {conversation.sla_due_at || conversation.first_response_due_at ? <mark className={isPastDate(conversation.sla_due_at || conversation.first_response_due_at) ? "danger" : ""}>SLA {compactDateTimeLabel(conversation.sla_due_at || conversation.first_response_due_at)}</mark> : null}
@@ -4631,7 +4755,7 @@ function App() {
                   </label>
                 </div>
                 <div className="inbox-smart-filters">
-                  {[["all","Todos"],["unread","Sin leer"],["mine","Mios"],["unassigned","Sin asignar"],["sla","SLA"],["hot","Hot"],["churn","Churn"],["human","Humano"],["ai","IA"]].map(([key, label]) => (
+                  {[["all","Todos"],["unread","Sin leer"],["mine","Mios"],["unassigned","Sin asignar"],["sla","SLA"],["hot","Calientes"],["churn","Riesgo abandono"],["human","Humano"],["ai","IA"]].map(([key, label]) => (
                     <button key={key} type="button" className={inboxQueueFilter === key ? "active" : ""} onClick={() => setInboxQueueFilter(key)}>{label}</button>
                   ))}
                 </div>
@@ -4848,7 +4972,7 @@ function App() {
                       <div className="predictive-mini-grid">
                         <span><b>{number(selectedPredictive.conversion_probability || selectedPredictive.lead_score || 0)}%</b>Conv.</span>
                         <span><b>{number(selectedPredictive.engagement_score || 0)}</b>Eng.</span>
-                        <span className={Number(selectedPredictive.churn_risk || 0) >= 70 ? "danger" : ""}><b>{number(selectedPredictive.churn_risk || 0)}</b>Churn</span>
+                        <span className={Number(selectedPredictive.churn_risk || 0) >= 70 ? "danger" : ""}><b>{number(selectedPredictive.churn_risk || 0)}</b>Riesgo abandono</span>
                       </div>
                       <p>{selectedPredictive.recommended_action || "Genera predicciones para obtener accion recomendada."}</p>
                       <small>{selectedPredictive.best_channel || selectedConversation.channel || "canal"} / {selectedPredictive.best_window || "09:00-11:00 local"} / {selectedPredictive.frequency || "frecuencia sugerida"}</small>
@@ -6034,7 +6158,7 @@ function App() {
               </article>
             </div> : null}
             {settingsTab === "profile" ? <div className="settings-grid profile-grid">
-              <article className="panel glass-card profile-card"><div className="panel-head"><h2>Perfil</h2><span>datos personales</span></div><div className="avatar-editor"><div className="avatar-preview">{(profileForm.fullName || me.email || "S").slice(0,1).toUpperCase()}</div><div><strong>{profileForm.fullName || me.email}</strong><p className="soft-copy">Foto de perfil, nombre visible y datos de contacto.</p></div></div><label>URL foto de perfil<input placeholder="https://..." value={profileForm.avatarUrl} onChange={(event) => setProfileForm((prev) => ({ ...prev, avatarUrl: event.target.value }))} /></label><div className="form-grid two"><label>Nombre completo<input value={profileForm.fullName} placeholder={me.email} onChange={(event) => setProfileForm((prev) => ({ ...prev, fullName: event.target.value }))} /></label><label>Email<input value={profileForm.email} placeholder={me.email} onChange={(event) => setProfileForm((prev) => ({ ...prev, email: event.target.value }))} /></label><label>Telefono<input value={profileForm.phone} placeholder="+57..." onChange={(event) => setProfileForm((prev) => ({ ...prev, phone: event.target.value }))} /></label><label>Cargo / rol visible<input value={profileForm.role} placeholder={teamRoleLabel(me.role)} onChange={(event) => setProfileForm((prev) => ({ ...prev, role: event.target.value }))} /></label><label className="full-width">Clave actual para cambiar email<input type="password" value={profileForm.currentPassword} onChange={(event) => setProfileForm((prev) => ({ ...prev, currentPassword: event.target.value }))} placeholder="Solo requerida si cambias el correo" /></label></div><div className="panel-actions"><button type="button" className="primary" onClick={saveProfile}>Guardar perfil</button></div></article>
+              <article className="panel glass-card profile-card"><div className="panel-head"><h2>Perfil</h2><span>datos personales</span></div><div className="avatar-editor"><div className="avatar-preview">{(profileForm.fullName || me.email || "S").slice(0,1).toUpperCase()}</div><div><strong>{profileForm.fullName || me.email}</strong><p className="soft-copy">Foto de perfil, nombre visible y datos de contacto.</p></div></div><label>URL foto de perfil<input placeholder="https://..." value={profileForm.avatarUrl} onChange={(event) => setProfileForm((prev) => ({ ...prev, avatarUrl: event.target.value }))} /></label><div className="form-grid two"><label>Nombre completo<input value={profileForm.fullName} placeholder={me.email} onChange={(event) => setProfileForm((prev) => ({ ...prev, fullName: event.target.value }))} /></label><label>Email<input value={profileForm.email} placeholder={me.email} onChange={(event) => setProfileForm((prev) => ({ ...prev, email: event.target.value }))} /></label><label>Telefono<input value={profileForm.phone} placeholder="+57..." onChange={(event) => setProfileForm((prev) => ({ ...prev, phone: event.target.value }))} /></label><label>Cargo / rol visible<input value={profileForm.role} placeholder={teamRoleLabel(me.role)} onChange={(event) => setProfileForm((prev) => ({ ...prev, role: event.target.value }))} /></label><label>Zona horaria<select value={profileForm.timezone} onChange={(event) => setProfileForm((prev) => ({ ...prev, timezone: event.target.value }))}>{TIME_ZONE_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label} ({value})</option>)}</select></label><label className="full-width">Clave actual para cambiar email<input type="password" value={profileForm.currentPassword} onChange={(event) => setProfileForm((prev) => ({ ...prev, currentPassword: event.target.value }))} placeholder="Solo requerida si cambias el correo" /></label></div><p className="soft-copy">Los horarios de mensajes, diagnosticos, registros y alertas se muestran con esta zona horaria. Por defecto usamos Colombia.</p><div className="panel-actions"><button type="button" className="primary" onClick={saveProfile}>Guardar perfil</button></div></article>
               <article className="panel glass-card"><div className="panel-head"><h2>Empresa</h2><span>workspace activo</span></div><div className="company-profile"><span>Empresa</span><strong>{activeCompany?.tenant_name || activeCompany?.name || "Scentra"}</strong><span>Rol</span><strong>{me.role}</strong><span>Plan</span><strong>{billingPlan.plan_code || activeCompany?.plan_code || "starter"}</strong><span>Industria</span><strong>{selectedVerticalPack?.label || currentIndustryCode}</strong></div></article>
             </div> : null}
             {settingsTab === "security" ? <div className="settings-grid security-grid">
@@ -6208,6 +6332,7 @@ function App() {
           </div>
         )}
       </section>
+      <ErrorDialog notice={errorDialog} onClose={() => setErrorDialog(null)} />
       {milestoneNotice ? (
         <div className="milestone-backdrop" role="presentation" onMouseDown={() => closeMilestoneNotice(false)}>
           <section className="milestone-card glass-card" role="dialog" aria-modal="true" aria-label="Actualizacion importante" onMouseDown={(event) => event.stopPropagation()}>

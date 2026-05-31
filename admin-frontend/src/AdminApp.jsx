@@ -9,6 +9,25 @@ const CAPTCHA_ENABLED = ["1", "true", "yes", "on"].includes(String(import.meta.e
 const ADMIN_BOOTSTRAP_ENABLED = ["1", "true", "yes", "on"].includes(String(import.meta.env.VITE_ADMIN_BOOTSTRAP_ENABLED || "").toLowerCase())
   || ["localhost", "127.0.0.1"].includes(window.location.hostname);
 const CAPTCHA_PROVIDER = "turnstile";
+const SCENTRA_FAVICON_URL = "https://scentra-ai.online/favicon.png";
+const SCENTRA_WHITE_LOGO_URL = "https://scentra-ai.online/logo-blanco.png";
+const DEFAULT_TIME_ZONE = "America/Bogota";
+const TIME_ZONE_KEY = "scentra_admin_timezone";
+const TIME_ZONE_OPTIONS = [
+  ["America/Bogota", "Colombia"],
+  ["America/Lima", "Peru"],
+  ["America/Mexico_City", "Mexico"],
+  ["America/New_York", "Este USA"],
+  ["America/Los_Angeles", "Pacifico USA"],
+  ["America/Madrid", "Espana"],
+  ["UTC", "UTC"],
+];
+const PAYMENT_LOGOS = [
+  { label: "Wompi", src: "https://wompi.com/assets/downloadble/logos_wompi/Wompi_LogoPrincipal.png", wide: true },
+  { label: "Mercado Pago", src: "https://upload.wikimedia.org/wikipedia/commons/9/98/Mercado_Pago.svg", wide: true },
+  { label: "Visa", src: "https://cdn.simpleicons.org/visa/1434CB" },
+  { label: "Mastercard", src: "https://cdn.simpleicons.org/mastercard/EB001B" },
+];
 let turnstileScriptPromise = null;
 
 const VIEWS = [
@@ -260,11 +279,36 @@ const DEFAULT_AGENT_TYPES = [
 const number = (value) => Number(value || 0).toLocaleString("es-CO");
 const money = (cents, currency = "USD") => `${currency} ${(Number(cents || 0) / 100).toLocaleString("es-CO", { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
 const pct = (used, limit) => (!Number(limit || 0) ? 0 : Math.min(100, Math.round((Number(used || 0) / Number(limit || 0)) * 100)));
+
+function normalizeTimeZone(value) {
+  const candidate = String(value || "").trim() || DEFAULT_TIME_ZONE;
+  try {
+    new Intl.DateTimeFormat("es-CO", { timeZone: candidate }).format(new Date());
+    return candidate;
+  } catch {
+    return DEFAULT_TIME_ZONE;
+  }
+}
+
+function currentUiTimeZone() {
+  try {
+    return normalizeTimeZone(localStorage.getItem(TIME_ZONE_KEY) || DEFAULT_TIME_ZONE);
+  } catch {
+    return DEFAULT_TIME_ZONE;
+  }
+}
+
+function rememberUiTimeZone(value) {
+  const timezone = normalizeTimeZone(value);
+  try { localStorage.setItem(TIME_ZONE_KEY, timezone); } catch { /* localStorage unavailable */ }
+  return timezone;
+}
+
 const compactDateTimeLabel = (value) => {
   if (!value) return "-";
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return String(value);
-  return date.toLocaleString("es-CO", { dateStyle: "medium", timeStyle: "short" });
+  return date.toLocaleString("es-CO", { timeZone: currentUiTimeZone(), dateStyle: "medium", timeStyle: "short" });
 };
 
 function emptyLogin() {
@@ -346,6 +390,37 @@ function TurnstileChallenge({ onToken, resetKey = 0 }) {
   );
 }
 
+function BrandGlyph() {
+  return <span className="brand-glyph"><img src={SCENTRA_FAVICON_URL} alt="" loading="lazy" /></span>;
+}
+
+function PaymentLogoChip({ logo }) {
+  const [failed, setFailed] = useState(false);
+  return (
+    <span className={`payment-logo-chip ${logo.wide ? "wide" : ""}`}>
+      {logo.src && !failed ? <img src={logo.src} alt={logo.label} loading="lazy" onError={() => setFailed(true)} /> : <strong>{logo.label}</strong>}
+    </span>
+  );
+}
+
+function PaymentLogoStrip() {
+  return <div className="payment-logo-strip" aria-label="Pasarelas y tarjetas">{PAYMENT_LOGOS.map((logo) => <PaymentLogoChip key={logo.label} logo={logo} />)}</div>;
+}
+
+function ErrorDialog({ notice, onClose }) {
+  if (!notice) return null;
+  return (
+    <div className="modal-backdrop error-modal-backdrop" role="presentation" onMouseDown={onClose}>
+      <section className="modal-window glass-card error-modal" role="dialog" aria-modal="true" aria-label="Error de Scentra Admin" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="panel-head"><div><span className="section-chip">Scentra Admin</span><h2>{notice.title || "Necesita revision"}</h2></div><button type="button" onClick={onClose}>Cerrar</button></div>
+        <p>{notice.message}</p>
+        {notice.suggestion ? <div className="notification-help"><strong>Que puedes hacer</strong><span>{notice.suggestion}</span></div> : null}
+        {notice.technical && notice.technical !== notice.message ? <details><summary>Detalle tecnico</summary><code>{notice.technical}</code></details> : null}
+      </section>
+    </div>
+  );
+}
+
 function emptyPlan() {
   return {
     plan_code: "",
@@ -405,12 +480,45 @@ function formatApiError(data, fallback) {
   return fallback;
 }
 
+function readableErrorNotice(text) {
+  const raw = String(text || "").trim();
+  const lower = raw.toLowerCase();
+  let message = raw || "Ocurrio un error inesperado.";
+  let suggestion = "Intenta de nuevo. Si se repite, revisa el panel de observabilidad y comparte el detalle con soporte.";
+  if (lower.includes("403") || lower.includes("forbidden") || lower.includes("permission")) {
+    message = "La accion fue rechazada por permisos.";
+    suggestion = "Verifica tu rol de Admin, permisos del tenant o credenciales del proveedor antes de repetir.";
+  } else if (lower.includes("rate_limit") || lower.includes("429")) {
+    message = "Se activaron limites de seguridad por demasiadas solicitudes.";
+    suggestion = "Espera unos minutos antes de volver a intentar.";
+  } else if (lower.includes("500") || lower.includes("internal_server_error")) {
+    message = "El servidor no pudo completar la accion.";
+    suggestion = "Revisa Observabilidad, el correlation_id del backend y vuelve a intentar cuando el servicio este estable.";
+  } else if (lower.includes("session") || lower.includes("401")) {
+    message = "Tu sesion Admin necesita renovarse.";
+    suggestion = "Inicia sesion otra vez y repite la accion.";
+  } else if (lower.includes("invalid_current_password")) {
+    message = "La clave actual no coincide.";
+    suggestion = "Revisa la clave antes de cambiar correo o password.";
+  }
+  return { title: "Necesita revision", message, suggestion, technical: raw };
+}
+
 function statusClass(status) {
   const value = String(status || "").toLowerCase();
   if (["active", "trial", "sent", "ok"].includes(value)) return "ok";
   if (["past_due", "paused", "queued", "degraded", "unknown", "retry", "watch", "needs_feedback", "insufficient_data", "warning", "dry_run"].includes(value)) return "warn";
   if (["suspended", "cancelled", "failed", "error", "critical", "down"].includes(value)) return "danger";
   return "neutral";
+}
+
+function taskTypeLabel(task) {
+  return ({
+    lead_scoring: "Puntaje comercial",
+    churn_prediction: "Riesgo de abandono",
+    smart_remarketing: "Remarketing inteligente",
+    operational_anomaly: "Anomalia operacional",
+  }[String(task || "").toLowerCase()] || String(task || "Tarea"));
 }
 
 function queueTotal(rows, status) {
@@ -426,7 +534,7 @@ export default function AdminApp() {
   const [passwordRecovery, setPasswordRecovery] = useState(emptyPasswordRecovery);
   const [passwordReset, setPasswordReset] = useState(emptyPasswordReset);
   const [bootstrap, setBootstrap] = useState({ email: "", password: "", full_name: "Scentra Admin", platform_role: "superadmin" });
-  const [adminProfileForm, setAdminProfileForm] = useState({ full_name: "", email: "", phone: "", role_label: "", avatar_url: "", current_password: "" });
+  const [adminProfileForm, setAdminProfileForm] = useState({ full_name: "", email: "", phone: "", role_label: "", avatar_url: "", timezone: currentUiTimeZone(), current_password: "" });
   const [adminPasswordForm, setAdminPasswordForm] = useState({ current_password: "", new_password: "", confirm_password: "" });
   const [loginCaptchaToken, setLoginCaptchaToken] = useState("");
   const [mfaChallenge, setMfaChallenge] = useState(null);
@@ -440,6 +548,7 @@ export default function AdminApp() {
   const [bootstrapCaptchaReset, setBootstrapCaptchaReset] = useState(0);
   const [status, setStatus] = useState("");
   const [statusTone, setStatusTone] = useState("neutral");
+  const [errorDialog, setErrorDialog] = useState(null);
   const [loading, setLoading] = useState(false);
   const [overview, setOverview] = useState(null);
   const [tenants, setTenants] = useState([]);
@@ -518,7 +627,12 @@ export default function AdminApp() {
     promotion_status: "pending_review",
   });
 
-  const showStatus = (text, tone = "neutral") => { setStatus(text); setStatusTone(tone); };
+  const showStatus = (text, tone = "neutral") => {
+    const notice = tone === "error" ? readableErrorNotice(text) : null;
+    setStatus(notice?.message || text);
+    setStatusTone(tone);
+    if (notice) setErrorDialog(notice);
+  };
   const headers = useMemo(() => {
     const next = { "Content-Type": "application/json" };
     if (token) next.Authorization = `Bearer ${token}`;
@@ -575,6 +689,7 @@ export default function AdminApp() {
     const data = await apiCall("/saas/v1/admin/auth/me");
     setMe(data);
     const profile = data?.profile_json || {};
+    const timezone = rememberUiTimeZone(profile.timezone || currentUiTimeZone());
     setAdminProfileForm((prev) => ({
       ...prev,
       full_name: prev.full_name || data?.full_name || "",
@@ -582,6 +697,7 @@ export default function AdminApp() {
       phone: prev.phone || profile.phone || "",
       role_label: prev.role_label || profile.role_label || "",
       avatar_url: prev.avatar_url || profile.avatar_url || "",
+      timezone,
     }));
   };
 
@@ -1298,6 +1414,7 @@ export default function AdminApp() {
         body: JSON.stringify(adminProfileForm),
       });
       setAdminProfileForm((prev) => ({ ...prev, current_password: "" }));
+      rememberUiTimeZone(data?.user?.profile_json?.timezone || adminProfileForm.timezone);
       setMe((prev) => ({ ...(prev || {}), email: data?.user?.email || prev?.email, full_name: data?.user?.full_name || prev?.full_name, profile_json: data?.user?.profile_json || prev?.profile_json || {} }));
       showStatus("Perfil admin actualizado", "ok");
       await loadMe();
@@ -1413,8 +1530,8 @@ export default function AdminApp() {
       <main className="admin-auth">
         <section className="auth-card glass-card">
           <div className="brand-block">
-            <span className="brand-glyph">S</span>
-            <div><h1>Scentra Admin</h1><p>Centro de control interno para planes, clientes y operacion.</p></div>
+            <BrandGlyph />
+            <div><img className="admin-wordmark" src={SCENTRA_WHITE_LOGO_URL} alt="Scentra" /><h1>Scentra Admin</h1><p>Centro de control interno para planes, clientes y operacion.</p></div>
           </div>
           {status ? <div className={`status ${statusTone}`}>{status}</div> : null}
           {authMode === "login" ? (
@@ -1464,6 +1581,7 @@ export default function AdminApp() {
             </details>
           ) : null}
         </section>
+        <ErrorDialog notice={errorDialog} onClose={() => setErrorDialog(null)} />
       </main>
     );
   }
@@ -1471,7 +1589,7 @@ export default function AdminApp() {
   return (
     <div className="admin-shell">
       <aside className="admin-sidebar glass-card">
-        <div className="brand-block compact"><span className="brand-glyph">S</span><div><strong>Scentra Admin</strong><small>{me.platform_role}</small></div></div>
+        <div className="brand-block compact"><BrandGlyph /><div><strong>Scentra Admin</strong><small>{me.platform_role}</small></div></div>
         <nav>{VIEWS.map(([id, label]) => <button key={id} type="button" className={activeView === id ? "active" : ""} onClick={() => setActiveView(id)}>{label}</button>)}</nav>
         <div className="operator-card"><small>Operador</small><strong>{me.email}</strong><button type="button" onClick={clearSession}>Salir</button></div>
       </aside>
@@ -1482,6 +1600,7 @@ export default function AdminApp() {
           <div className="top-actions"><button type="button" onClick={() => refreshActive(false)}>{loading ? "Actualizando..." : "Recargar"}</button></div>
         </header>
         {status ? <div className={`status floating ${statusTone}`}>{status}</div> : null}
+        <ErrorDialog notice={errorDialog} onClose={() => setErrorDialog(null)} />
 
         {activeView === "overview" ? <Overview overview={overview} /> : null}
         {activeView === "tenants" ? (
@@ -1744,6 +1863,7 @@ function BillingProviderSettings({ providers, providerForms, updateProviderForm,
           <span>Configura prueba/produccion sin entrar a Coolify</span>
         </div>
       </div>
+      <PaymentLogoStrip />
       <div className="provider-settings-grid">
         {Object.entries(PAYMENT_PROVIDER_META).map(([providerKey, meta]) => {
           const provider = providerMap[providerKey] || {};
@@ -2100,7 +2220,7 @@ function IntelligenceView({ tenants, catalog, metrics, models, training, mlops, 
         <div className="section-chip">Data intelligence</div>
         <div className="form-grid four">
           <label>Empresa<select value={dataForm.tenant_id} onChange={(event) => setDataForm((prev) => ({ ...prev, tenant_id: event.target.value }))}><option value="">Todas operativas</option>{tenants.map((tenant) => <option key={tenant.id} value={tenant.id}>{tenant.name}</option>)}</select></label>
-          <label>Tarea<select value={dataForm.prediction_type} onChange={(event) => setDataForm((prev) => ({ ...prev, prediction_type: event.target.value }))}><option value="">Todas</option><option value="lead_scoring">lead_scoring</option><option value="churn_prediction">churn_prediction</option><option value="smart_remarketing">smart_remarketing</option><option value="operational_anomaly">operational_anomaly</option></select></label>
+          <label>Tarea<select value={dataForm.prediction_type} onChange={(event) => setDataForm((prev) => ({ ...prev, prediction_type: event.target.value }))}><option value="">Todas</option>{["lead_scoring", "churn_prediction", "smart_remarketing", "operational_anomaly"].map((task) => <option key={task} value={task}>{taskTypeLabel(task)}</option>)}</select></label>
           <label>Ventana<input value={dataForm.window_key} onChange={(event) => setDataForm((prev) => ({ ...prev, window_key: event.target.value }))} /></label>
           <label>Limite<input type="number" min="1" max="25000" value={dataForm.limit} onChange={(event) => setDataForm((prev) => ({ ...prev, limit: Number(event.target.value || 1000) }))} /></label>
           <button type="button" onClick={generateAutoLabels}>Generar labels</button>
@@ -2125,7 +2245,7 @@ function IntelligenceView({ tenants, catalog, metrics, models, training, mlops, 
         </div>
         <div className="section-chip">Entrenamiento sintetico bootstrap</div>
         <form className="form-grid four" onSubmit={runTraining}>
-          <label>Tarea<select value={trainForm.task_type} onChange={(event) => setTrainForm((prev) => ({ ...prev, task_type: event.target.value }))}><option value="lead_scoring">lead_scoring</option><option value="churn_prediction">churn_prediction</option><option value="smart_remarketing">smart_remarketing</option><option value="operational_anomaly">operational_anomaly</option></select></label>
+          <label>Tarea<select value={trainForm.task_type} onChange={(event) => setTrainForm((prev) => ({ ...prev, task_type: event.target.value }))}>{["lead_scoring", "churn_prediction", "smart_remarketing", "operational_anomaly"].map((task) => <option key={task} value={task}>{taskTypeLabel(task)}</option>)}</select></label>
           <label>Modelo<input value={trainForm.model_key} placeholder="ml_lead_scoring_v2" onChange={(event) => setTrainForm((prev) => ({ ...prev, model_key: event.target.value }))} /></label>
           <label>Framework<select value={trainForm.framework} onChange={(event) => setTrainForm((prev) => ({ ...prev, framework: event.target.value }))}><option value="lightgbm">LightGBM</option><option value="xgboost">XGBoost</option><option value="sklearn">scikit-learn fallback</option></select></label>
           <label>Muestras<input type="number" min="50" max="100000" value={trainForm.sample_size} onChange={(event) => setTrainForm((prev) => ({ ...prev, sample_size: Number(event.target.value || 0) }))} /></label>
@@ -2195,7 +2315,7 @@ function IntelligenceView({ tenants, catalog, metrics, models, training, mlops, 
         <div className="panel-head"><h2>Model Registry & Rollout</h2><span>shadow, canary y produccion</span></div>
         <form className="form-grid four" onSubmit={registerModel}>
           <label>Modelo<input value={modelForm.model_key} placeholder="lead_scoring_candidate_v2" onChange={(event) => setModelForm((prev) => ({ ...prev, model_key: event.target.value }))} /></label>
-          <label>Tarea<select value={modelForm.task_type} onChange={(event) => setModelForm((prev) => ({ ...prev, task_type: event.target.value }))}><option value="lead_scoring">lead_scoring</option><option value="churn_prediction">churn_prediction</option><option value="smart_remarketing">smart_remarketing</option><option value="operational_anomaly">operational_anomaly</option></select></label>
+          <label>Tarea<select value={modelForm.task_type} onChange={(event) => setModelForm((prev) => ({ ...prev, task_type: event.target.value }))}>{["lead_scoring", "churn_prediction", "smart_remarketing", "operational_anomaly"].map((task) => <option key={task} value={task}>{taskTypeLabel(task)}</option>)}</select></label>
           <label>Framework<input value={modelForm.framework} placeholder="lightgbm / catboost / pending" onChange={(event) => setModelForm((prev) => ({ ...prev, framework: event.target.value }))} /></label>
           <label>Version<input value={modelForm.version} onChange={(event) => setModelForm((prev) => ({ ...prev, version: event.target.value }))} /></label>
           <label>Artifact URI<input value={modelForm.artifact_uri} placeholder="s3://... / mlflow:/..." onChange={(event) => setModelForm((prev) => ({ ...prev, artifact_uri: event.target.value }))} /></label>
@@ -2679,9 +2799,11 @@ function UsersAdminView({ me, activeTab, setActiveTab, tenantUserSearch, setTena
               <label>Correo<input value={profileForm.email} onChange={(event) => setProfileForm((prev) => ({ ...prev, email: event.target.value }))} /></label>
               <label>Telefono<input value={profileForm.phone} onChange={(event) => setProfileForm((prev) => ({ ...prev, phone: event.target.value }))} /></label>
               <label>Cargo visible<input value={profileForm.role_label} onChange={(event) => setProfileForm((prev) => ({ ...prev, role_label: event.target.value }))} /></label>
+              <label>Zona horaria<select value={profileForm.timezone} onChange={(event) => setProfileForm((prev) => ({ ...prev, timezone: event.target.value }))}>{TIME_ZONE_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label} ({value})</option>)}</select></label>
               <label className="wide">URL avatar<input value={profileForm.avatar_url} onChange={(event) => setProfileForm((prev) => ({ ...prev, avatar_url: event.target.value }))} /></label>
               <label className="wide">Clave actual para cambiar correo<input type="password" value={profileForm.current_password} onChange={(event) => setProfileForm((prev) => ({ ...prev, current_password: event.target.value }))} /></label>
             </div>
+            <p className="panel-hint">Los horarios de auditoria, errores y registros se muestran con esta zona. Por defecto usamos Colombia.</p>
             <button type="button" className="primary" onClick={saveProfile}>Guardar perfil</button>
           </article>
           <article className="panel glass-card">

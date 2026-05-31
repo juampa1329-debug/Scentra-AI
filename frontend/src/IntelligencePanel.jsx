@@ -3,10 +3,22 @@ import React, { useEffect, useMemo, useState } from "react";
 const number = (value) => Number(value || 0).toLocaleString("es-CO");
 const pct = (value) => `${Math.max(0, Math.min(100, Number(value || 0))).toFixed(0)}%`;
 const usd = (value) => `USD ${Number(value || 0).toFixed(4)}`;
+const DEFAULT_TIME_ZONE = "America/Bogota";
+const TIME_ZONE_KEY = "scentra_user_timezone";
+
+function currentUiTimeZone() {
+  const candidate = String(localStorage.getItem(TIME_ZONE_KEY) || DEFAULT_TIME_ZONE).trim() || DEFAULT_TIME_ZONE;
+  try {
+    new Intl.DateTimeFormat("es-CO", { timeZone: candidate }).format(new Date());
+    return candidate;
+  } catch {
+    return DEFAULT_TIME_ZONE;
+  }
+}
 
 const PREDICTION_ACTIONS = [
   { key: "lead_scoring", feature: "lead_scoring_ml", label: "Lead scoring", tone: "mint" },
-  { key: "churn_prediction", feature: "churn_prediction", label: "Churn", tone: "rose" },
+  { key: "churn_prediction", feature: "churn_prediction", label: "Riesgo de abandono", tone: "rose" },
   { key: "smart_remarketing", feature: "smart_remarketing", label: "Remarketing", tone: "amber" },
   { key: "operational_anomaly", feature: "ai_operational_intelligence", label: "Operacion", tone: "blue" },
 ];
@@ -64,7 +76,7 @@ function shortDate(value) {
   if (!value) return "-";
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return String(value).slice(0, 16);
-  return parsed.toLocaleString("es-CO", { dateStyle: "short", timeStyle: "short" });
+  return parsed.toLocaleString("es-CO", { timeZone: currentUiTimeZone(), dateStyle: "short", timeStyle: "short" });
 }
 
 function asPercent(value) {
