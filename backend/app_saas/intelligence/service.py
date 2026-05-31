@@ -36,6 +36,7 @@ VALID_PREDICTION_TASKS = set(PREDICTION_FEATURE_MAP.keys())
 ML_TRAINING_DATA_FEATURE = "ml_training_data_contribution"
 DEMO_ML_TRAINING_DATA_FEATURE = "demo_ml_training_contribution"
 EXPLICIT_INTELLIGENCE_GRANT_ONLY_FEATURES = {ML_TRAINING_DATA_FEATURE, DEMO_ML_TRAINING_DATA_FEATURE}
+PAID_TRAINING_TENANT_STATUSES = {"active"}
 
 _RUNTIME_SCHEMA_LOCK = threading.RLock()
 _RUNTIME_SCHEMA_ADVISORY_LOCK_ID = 73110011
@@ -1067,11 +1068,13 @@ def intelligence_feature_state(conn: Connection, tenant_id: str) -> dict[str, An
     usage = _usage_rows(conn, tenant_id, period)
     demo_enabled = bool(features.get("intelligence_demo", False))
     ai_premium = bool(features.get("ai_premium", False))
+    tenant_status = _clean(entitlements.get("tenant_status"), 40).lower().replace("-", "_")
     items: list[dict[str, Any]] = []
 
     for catalog_item in INTELLIGENCE_FEATURES:
         key = catalog_item["key"]
         grant = grants.get(key)
+        paid_training_default = key == ML_TRAINING_DATA_FEATURE and tenant_status in PAID_TRAINING_TENANT_STATUSES
         flag_full = bool(features.get(key, False)) or (
             ai_premium and key not in {"intelligence_demo", *EXPLICIT_INTELLIGENCE_GRANT_ONLY_FEATURES}
         )
@@ -1082,7 +1085,12 @@ def intelligence_feature_state(conn: Connection, tenant_id: str) -> dict[str, An
         valid_until = ""
         notes = ""
         plan_limit = plan_limits.get(key)
-        if grant:
+        if paid_training_default:
+            mode = "full"
+            enabled = True
+            source = "paid_account_default"
+            notes = "Las cuentas activas de pago aportan senales derivadas de entrenamiento por defecto; no se comparten mensajes crudos."
+        elif grant:
             mode = normalize_mode(str(grant.get("mode") or ""), enabled=bool(grant.get("enabled")))
             enabled = mode != "disabled"
             source = str(grant.get("source") or "admin")
@@ -1185,6 +1193,17 @@ def _tenant_training_policy(conn: Connection, tenant_id: str, *, tenant_status: 
             "tenant_status": status,
             "training_scope": "blocked",
             "reason": "tenant_not_active_or_trial",
+        }
+    if status in PAID_TRAINING_TENANT_STATUSES:
+        return {
+            "eligible": True,
+            "tenant_id": tenant_id,
+            "tenant_status": status,
+            "training_scope": "production",
+            "feature_key": ML_TRAINING_DATA_FEATURE,
+            "feature_mode": "full",
+            "feature_source": "paid_account_default",
+            "raw_content_used": False,
         }
     try:
         access = resolve_intelligence_access(conn, tenant_id, ML_TRAINING_DATA_FEATURE, allow_demo=False)

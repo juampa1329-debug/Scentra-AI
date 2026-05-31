@@ -2222,7 +2222,7 @@ function IntelligenceView({ tenants, catalog, metrics, models, training, mlops, 
         <div className="panel-head"><h2>ML Infrastructure</h2><span>{mlConfig.enabled ? "habilitado" : "apagado por defecto"}</span></div>
         <div className="notice-card">
           <strong>Politica de aprendizaje</strong>
-          <span>Las cuentas demo/trial no alimentan entrenamiento por defecto. Para permitir pruebas internas activa en esa empresa <b>Aporte a entrenamiento ML</b> y <b>Demo autorizado para aprendizaje interno</b>. Los datos demo autorizados quedan marcados como internos y se excluyen de datasets productivos salvo que marques la casilla de prueba.</span>
+          <span>Las cuentas activas de pago aportan senales derivadas al entrenamiento por defecto, sin compartir mensajes crudos. Las cuentas demo/trial no alimentan entrenamiento salvo que actives en esa empresa <b>Aporte a entrenamiento ML</b> y <b>Demo autorizado para aprendizaje interno</b>. Los datos demo autorizados quedan marcados como internos y se excluyen de datasets productivos salvo que marques la casilla de prueba.</span>
         </div>
         <div className="section-chip">Data intelligence</div>
         <div className="form-grid four">
