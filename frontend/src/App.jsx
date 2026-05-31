@@ -5352,7 +5352,7 @@ function App() {
                   </div>
                   <label>Prompt de voz<textarea rows={4} value={aiConfig.voicePrompt} onChange={(event) => setAiConfig((prev) => ({ ...prev, voicePrompt: event.target.value }))} /></label>
                 </article>
-                <article className="panel glass-card">
+                <article className="panel glass-card kb-panel settings-wide-panel">
                   <div className="panel-head"><h2>Knowledge Base</h2><span>fuentes</span></div>
                   <p className="soft-copy">Estas fuentes se inyectan como contexto para la IA. Sirven para politicas, catalogos, preguntas frecuentes, precios y procesos internos.</p>
                   <p className="soft-copy">Cada PDF o URL puede tener portada semantica: descripcion, etiquetas y alias. Usala para que la IA entienda que una lista llamada "precios actualizados" tambien responde a "precios mayoristas", "cotizacion" o nombres de productos escritos de otra forma.</p>
@@ -5370,7 +5370,7 @@ function App() {
                       <small>Indica para que sirve el archivo. Esto ayuda a la IA a saber si son precios mayoristas, promociones, politicas o catalogos aunque el PDF no lo diga literal.</small>
                     </div>
                     <label>Titulo visible<input placeholder="Ej: Precios mayoristas actualizados" value={knowledgeUploadCover.title} onChange={(event) => setKnowledgeUploadCover((prev) => ({ ...prev, title: event.target.value }))} /></label>
-                    <label>Descripcion de uso<textarea rows={2} placeholder="Ej: Lista de precios mayoristas vigente para cotizaciones" value={knowledgeUploadCover.semanticDescription} onChange={(event) => setKnowledgeUploadCover((prev) => ({ ...prev, semanticDescription: event.target.value }))} /></label>
+                    <label className="kb-field-wide">Descripcion de uso<textarea rows={2} placeholder="Ej: Lista de precios mayoristas vigente para cotizaciones" value={knowledgeUploadCover.semanticDescription} onChange={(event) => setKnowledgeUploadCover((prev) => ({ ...prev, semanticDescription: event.target.value }))} /></label>
                     <label>Etiquetas<input placeholder="precios mayoristas, catalogo, perfumes" value={knowledgeUploadCover.tags} onChange={(event) => setKnowledgeUploadCover((prev) => ({ ...prev, tags: event.target.value }))} /></label>
                     <label>Alias de busqueda<input placeholder="mayorista, cotizacion, bianco latte, biancolatte" value={knowledgeUploadCover.aliases} onChange={(event) => setKnowledgeUploadCover((prev) => ({ ...prev, aliases: event.target.value }))} /></label>
                   </div>
@@ -5437,7 +5437,7 @@ function App() {
                     <label>URL<input placeholder="https://tutienda.com/pagina-o-blog" value={knowledgeUrlForm.url} onChange={(event) => setKnowledgeUrlForm((prev) => ({ ...prev, url: event.target.value }))} /></label>
                     <label>Titulo opcional<input placeholder="Politicas de envio" value={knowledgeUrlForm.title} onChange={(event) => setKnowledgeUrlForm((prev) => ({ ...prev, title: event.target.value }))} /></label>
                     <label>Notas opcionales<input placeholder="Prioridad, uso interno, version..." value={knowledgeUrlForm.notes} onChange={(event) => setKnowledgeUrlForm((prev) => ({ ...prev, notes: event.target.value }))} /></label>
-                    <label>Descripcion de uso<input placeholder="Ej: Pagina oficial de precios/promos" value={knowledgeUrlForm.semantic_description} onChange={(event) => setKnowledgeUrlForm((prev) => ({ ...prev, semantic_description: event.target.value }))} /></label>
+                    <label className="kb-field-wide">Descripcion de uso<input placeholder="Ej: Pagina oficial de precios/promos" value={knowledgeUrlForm.semantic_description} onChange={(event) => setKnowledgeUrlForm((prev) => ({ ...prev, semantic_description: event.target.value }))} /></label>
                     <label>Etiquetas<input placeholder="precios, envios, garantias" value={knowledgeUrlForm.tags} onChange={(event) => setKnowledgeUrlForm((prev) => ({ ...prev, tags: event.target.value }))} /></label>
                     <label>Alias<input placeholder="mayorista, promo, catalogo" value={knowledgeUrlForm.aliases} onChange={(event) => setKnowledgeUrlForm((prev) => ({ ...prev, aliases: event.target.value }))} /></label>
                     <button type="submit" className="primary" disabled={knowledgeUploading}>{knowledgeUploading ? "Agregando..." : "Anadir fuente web"}</button>
@@ -5455,12 +5455,12 @@ function App() {
                           <p>{source.content_preview}</p>
                           <div className="kb-source-editor">
                             <label>Titulo visible<input value={knowledgeSourceDrafts[source.id]?.title || ""} onChange={(event) => updateKnowledgeSourceDraft(source.id, { title: event.target.value })} /></label>
-                            <label>Descripcion de uso<textarea rows={2} placeholder="Ej: Lista de precios mayoristas vigente para cotizaciones" value={knowledgeSourceDrafts[source.id]?.semanticDescription || ""} onChange={(event) => updateKnowledgeSourceDraft(source.id, { semanticDescription: event.target.value })} /></label>
+                            <label className="kb-field-wide">Descripcion de uso<textarea rows={2} placeholder="Ej: Lista de precios mayoristas vigente para cotizaciones" value={knowledgeSourceDrafts[source.id]?.semanticDescription || ""} onChange={(event) => updateKnowledgeSourceDraft(source.id, { semanticDescription: event.target.value })} /></label>
                             <label>Etiquetas<input placeholder="precios mayoristas, catalogo, perfumes" value={knowledgeSourceDrafts[source.id]?.tags || ""} onChange={(event) => updateKnowledgeSourceDraft(source.id, { tags: event.target.value })} /></label>
                             <label>Alias de busqueda<input placeholder="mayorista, cotizacion, precios actualizados, bianco latte, biancolatte" value={knowledgeSourceDrafts[source.id]?.aliases || ""} onChange={(event) => updateKnowledgeSourceDraft(source.id, { aliases: event.target.value })} /></label>
                           </div>
                         </div>
-                        <div className="row-actions">
+                        <div className="row-actions kb-source-actions">
                           <button type="button" onClick={() => saveKnowledgeSourceCover(source.id)} disabled={knowledgeUploading}>Guardar portada</button>
                           <button type="button" onClick={() => reindexKnowledgeSource(source.id)}>Reindexar</button>
                           <button type="button" onClick={() => deleteKnowledgeSource(source.id)}>Eliminar</button>
