@@ -32,6 +32,8 @@ DEFAULT_FEATURE_FLAGS: dict[str, bool] = {
     "intelligence_demo": True,
     "ai_premium": False,
     "ml_predictions": False,
+    "ml_training_data_contribution": False,
+    "demo_ml_training_contribution": False,
     "lead_scoring_ml": False,
     "churn_prediction": False,
     "smart_remarketing": False,

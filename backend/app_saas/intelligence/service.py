@@ -33,6 +33,9 @@ VALID_MODEL_STAGES = {"development", "staging", "shadow", "production", "archive
 VALID_ROLLOUT_MODES = {"disabled", "shadow", "canary", "production"}
 VALID_PROMOTION_STATUSES = {"draft", "pending_review", "approved", "rejected", "blocked"}
 VALID_PREDICTION_TASKS = set(PREDICTION_FEATURE_MAP.keys())
+ML_TRAINING_DATA_FEATURE = "ml_training_data_contribution"
+DEMO_ML_TRAINING_DATA_FEATURE = "demo_ml_training_contribution"
+EXPLICIT_INTELLIGENCE_GRANT_ONLY_FEATURES = {ML_TRAINING_DATA_FEATURE, DEMO_ML_TRAINING_DATA_FEATURE}
 
 _RUNTIME_SCHEMA_LOCK = threading.RLock()
 _RUNTIME_SCHEMA_ADVISORY_LOCK_ID = 73110011
@@ -1069,7 +1072,9 @@ def intelligence_feature_state(conn: Connection, tenant_id: str) -> dict[str, An
     for catalog_item in INTELLIGENCE_FEATURES:
         key = catalog_item["key"]
         grant = grants.get(key)
-        flag_full = bool(features.get(key, False)) or (ai_premium and key not in {"intelligence_demo"})
+        flag_full = bool(features.get(key, False)) or (
+            ai_premium and key not in {"intelligence_demo", *EXPLICIT_INTELLIGENCE_GRANT_ONLY_FEATURES}
+        )
         mode = "disabled"
         enabled = False
         source = str(sources.get(key) or "default")
@@ -1169,6 +1174,80 @@ def record_intelligence_usage(
             "metadata_json": _json(metadata or {}),
         },
     )
+
+
+def _tenant_training_policy(conn: Connection, tenant_id: str, *, tenant_status: str = "") -> dict[str, Any]:
+    status = _clean(tenant_status, 40).lower().replace("-", "_")
+    if status not in {"active", "trial"}:
+        return {
+            "eligible": False,
+            "tenant_id": tenant_id,
+            "tenant_status": status,
+            "training_scope": "blocked",
+            "reason": "tenant_not_active_or_trial",
+        }
+    try:
+        access = resolve_intelligence_access(conn, tenant_id, ML_TRAINING_DATA_FEATURE, allow_demo=False)
+    except HTTPException:
+        return {
+            "eligible": False,
+            "tenant_id": tenant_id,
+            "tenant_status": status,
+            "training_scope": "blocked",
+            "reason": "ml_training_contribution_not_enabled",
+        }
+    if status == "trial":
+        try:
+            resolve_intelligence_access(conn, tenant_id, DEMO_ML_TRAINING_DATA_FEATURE, allow_demo=False)
+        except HTTPException:
+            return {
+                "eligible": False,
+                "tenant_id": tenant_id,
+                "tenant_status": status,
+                "training_scope": "blocked",
+                "reason": "demo_training_contribution_not_enabled",
+            }
+        scope = "internal_demo"
+    else:
+        scope = "production"
+    return {
+        "eligible": True,
+        "tenant_id": tenant_id,
+        "tenant_status": status,
+        "training_scope": scope,
+        "feature_key": ML_TRAINING_DATA_FEATURE,
+        "feature_mode": access.get("mode") or "full",
+        "raw_content_used": False,
+    }
+
+
+def _training_policy_for_tenants(conn: Connection, tenant_id: str = "", *, limit: int = 500) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    clean_tenant_id = _clean(tenant_id, 80)
+    rows = conn.execute(
+        text(
+            """
+            SELECT id::text, status
+            FROM saas_tenants
+            WHERE status IN ('active', 'trial')
+              AND (CAST(NULLIF(:tenant_id, '') AS uuid) IS NULL OR id = CAST(NULLIF(:tenant_id, '') AS uuid))
+            ORDER BY updated_at DESC
+            LIMIT :limit
+            """
+        ),
+        {"tenant_id": clean_tenant_id, "limit": max(1, min(int(limit or 500), 500))},
+    ).mappings().all()
+    eligible: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for row in rows:
+        tid = str(row.get("id") or "")
+        if not tid:
+            continue
+        policy = _tenant_training_policy(conn, tid, tenant_status=str(row.get("status") or ""))
+        if policy.get("eligible"):
+            eligible.append(policy)
+        else:
+            skipped.append(policy)
+    return eligible, skipped
 
 
 def record_event(conn: Connection, tenant_id: str, payload: Any) -> dict[str, Any]:
@@ -1917,6 +1996,7 @@ def request_ml_dataset_build(payload: Any) -> dict[str, Any]:
             "window_key": _clean(data.get("window_key"), 80) or "90d",
             "min_samples": max(5, min(int(data.get("min_samples") or 50), 1000000)),
             "include_global": bool(data.get("include_global", False)),
+            "include_internal_demo": bool(data.get("include_internal_demo", False)),
             "notes": _clean(data.get("notes"), 1000),
         },
         ensure_ascii=False,
@@ -1953,6 +2033,7 @@ def request_ml_autolabel_training(payload: Any) -> dict[str, Any]:
             "window_key": _clean(data.get("window_key"), 80) or "90d",
             "min_samples": max(5, min(int(data.get("min_samples") or 50), 1000000)),
             "include_global": bool(data.get("include_global", False)),
+            "include_internal_demo": bool(data.get("include_internal_demo", False)),
             "seed": max(1, min(int(data.get("seed") or 42), 1000000000)),
             "register_artifact": True,
             "notes": _clean(data.get("notes"), 1000),
@@ -2990,7 +3071,7 @@ def _conversion_condition_sql() -> str:
     """
 
 
-def _generate_lead_labels(conn: Connection, tenant_id: str, *, window_key: str, limit: int) -> int:
+def _generate_lead_labels(conn: Connection, tenant_id: str, *, window_key: str, limit: int, training_scope: str) -> int:
     rows = conn.execute(
         text(
             f"""
@@ -3032,6 +3113,7 @@ def _generate_lead_labels(conn: Connection, tenant_id: str, *, window_key: str, 
                 "payment_status": row.get("payment_status") or "",
                 "lead_score": row.get("lead_score") or 0,
                 "lead_temperature": row.get("lead_temperature") or "",
+                "training_scope": training_scope,
                 "policy": "crm_stage_or_payment_status_positive_else_inactive_30d_negative",
             },
             window_key=window_key,
@@ -3041,7 +3123,7 @@ def _generate_lead_labels(conn: Connection, tenant_id: str, *, window_key: str, 
     return count
 
 
-def _generate_churn_labels(conn: Connection, tenant_id: str, *, window_key: str, limit: int) -> int:
+def _generate_churn_labels(conn: Connection, tenant_id: str, *, window_key: str, limit: int, training_scope: str) -> int:
     rows = conn.execute(
         text(
             """
@@ -3085,7 +3167,11 @@ def _generate_churn_labels(conn: Connection, tenant_id: str, *, window_key: str,
             label_value=label_value,
             label_text="high_churn_risk" if label_value else "recently_active",
             label_confidence=0.86 if label_value else 0.72,
-            evidence={"inactivity_days": float(row.get("inactivity_days") or 0), "policy": "inactive_45_days_positive_recent_7_days_negative"},
+            evidence={
+                "inactivity_days": float(row.get("inactivity_days") or 0),
+                "training_scope": training_scope,
+                "policy": "inactive_45_days_positive_recent_7_days_negative",
+            },
             window_key=window_key,
             replay_key=f"auto_label:churn_prediction:{subject_id}:{window_key}",
         )
@@ -3093,7 +3179,7 @@ def _generate_churn_labels(conn: Connection, tenant_id: str, *, window_key: str,
     return count
 
 
-def _generate_remarketing_labels(conn: Connection, tenant_id: str, *, window_key: str, limit: int) -> int:
+def _generate_remarketing_labels(conn: Connection, tenant_id: str, *, window_key: str, limit: int, training_scope: str) -> int:
     rows = conn.execute(
         text(
             """
@@ -3154,6 +3240,7 @@ def _generate_remarketing_labels(conn: Connection, tenant_id: str, *, window_key
                 "positive_count": int(row.get("positive_count") or 0),
                 "negative_count": int(row.get("negative_count") or 0),
                 "total_count": int(row.get("total_count") or 0),
+                "training_scope": training_scope,
                 "policy": "broadcast_or_campaign_engagement",
             },
             window_key=window_key,
@@ -3163,7 +3250,7 @@ def _generate_remarketing_labels(conn: Connection, tenant_id: str, *, window_key
     return count
 
 
-def _generate_operational_labels(conn: Connection, tenant_id: str, *, window_key: str) -> int:
+def _generate_operational_labels(conn: Connection, tenant_id: str, *, window_key: str, training_scope: str) -> int:
     row = conn.execute(
         text(
             """
@@ -3193,7 +3280,12 @@ def _generate_operational_labels(conn: Connection, tenant_id: str, *, window_key
         label_value=label_value,
         label_text="degraded" if label_value else "normal",
         label_confidence=0.82 if label_value else 0.7,
-        evidence={"failures_24h": failures, "total_events_24h": total, "policy": "failure_count_or_ratio"},
+        evidence={
+            "failures_24h": failures,
+            "total_events_24h": total,
+            "training_scope": training_scope,
+            "policy": "failure_count_or_ratio",
+        },
         window_key=window_key,
         replay_key=f"auto_label:operational_anomaly:{tenant_id}:{window_key}",
     )
@@ -3212,41 +3304,39 @@ def generate_auto_labels(
     clean_tenant_id = _clean(tenant_id, 80)
     clean_window = _clean(window_key, 80) or "90d"
     capped_limit = max(1, min(int(limit or 1000), 25000))
-    tenant_rows = conn.execute(
-        text(
-            """
-            SELECT id::text
-            FROM saas_tenants
-            WHERE status IN ('active', 'trial')
-              AND (CAST(NULLIF(:tenant_id, '') AS uuid) IS NULL OR id = CAST(NULLIF(:tenant_id, '') AS uuid))
-            ORDER BY updated_at DESC
-            LIMIT :limit
-            """
-        ),
-        {"tenant_id": clean_tenant_id, "limit": 500 if not clean_tenant_id else 1},
-    ).mappings().all()
+    tenant_policies, skipped_tenants = _training_policy_for_tenants(conn, clean_tenant_id, limit=500 if not clean_tenant_id else 1)
     tasks = _task_list(prediction_type)
     totals = {task: 0 for task in tasks}
-    for tenant in tenant_rows:
-        tid = str(tenant.get("id") or "")
+    for policy in tenant_policies:
+        tid = str(policy.get("tenant_id") or "")
         if not tid:
             continue
+        training_scope = str(policy.get("training_scope") or "production")
         if "lead_scoring" in tasks:
-            totals["lead_scoring"] += _generate_lead_labels(conn, tid, window_key=clean_window, limit=capped_limit)
+            totals["lead_scoring"] += _generate_lead_labels(conn, tid, window_key=clean_window, limit=capped_limit, training_scope=training_scope)
         if "churn_prediction" in tasks:
-            totals["churn_prediction"] += _generate_churn_labels(conn, tid, window_key=clean_window, limit=capped_limit)
+            totals["churn_prediction"] += _generate_churn_labels(conn, tid, window_key=clean_window, limit=capped_limit, training_scope=training_scope)
         if "smart_remarketing" in tasks:
-            totals["smart_remarketing"] += _generate_remarketing_labels(conn, tid, window_key=clean_window, limit=capped_limit)
+            totals["smart_remarketing"] += _generate_remarketing_labels(conn, tid, window_key=clean_window, limit=capped_limit, training_scope=training_scope)
         if "operational_anomaly" in tasks:
-            totals["operational_anomaly"] += _generate_operational_labels(conn, tid, window_key=clean_window)
+            totals["operational_anomaly"] += _generate_operational_labels(conn, tid, window_key=clean_window, training_scope=training_scope)
     return {
         "tenant_id": clean_tenant_id,
         "window_key": clean_window,
         "tasks": tasks,
-        "tenants": len(tenant_rows),
+        "tenants": len(tenant_policies),
+        "skipped_tenants": skipped_tenants[:100],
+        "skipped_tenant_count": len(skipped_tenants),
         "labels_generated": totals,
         "total": sum(totals.values()),
         "label_policy": "auto_label_v1",
+        "training_policy": {
+            "required_feature": ML_TRAINING_DATA_FEATURE,
+            "trial_required_feature": DEMO_ML_TRAINING_DATA_FEATURE,
+            "demo_default": "excluded",
+            "trial_scope": "internal_demo",
+            "raw_content_used": False,
+        },
         "raw_content_used": False,
     }
 
@@ -3279,6 +3369,7 @@ def _run_feature_pipeline_for_tenant(
     prediction_type: str,
     window_key: str,
     limit: int,
+    training_scope: str,
 ) -> dict[str, Any]:
     feature_set_key = f"{prediction_type}_v1"
     feature_set = FEATURE_SET_DEFINITIONS.get(feature_set_key) or {}
@@ -3318,7 +3409,7 @@ def _run_feature_pipeline_for_tenant(
                 source="ml_feature_pipeline",
                 feature_set_key=feature_set_key,
                 feature_version=str(feature_set.get("version") or "v1"),
-                quality_json={"window_key": window_key, "raw_content_used": False},
+                quality_json={"window_key": window_key, "training_scope": training_scope, "raw_content_used": False},
             )
             features_written += 1
         return {"subjects_processed": 1, "features_written": features_written}
@@ -3340,7 +3431,7 @@ def _run_feature_pipeline_for_tenant(
                 source="ml_feature_pipeline",
                 feature_set_key=feature_set_key,
                 feature_version=str(feature_set.get("version") or "v1"),
-                quality_json={"window_key": window_key, "raw_content_used": False},
+                quality_json={"window_key": window_key, "training_scope": training_scope, "raw_content_used": False},
             )
             features_written += 1
         subjects_processed += 1
@@ -3360,25 +3451,14 @@ def recompute_training_feature_pipelines(
     clean_window = _clean(window_key, 80) or "90d"
     capped_limit = max(1, min(int(limit or 1000), 25000))
     tasks = _task_list(prediction_type)
-    tenants = conn.execute(
-        text(
-            """
-            SELECT id::text
-            FROM saas_tenants
-            WHERE status IN ('active', 'trial')
-              AND (CAST(NULLIF(:tenant_id, '') AS uuid) IS NULL OR id = CAST(NULLIF(:tenant_id, '') AS uuid))
-            ORDER BY updated_at DESC
-            LIMIT :limit
-            """
-        ),
-        {"tenant_id": clean_tenant_id, "limit": 500 if not clean_tenant_id else 1},
-    ).mappings().all()
+    tenant_policies, skipped_tenants = _training_policy_for_tenants(conn, clean_tenant_id, limit=500 if not clean_tenant_id else 1)
     runs: list[dict[str, Any]] = []
     totals = {"subjects_processed": 0, "features_written": 0}
-    for tenant in tenants:
-        tid = str(tenant.get("id") or "")
+    for policy in tenant_policies:
+        tid = str(policy.get("tenant_id") or "")
         if not tid:
             continue
+        training_scope = str(policy.get("training_scope") or "production")
         for task in tasks:
             run_row = conn.execute(
                 text(
@@ -3398,7 +3478,14 @@ def recompute_training_feature_pipelines(
             ).mappings().first()
             run_id = str((run_row or {}).get("id") or "")
             try:
-                result = _run_feature_pipeline_for_tenant(conn, tid, prediction_type=task, window_key=clean_window, limit=capped_limit)
+                result = _run_feature_pipeline_for_tenant(
+                    conn,
+                    tid,
+                    prediction_type=task,
+                    window_key=clean_window,
+                    limit=capped_limit,
+                    training_scope=training_scope,
+                )
                 labels = generate_auto_labels(conn, tenant_id=tid, prediction_type=task, window_key=clean_window, limit=capped_limit)
                 conn.execute(
                     text(
@@ -3419,10 +3506,18 @@ def recompute_training_feature_pipelines(
                         "subjects_processed": int(result.get("subjects_processed") or 0),
                         "features_written": int(result.get("features_written") or 0),
                         "labels_generated": int(labels.get("total") or 0),
-                        "stats_json": _json({"features": result, "labels": labels}),
+                        "stats_json": _json({"features": result, "labels": labels, "training_policy": policy}),
                     },
                 )
-                item = {"id": run_id, "tenant_id": tid, "prediction_type": task, "status": "succeeded", **result, "labels_generated": int(labels.get("total") or 0)}
+                item = {
+                    "id": run_id,
+                    "tenant_id": tid,
+                    "prediction_type": task,
+                    "status": "succeeded",
+                    **result,
+                    "labels_generated": int(labels.get("total") or 0),
+                    "training_scope": training_scope,
+                }
             except Exception as exc:
                 conn.execute(
                     text(
@@ -3434,11 +3529,37 @@ def recompute_training_feature_pipelines(
                     ),
                     {"run_id": run_id, "error_text": str(exc)[:2000]},
                 )
-                item = {"id": run_id, "tenant_id": tid, "prediction_type": task, "status": "failed", "error": str(exc)[:500], "subjects_processed": 0, "features_written": 0, "labels_generated": 0}
+                item = {
+                    "id": run_id,
+                    "tenant_id": tid,
+                    "prediction_type": task,
+                    "status": "failed",
+                    "error": str(exc)[:500],
+                    "subjects_processed": 0,
+                    "features_written": 0,
+                    "labels_generated": 0,
+                    "training_scope": training_scope,
+                }
             totals["subjects_processed"] += int(item.get("subjects_processed") or 0)
             totals["features_written"] += int(item.get("features_written") or 0)
             runs.append(item)
-    return {"tenant_id": clean_tenant_id, "window_key": clean_window, "tasks": tasks, "tenants": len(tenants), "totals": totals, "runs": runs[:100]}
+    return {
+        "tenant_id": clean_tenant_id,
+        "window_key": clean_window,
+        "tasks": tasks,
+        "tenants": len(tenant_policies),
+        "skipped_tenants": skipped_tenants[:100],
+        "skipped_tenant_count": len(skipped_tenants),
+        "totals": totals,
+        "runs": runs[:100],
+        "training_policy": {
+            "required_feature": ML_TRAINING_DATA_FEATURE,
+            "trial_required_feature": DEMO_ML_TRAINING_DATA_FEATURE,
+            "demo_default": "excluded",
+            "trial_scope": "internal_demo",
+            "raw_content_used": False,
+        },
+    }
 
 
 def run_training_data_preparation(

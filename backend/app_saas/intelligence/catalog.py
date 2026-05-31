@@ -29,6 +29,22 @@ INTELLIGENCE_FEATURES: list[dict[str, Any]] = [
         "default_quota_monthly": 500,
     },
     {
+        "key": "ml_training_data_contribution",
+        "label": "Aporte a entrenamiento ML",
+        "category": "machine_learning_governance",
+        "description": "Permite generar labels, features y datasets tenant-scoped para entrenamiento ML sin compartir datos crudos.",
+        "demo_allowed": False,
+        "default_quota_monthly": 0,
+    },
+    {
+        "key": "demo_ml_training_contribution",
+        "label": "Demo autorizado para aprendizaje interno",
+        "category": "machine_learning_governance",
+        "description": "Autoriza cuentas trial/demo especificas a aportar datos derivados solo a pruebas internas; no a modelos productivos por defecto.",
+        "demo_allowed": False,
+        "default_quota_monthly": 0,
+    },
+    {
         "key": "lead_scoring_ml",
         "label": "Lead scoring predictivo",
         "category": "machine_learning",

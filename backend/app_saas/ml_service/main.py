@@ -138,6 +138,7 @@ def datasets_build(payload: DatasetBuildRequest) -> dict[str, Any]:
             window_key=payload.window_key,
             min_samples=payload.min_samples,
             include_global=payload.include_global,
+            include_internal_demo=payload.include_internal_demo,
             notes=payload.notes,
         )
         _observe("datasets_build", "ok", started)
@@ -165,6 +166,7 @@ def train_autolabel(payload: AutoLabelTrainRequest) -> dict[str, Any]:
                 "window_key": payload.window_key,
                 "min_samples": payload.min_samples,
                 "include_global": payload.include_global,
+                "include_internal_demo": payload.include_internal_demo,
                 "source": "postgres_feature_store",
             },
             "params_json": payload.model_dump(),
@@ -181,6 +183,7 @@ def train_autolabel(payload: AutoLabelTrainRequest) -> dict[str, Any]:
             window_key=payload.window_key,
             min_samples=payload.min_samples,
             include_global=payload.include_global,
+            include_internal_demo=payload.include_internal_demo,
             seed=payload.seed,
             notes=payload.notes,
         )
@@ -208,6 +211,7 @@ def train_autolabel(payload: AutoLabelTrainRequest) -> dict[str, Any]:
                 "metrics": result.get("metrics") or {},
                 "slices_json": {
                     "tenant_scope": "tenant" if payload.tenant_id and not payload.include_global else "shared_global_anonymized",
+                    "include_internal_demo": payload.include_internal_demo,
                     "raw_content_used": False,
                 },
                 "notes": payload.notes,

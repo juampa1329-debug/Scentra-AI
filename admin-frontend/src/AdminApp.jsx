@@ -611,6 +611,7 @@ export default function AdminApp() {
     window_key: "90d",
     min_samples: 50,
     include_global: false,
+    include_internal_demo: false,
     sample_size: 1000,
     seed: 42,
     register_model_registry: true,
@@ -1289,6 +1290,7 @@ export default function AdminApp() {
           window_key: intelligenceTrainForm.window_key,
           min_samples: Number(intelligenceTrainForm.min_samples || 50),
           include_global: Boolean(intelligenceTrainForm.include_global),
+          include_internal_demo: Boolean(intelligenceTrainForm.include_internal_demo),
         }),
       });
       showStatus(`Dataset ML listo: ${number(data?.dataset?.sample_count || 0)} muestras`, "ok");
@@ -1307,6 +1309,7 @@ export default function AdminApp() {
           min_samples: Number(intelligenceTrainForm.min_samples || 50),
           seed: Number(intelligenceTrainForm.seed || 42),
           include_global: Boolean(intelligenceTrainForm.include_global),
+          include_internal_demo: Boolean(intelligenceTrainForm.include_internal_demo),
         }),
       });
       showStatus("Entrenamiento autolabel solicitado. El modelo queda en shadow/pending_review.", "ok");
@@ -2043,7 +2046,7 @@ function IntelligenceView({ tenants, catalog, metrics, models, training, mlops, 
                           onChange={(event) => setIntelligenceFeature(tenant.id, feature.key, { mode: event.target.value, enabled: event.target.value !== "disabled", quota_monthly: item.quota_monthly || feature.default_quota_monthly || 0, source: "admin", notes: "Phase 24 tenant gating" })}
                         >
                           <option value="disabled">off</option>
-                          <option value="demo">demo</option>
+                          {feature.demo_allowed || item.mode === "demo" ? <option value="demo" disabled={!feature.demo_allowed}>demo</option> : null}
                           <option value="full">full</option>
                         </select>
                         <input
@@ -2187,7 +2190,7 @@ function IntelligenceView({ tenants, catalog, metrics, models, training, mlops, 
                           onChange={(event) => setIntelligenceFeature(tenant.id, feature.key, { mode: event.target.value, enabled: event.target.value !== "disabled", quota_monthly: item.quota_monthly || feature.default_quota_monthly || 0, source: "admin" })}
                         >
                           <option value="disabled">off</option>
-                          <option value="demo">demo</option>
+                          {feature.demo_allowed || item.mode === "demo" ? <option value="demo" disabled={!feature.demo_allowed}>demo</option> : null}
                           <option value="full">full</option>
                         </select>
                       </label>
@@ -2217,6 +2220,10 @@ function IntelligenceView({ tenants, catalog, metrics, models, training, mlops, 
       </article>
       <article className="panel glass-card">
         <div className="panel-head"><h2>ML Infrastructure</h2><span>{mlConfig.enabled ? "habilitado" : "apagado por defecto"}</span></div>
+        <div className="notice-card">
+          <strong>Politica de aprendizaje</strong>
+          <span>Las cuentas demo/trial no alimentan entrenamiento por defecto. Para permitir pruebas internas activa en esa empresa <b>Aporte a entrenamiento ML</b> y <b>Demo autorizado para aprendizaje interno</b>. Los datos demo autorizados quedan marcados como internos y se excluyen de datasets productivos salvo que marques la casilla de prueba.</span>
+        </div>
         <div className="section-chip">Data intelligence</div>
         <div className="form-grid four">
           <label>Empresa<select value={dataForm.tenant_id} onChange={(event) => setDataForm((prev) => ({ ...prev, tenant_id: event.target.value }))}><option value="">Todas operativas</option>{tenants.map((tenant) => <option key={tenant.id} value={tenant.id}>{tenant.name}</option>)}</select></label>
@@ -2240,6 +2247,7 @@ function IntelligenceView({ tenants, catalog, metrics, models, training, mlops, 
           <label>Ventana<input value={trainForm.window_key || "90d"} onChange={(event) => setTrainForm((prev) => ({ ...prev, window_key: event.target.value }))} /></label>
           <label>Min samples<input type="number" min="5" value={trainForm.min_samples || 50} onChange={(event) => setTrainForm((prev) => ({ ...prev, min_samples: Number(event.target.value || 50) }))} /></label>
           <label className="check"><input type="checkbox" checked={Boolean(trainForm.include_global)} onChange={(event) => setTrainForm((prev) => ({ ...prev, include_global: event.target.checked }))} /> incluir global anonimo</label>
+          <label className="check"><input type="checkbox" checked={Boolean(trainForm.include_internal_demo)} onChange={(event) => setTrainForm((prev) => ({ ...prev, include_internal_demo: event.target.checked }))} /> incluir demos autorizados solo para prueba</label>
           <button type="button" onClick={buildMlDataset} disabled={!mlConfig.enabled}>Construir dataset</button>
           <button type="button" className="primary" onClick={runAutoLabelTraining} disabled={!mlConfig.enabled}>Entrenar autolabel</button>
         </div>

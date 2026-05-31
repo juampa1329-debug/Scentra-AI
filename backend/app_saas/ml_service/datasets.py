@@ -102,6 +102,7 @@ def build_training_dataset(
     window_key: str = "90d",
     min_samples: int = 50,
     include_global: bool = False,
+    include_internal_demo: bool = False,
     created_by_user_id: str = "",
     notes: str = "",
 ) -> dict[str, Any]:
@@ -134,6 +135,7 @@ def build_training_dataset(
                 WHERE l.prediction_type = :task_type
                   AND l.window_key = :window_key
                   AND (CAST(NULLIF(:tenant_id, '') AS uuid) IS NULL OR l.tenant_id = CAST(NULLIF(:tenant_id, '') AS uuid) OR :include_global = TRUE)
+                  AND (:include_internal_demo = TRUE OR COALESCE(l.evidence_json->>'training_scope', 'production') <> 'internal_demo')
                 GROUP BY l.tenant_id, l.subject_type, l.subject_id, l.label_value, l.label_key, l.label_confidence, l.evidence_json
                 ORDER BY MAX(l.generated_at) DESC
                 """
@@ -143,6 +145,7 @@ def build_training_dataset(
                 "window_key": clean_window,
                 "tenant_id": clean_tenant,
                 "include_global": bool(include_global),
+                "include_internal_demo": bool(include_internal_demo),
             },
         ).mappings().all()
 
@@ -150,6 +153,12 @@ def build_training_dataset(
     labels: list[int] = []
     subjects: list[dict[str, Any]] = []
     for row in rows:
+        evidence_json = row.get("evidence_json") or {}
+        if isinstance(evidence_json, str):
+            try:
+                evidence_json = json.loads(evidence_json)
+            except json.JSONDecodeError:
+                evidence_json = {}
         features_json = row.get("features_json") or {}
         if isinstance(features_json, str):
             try:
@@ -168,6 +177,7 @@ def build_training_dataset(
                 "subject_id": row.get("subject_id") or "",
                 "label_key": row.get("label_key") or "",
                 "label_confidence": float(row.get("label_confidence") or 0),
+                "training_scope": str((evidence_json or {}).get("training_scope") or "production"),
             }
         )
 
@@ -204,6 +214,11 @@ def build_training_dataset(
         "manifest_uri": str(manifest_path),
         "window_key": clean_window,
         "include_global": bool(include_global),
+        "include_internal_demo": bool(include_internal_demo),
+        "training_scope_policy": {
+            "production_dataset_excludes_internal_demo": not bool(include_internal_demo),
+            "internal_demo_allowed": bool(include_internal_demo),
+        },
         "notes": notes,
         "subjects_sample": subjects[:20],
         "raw_content_used": False,
@@ -227,6 +242,8 @@ def build_training_dataset(
                 "manifest_uri": str(manifest_path),
                 "feature_keys": keys,
                 "include_global": bool(include_global),
+                "include_internal_demo": bool(include_internal_demo),
+                "training_scope_policy": summary["training_scope_policy"],
                 "raw_content_used": False,
                 "notes": notes,
             },

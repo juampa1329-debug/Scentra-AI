@@ -29,6 +29,7 @@ class DatasetBuildRequest(BaseModel):
     window_key: str = Field(default="90d", max_length=80)
     min_samples: int = Field(default=50, ge=5, le=1000000)
     include_global: bool = False
+    include_internal_demo: bool = False
     notes: str = Field(default="", max_length=1000)
 
 
@@ -44,6 +45,7 @@ class AutoLabelTrainRequest(BaseModel):
     window_key: str = Field(default="90d", max_length=80)
     min_samples: int = Field(default=50, ge=5, le=1000000)
     include_global: bool = False
+    include_internal_demo: bool = False
     seed: int = Field(default=42, ge=1, le=1000000000)
     register_artifact: bool = True
     notes: str = Field(default="", max_length=1000)

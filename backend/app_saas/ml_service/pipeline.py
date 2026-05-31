@@ -337,6 +337,7 @@ def train_autolabel_model(
     window_key: str,
     min_samples: int,
     include_global: bool,
+    include_internal_demo: bool,
     seed: int,
     notes: str = "",
 ) -> dict[str, Any]:
@@ -353,6 +354,7 @@ def train_autolabel_model(
         window_key=window_key,
         min_samples=min_samples,
         include_global=include_global,
+        include_internal_demo=include_internal_demo,
         notes=notes,
     )
     frame = dataset["frame"]
@@ -404,6 +406,7 @@ def train_autolabel_model(
         "training_source": "postgres_auto_labels",
         "tenant_id": tenant_id,
         "include_global": bool(include_global),
+        "include_internal_demo": bool(include_internal_demo),
         "raw_content_used": False,
     }
     artifact_dir = model_root() / key / model_version
@@ -431,6 +434,7 @@ def train_autolabel_model(
                     "dataset_id": dataset["summary"].get("dataset_id") or "",
                     "window_key": window_key,
                     "include_global": bool(include_global),
+                    "include_internal_demo": bool(include_internal_demo),
                 }
             )
             for metric_key, metric_value in metrics.items():
