@@ -758,6 +758,21 @@ const asObject = (value) => {
   return {};
 };
 
+const textList = (value) => {
+  if (Array.isArray(value)) return value.map((item) => String(item || "").trim()).filter(Boolean);
+  return String(value || "")
+    .split(/[\n,;|]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+};
+
+const knowledgeDraftFromSource = (source) => ({
+  title: source?.title || source?.filename || source?.url || "",
+  semanticDescription: source?.semantic_description || source?.metadata_json?.semantic_description || source?.metadata_json?.description || "",
+  tags: textList(source?.tags || source?.metadata_json?.tags).join(", "),
+  aliases: textList(source?.aliases || source?.metadata_json?.aliases).join(", "),
+});
+
 const cleanProductText = (value, limit = 500) => String(value || "").trim().slice(0, limit);
 
 const normalizeProductCard = (product) => {
@@ -1025,7 +1040,9 @@ function App() {
   const [knowledgeHealth, setKnowledgeHealth] = useState(null);
   const [knowledgeSearch, setKnowledgeSearch] = useState({ query: "", results: [], citations: [], confidence: 0, retrievalMode: "", searched: false });
   const [knowledgeSearching, setKnowledgeSearching] = useState(false);
-  const [knowledgeUrlForm, setKnowledgeUrlForm] = useState({ url: "", title: "", notes: "" });
+  const [knowledgeUrlForm, setKnowledgeUrlForm] = useState({ url: "", title: "", notes: "", semantic_description: "", tags: "", aliases: "" });
+  const [knowledgeUploadCover, setKnowledgeUploadCover] = useState({ title: "", semanticDescription: "", tags: "", aliases: "" });
+  const [knowledgeSourceDrafts, setKnowledgeSourceDrafts] = useState({});
   const [knowledgeUploading, setKnowledgeUploading] = useState(false);
   const [knowledgeEvaluations, setKnowledgeEvaluations] = useState([]);
   const [knowledgeEvalForm, setKnowledgeEvalForm] = useState({ query: "", expectedAnswer: "", expectedSources: "" });
@@ -1627,7 +1644,7 @@ function App() {
     clearComposerAttachment(); setCatalogDraft(null); setEmojiOpen(false); setAttachMenuOpen(false); setInboxChannelFilter("all"); setInboxSearch(""); setIsRecording(false); setRecordingSeconds(0); setRecordingLevels(EMPTY_WAVEFORM);
     recordingLevelsRef.current = EMPTY_WAVEFORM;
     setIntegrations([]); setWebhooks([]); setWebhookEvents([]); setWebhookCheck(null); setBillingOverview(null); setBillingPlans([]); setBillingCheckoutSessions([]); setBillingInvoices([]); setLastWebhookSecret(null);
-    setApiCredentials([]); setCredentialModal(null); setCredentialModels({}); setKnowledgeSources([]); setKnowledgeHealth(null); setKnowledgeSearch({ query: "", results: [], citations: [], confidence: 0, retrievalMode: "", searched: false }); setKnowledgeEvaluations([]); setKnowledgeEvalForm({ query: "", expectedAnswer: "", expectedSources: "" }); setDiagnostics(null); setAiGatewayProviders([]); setAiGatewayRuns([]);
+    setApiCredentials([]); setCredentialModal(null); setCredentialModels({}); setKnowledgeSources([]); setKnowledgeSourceDrafts({}); setKnowledgeUploadCover({ title: "", semanticDescription: "", tags: "", aliases: "" }); setKnowledgeHealth(null); setKnowledgeSearch({ query: "", results: [], citations: [], confidence: 0, retrievalMode: "", searched: false }); setKnowledgeEvaluations([]); setKnowledgeEvalForm({ query: "", expectedAnswer: "", expectedSources: "" }); setDiagnostics(null); setAiGatewayProviders([]); setAiGatewayRuns([]);
     setAdvisorOpen(false); setAdvisorThreadId(""); setAdvisorMessages([]); setAdvisorInput(""); setAdvisorInsights([]); setAdvisorRecommendations([]); setAdvisorActions([]); setAdvisorMetrics(null); setAdvisorActivity([]); setAdvisorMemory(null); setAdvisorStreamStatus(""); setAdvisorLastSync(""); setAdvisorLoading(false);
     setInstagramDiagnostics(null); setFacebookDiagnostics(null); setInstagramOAuth({ state: "", assets: [], status: "", callbackUrl: "" });
     setInstagramForm(defaultInstagramForm());
@@ -1738,7 +1755,9 @@ function App() {
         apiCall("/saas/v1/knowledge/health"),
         apiCall("/saas/v1/knowledge/evaluations?limit=8"),
       ]);
-      setKnowledgeSources(sourcesData || []);
+      const sources = sourcesData || [];
+      setKnowledgeSources(sources);
+      setKnowledgeSourceDrafts(Object.fromEntries(sources.map((source) => [source.id, knowledgeDraftFromSource(source)])));
       setKnowledgeHealth(healthData || null);
       setKnowledgeEvaluations(evalData || []);
     }
@@ -3866,9 +3885,13 @@ function App() {
     try {
       const formData = new FormData();
       formData.append("file", file);
-      formData.append("title", file.name || "Archivo KB");
+      formData.append("title", knowledgeUploadCover.title || file.name || "Archivo KB");
+      formData.append("semantic_description", knowledgeUploadCover.semanticDescription || "");
+      formData.append("tags", knowledgeUploadCover.tags || "");
+      formData.append("aliases", knowledgeUploadCover.aliases || "");
       await apiCall("/saas/v1/knowledge/upload", { method: "POST", body: formData });
-      showStatus("Archivo agregado a Knowledge Base. La IA lo usara como contexto.", "ok");
+      showStatus("Archivo agregado a Knowledge Base con portada semantica. La IA lo usara como contexto.", "ok");
+      setKnowledgeUploadCover({ title: "", semanticDescription: "", tags: "", aliases: "" });
       await loadKnowledgeSources();
     } catch (err) {
       showStatus(String(err.message || err), "error");
@@ -3882,9 +3905,51 @@ function App() {
     if (!knowledgeUrlForm.url.trim()) return showStatus("Ingresa una URL primero.", "neutral");
     setKnowledgeUploading(true);
     try {
-      await apiCall("/saas/v1/knowledge/url", { method: "POST", body: JSON.stringify(knowledgeUrlForm) });
-      setKnowledgeUrlForm({ url: "", title: "", notes: "" });
+      await apiCall("/saas/v1/knowledge/url", {
+        method: "POST",
+        body: JSON.stringify({
+          ...knowledgeUrlForm,
+          tags: textList(knowledgeUrlForm.tags).slice(0, 24),
+          aliases: textList(knowledgeUrlForm.aliases).slice(0, 32),
+        }),
+      });
+      setKnowledgeUrlForm({ url: "", title: "", notes: "", semantic_description: "", tags: "", aliases: "" });
       showStatus("Fuente web agregada a Knowledge Base.", "ok");
+      await loadKnowledgeSources();
+    } catch (err) {
+      showStatus(String(err.message || err), "error");
+    } finally {
+      setKnowledgeUploading(false);
+    }
+  };
+  const updateKnowledgeSourceDraft = (sourceId, patch) => {
+    setKnowledgeSourceDrafts((prev) => ({
+      ...prev,
+      [sourceId]: {
+        ...(prev[sourceId] || {}),
+        ...patch,
+      },
+    }));
+  };
+  const saveKnowledgeSourceCover = async (sourceId) => {
+    const draft = knowledgeSourceDrafts[sourceId] || {};
+    setKnowledgeUploading(true);
+    try {
+      const data = await apiCall(`/saas/v1/knowledge/sources/${encodeURIComponent(sourceId)}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          title: draft.title || "",
+          semantic_description: draft.semanticDescription || "",
+          tags: textList(draft.tags).slice(0, 24),
+          aliases: textList(draft.aliases).slice(0, 32),
+          reindex: true,
+        }),
+      });
+      if (data?.source) {
+        setKnowledgeSources((prev) => prev.map((item) => item.id === sourceId ? data.source : item));
+        setKnowledgeSourceDrafts((prev) => ({ ...prev, [sourceId]: knowledgeDraftFromSource(data.source) }));
+      }
+      showStatus("Portada semantica guardada y fuente reindexada.", "ok");
       await loadKnowledgeSources();
     } catch (err) {
       showStatus(String(err.message || err), "error");
@@ -5290,6 +5355,7 @@ function App() {
                 <article className="panel glass-card">
                   <div className="panel-head"><h2>Knowledge Base</h2><span>fuentes</span></div>
                   <p className="soft-copy">Estas fuentes se inyectan como contexto para la IA. Sirven para politicas, catalogos, preguntas frecuentes, precios y procesos internos.</p>
+                  <p className="soft-copy">Cada PDF o URL puede tener portada semantica: descripcion, etiquetas y alias. Usala para que la IA entienda que una lista llamada "precios actualizados" tambien responde a "precios mayoristas", "cotizacion" o nombres de productos escritos de otra forma.</p>
                   <div className="kb-health-grid">
                     <div><span>Estado RAG</span><strong>{knowledgeHealth?.status || "sin datos"}</strong><small>{number(knowledgeHealth?.totals?.active_sources || 0)} fuentes activas</small></div>
                     <div><span>Fragmentos</span><strong>{number(knowledgeHealth?.totals?.chunks || 0)}</strong><small>chunks indexados</small></div>
@@ -5298,6 +5364,16 @@ function App() {
                     <div><span>Errores</span><strong>{number(knowledgeHealth?.totals?.error_sources || 0)}</strong><small>fuentes con problema</small></div>
                   </div>
                   <div className="inline-form compact"><select><option>Mostrar: Todos</option></select><button type="button" onClick={loadKnowledgeSources}>Refrescar</button><button type="button" onClick={reindexAllKnowledge} disabled={knowledgeUploading}>Reindexar todo</button></div>
+                  <div className="kb-upload-cover">
+                    <div>
+                      <strong>Portada del PDF antes de subir</strong>
+                      <small>Indica para que sirve el archivo. Esto ayuda a la IA a saber si son precios mayoristas, promociones, politicas o catalogos aunque el PDF no lo diga literal.</small>
+                    </div>
+                    <label>Titulo visible<input placeholder="Ej: Precios mayoristas actualizados" value={knowledgeUploadCover.title} onChange={(event) => setKnowledgeUploadCover((prev) => ({ ...prev, title: event.target.value }))} /></label>
+                    <label>Descripcion de uso<textarea rows={2} placeholder="Ej: Lista de precios mayoristas vigente para cotizaciones" value={knowledgeUploadCover.semanticDescription} onChange={(event) => setKnowledgeUploadCover((prev) => ({ ...prev, semanticDescription: event.target.value }))} /></label>
+                    <label>Etiquetas<input placeholder="precios mayoristas, catalogo, perfumes" value={knowledgeUploadCover.tags} onChange={(event) => setKnowledgeUploadCover((prev) => ({ ...prev, tags: event.target.value }))} /></label>
+                    <label>Alias de busqueda<input placeholder="mayorista, cotizacion, bianco latte, biancolatte" value={knowledgeUploadCover.aliases} onChange={(event) => setKnowledgeUploadCover((prev) => ({ ...prev, aliases: event.target.value }))} /></label>
+                  </div>
                   <input ref={knowledgeFileRef} className="composer-file-input" type="file" accept=".txt,.md,.csv,.json,.pdf,text/plain,application/pdf" onChange={(event) => uploadKnowledgeFile(event.target.files?.[0])} />
                   <div
                     className="upload-zone actionable"
@@ -5327,6 +5403,9 @@ function App() {
                         <div className="kb-rag-result" key={item.chunk_id}>
                           <strong>{item.title}</strong>
                           <span>{item.source_label || item.filename || item.url || "Fuente interna"} / score {item.score} / vector {number(item.vector_score || 0)}</span>
+                          {item.semantic_description ? <small>Uso: {item.semantic_description}</small> : null}
+                          {Array.isArray(item.tags) && item.tags.length ? <small>Etiquetas: {item.tags.slice(0, 8).join(", ")}</small> : null}
+                          {Array.isArray(item.aliases) && item.aliases.length ? <small>Alias: {item.aliases.slice(0, 8).join(", ")}</small> : null}
                           {Array.isArray(item.matched_terms) && item.matched_terms.length ? <small>Coincidencias: {item.matched_terms.slice(0, 8).join(", ")}</small> : null}
                           <p>{item.content}</p>
                         </div>
@@ -5358,6 +5437,9 @@ function App() {
                     <label>URL<input placeholder="https://tutienda.com/pagina-o-blog" value={knowledgeUrlForm.url} onChange={(event) => setKnowledgeUrlForm((prev) => ({ ...prev, url: event.target.value }))} /></label>
                     <label>Titulo opcional<input placeholder="Politicas de envio" value={knowledgeUrlForm.title} onChange={(event) => setKnowledgeUrlForm((prev) => ({ ...prev, title: event.target.value }))} /></label>
                     <label>Notas opcionales<input placeholder="Prioridad, uso interno, version..." value={knowledgeUrlForm.notes} onChange={(event) => setKnowledgeUrlForm((prev) => ({ ...prev, notes: event.target.value }))} /></label>
+                    <label>Descripcion de uso<input placeholder="Ej: Pagina oficial de precios/promos" value={knowledgeUrlForm.semantic_description} onChange={(event) => setKnowledgeUrlForm((prev) => ({ ...prev, semantic_description: event.target.value }))} /></label>
+                    <label>Etiquetas<input placeholder="precios, envios, garantias" value={knowledgeUrlForm.tags} onChange={(event) => setKnowledgeUrlForm((prev) => ({ ...prev, tags: event.target.value }))} /></label>
+                    <label>Alias<input placeholder="mayorista, promo, catalogo" value={knowledgeUrlForm.aliases} onChange={(event) => setKnowledgeUrlForm((prev) => ({ ...prev, aliases: event.target.value }))} /></label>
                     <button type="submit" className="primary" disabled={knowledgeUploading}>{knowledgeUploading ? "Agregando..." : "Anadir fuente web"}</button>
                   </form>
                   <div className="kb-source-list">
@@ -5366,11 +5448,20 @@ function App() {
                         <div>
                           <strong>{source.title || source.filename || source.url}</strong>
                           <span>{source.source_type} / {number(source.content_chars)} chars / {number(source.chunk_count)} chunks / {source.status || "sin estado"} / {compactDateTimeLabel(source.updated_at)}</span>
+                          {Array.isArray(source.tags) && source.tags.length ? <small>Etiquetas: {source.tags.join(", ")}</small> : null}
+                          {Array.isArray(source.aliases) && source.aliases.length ? <small>Alias: {source.aliases.join(", ")}</small> : null}
                           {source.metadata_json?.parser ? <small>Parser: {source.metadata_json.parser}</small> : null}
                           {source.error ? <small className="danger-text">{source.error}</small> : <small>Indexado {source.last_indexed_at ? compactDateTimeLabel(source.last_indexed_at) : "pendiente"}</small>}
                           <p>{source.content_preview}</p>
+                          <div className="kb-source-editor">
+                            <label>Titulo visible<input value={knowledgeSourceDrafts[source.id]?.title || ""} onChange={(event) => updateKnowledgeSourceDraft(source.id, { title: event.target.value })} /></label>
+                            <label>Descripcion de uso<textarea rows={2} placeholder="Ej: Lista de precios mayoristas vigente para cotizaciones" value={knowledgeSourceDrafts[source.id]?.semanticDescription || ""} onChange={(event) => updateKnowledgeSourceDraft(source.id, { semanticDescription: event.target.value })} /></label>
+                            <label>Etiquetas<input placeholder="precios mayoristas, catalogo, perfumes" value={knowledgeSourceDrafts[source.id]?.tags || ""} onChange={(event) => updateKnowledgeSourceDraft(source.id, { tags: event.target.value })} /></label>
+                            <label>Alias de busqueda<input placeholder="mayorista, cotizacion, precios actualizados, bianco latte, biancolatte" value={knowledgeSourceDrafts[source.id]?.aliases || ""} onChange={(event) => updateKnowledgeSourceDraft(source.id, { aliases: event.target.value })} /></label>
+                          </div>
                         </div>
                         <div className="row-actions">
+                          <button type="button" onClick={() => saveKnowledgeSourceCover(source.id)} disabled={knowledgeUploading}>Guardar portada</button>
                           <button type="button" onClick={() => reindexKnowledgeSource(source.id)}>Reindexar</button>
                           <button type="button" onClick={() => deleteKnowledgeSource(source.id)}>Eliminar</button>
                         </div>

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import difflib
 import hashlib
 import ipaddress
 import io
@@ -8,6 +9,7 @@ import json
 import math
 import re
 import socket
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -29,6 +31,9 @@ class KnowledgeUrlIn(BaseModel):
     url: str = Field(min_length=8, max_length=1000)
     title: str = Field(default="", max_length=240)
     notes: str = Field(default="", max_length=1000)
+    semantic_description: str = Field(default="", max_length=1200)
+    tags: list[str] = Field(default_factory=list)
+    aliases: list[str] = Field(default_factory=list)
 
 
 class KnowledgeSearchIn(BaseModel):
@@ -43,6 +48,14 @@ class KnowledgeEvaluationIn(BaseModel):
     expected_sources: list[str] = Field(default_factory=list)
     limit: int = Field(default=6, ge=1, le=20)
     min_quality_score: int = Field(default=55, ge=0, le=100)
+
+
+class KnowledgeSourceUpdateIn(BaseModel):
+    title: str | None = Field(default=None, max_length=240)
+    semantic_description: str | None = Field(default=None, max_length=1200)
+    tags: list[str] | None = None
+    aliases: list[str] | None = None
+    reindex: bool = True
 
 
 def _clean(value: Any, limit: int = 20000) -> str:
@@ -69,6 +82,18 @@ def _content_hash(value: str) -> str:
     return hashlib.sha256(_clean(value, 500000).encode("utf-8", errors="ignore")).hexdigest()
 
 
+def _normalize_for_search(value: Any, limit: int = 30000) -> str:
+    raw = unicodedata.normalize("NFKD", _clean(value, limit).lower())
+    raw = "".join(char for char in raw if not unicodedata.combining(char))
+    raw = re.sub(r"[^\w\s]+", " ", raw, flags=re.UNICODE)
+    raw = re.sub(r"_+", " ", raw)
+    return re.sub(r"\s+", " ", raw).strip()
+
+
+def _compact_for_search(value: Any, limit: int = 30000) -> str:
+    return re.sub(r"[^a-z0-9]+", "", _normalize_for_search(value, limit))
+
+
 def _legacy_tokenize(value: str) -> list[str]:
     words = re.findall(r"[a-zA-ZáéíóúÁÉÍÓÚñÑ0-9]{3,}", _clean(value, 4000).lower())
     stop = {
@@ -92,7 +117,7 @@ STOP_WORDS = {
 
 
 def _token_stream(value: str, *, limit: int = 800) -> list[str]:
-    words = re.findall(r"[^\W_]{3,}", _clean(value, 30000).lower(), flags=re.UNICODE)
+    words = re.findall(r"[a-z0-9]{3,}", _normalize_for_search(value, 30000), flags=re.UNICODE)
     return [word for word in words if word not in STOP_WORDS][:limit]
 
 
@@ -129,6 +154,81 @@ def _cosine_sparse(left: dict[str, Any], right: dict[str, Any]) -> float:
 
 def _keywords_from_vector(vector: dict[str, float], *, limit: int = 16) -> list[str]:
     return [word for word, _ in sorted(vector.items(), key=lambda item: (-float(item[1]), item[0]))[:limit]]
+
+
+def _metadata_terms(metadata: Any, *, limit: int = 48) -> list[str]:
+    data = metadata if isinstance(metadata, dict) else {}
+    values: list[str] = []
+    for key in ("semantic_description", "description", "purpose", "notes", "fetched_title", "source_label"):
+        value = _clean(data.get(key), 1200)
+        if value:
+            values.append(value)
+    for key in ("tags", "labels", "aliases", "query_aliases", "keywords"):
+        raw = data.get(key)
+        if isinstance(raw, list):
+            values.extend(_clean(item, 160) for item in raw if _clean(item, 160))
+        elif isinstance(raw, str):
+            values.extend(_clean(item, 160) for item in re.split(r"[\n,;|]+", raw) if _clean(item, 160))
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        clean = _clean(value, 180)
+        key = _normalize_for_search(clean, 180)
+        if clean and key and key not in seen:
+            seen.add(key)
+            out.append(clean)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _term_list(values: Any, *, limit: int = 24, item_limit: int = 80) -> list[str]:
+    if isinstance(values, str):
+        raw_items = re.split(r"[\n,;|]+", values)
+    elif isinstance(values, list):
+        raw_items = values
+    else:
+        raw_items = []
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        clean = _clean(item, item_limit)
+        key = _normalize_for_search(clean, item_limit)
+        if clean and key and key not in seen:
+            seen.add(key)
+            out.append(clean)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _source_cover_text(row: dict[str, Any]) -> str:
+    metadata = _json_value(row.get("metadata_json"), {})
+    parts = [
+        row.get("title"),
+        row.get("filename"),
+        row.get("url"),
+        row.get("source_type"),
+        *_metadata_terms(metadata),
+    ]
+    return " ".join(_clean(part, 1200) for part in parts if _clean(part, 1200))
+
+
+def _compact_windows(value: str, *, max_windows: int = 180) -> list[tuple[str, str]]:
+    tokens = _token_stream(value, limit=180)
+    windows: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for size in (1, 2, 3):
+        for idx in range(0, max(0, len(tokens) - size + 1)):
+            words = tokens[idx : idx + size]
+            compact = "".join(words)
+            if len(compact) < 5 or len(compact) > 42 or compact in seen:
+                continue
+            seen.add(compact)
+            windows.append((compact, " ".join(words)))
+            if len(windows) >= max_windows:
+                return windows
+    return windows
 
 
 def _uuid_or_400(value: str) -> str:
@@ -296,6 +396,7 @@ def ensure_knowledge_tables(conn: Connection) -> None:
 def _safe_row(row: dict[str, Any]) -> dict[str, Any]:
     content = _clean(row.get("content"), 200000)
     metadata = _json_value(row.get("metadata_json"), {})
+    metadata_obj = metadata if isinstance(metadata, dict) else {}
     return {
         "id": str(row.get("id") or ""),
         "source_type": str(row.get("source_type") or ""),
@@ -305,7 +406,10 @@ def _safe_row(row: dict[str, Any]) -> dict[str, Any]:
         "status": str(row.get("status") or ""),
         "content_preview": content[:360],
         "content_chars": len(content),
-        "metadata_json": metadata if isinstance(metadata, dict) else {},
+        "metadata_json": metadata_obj,
+        "semantic_description": _clean(metadata_obj.get("semantic_description") or metadata_obj.get("description"), 1200),
+        "tags": _term_list(metadata_obj.get("tags")),
+        "aliases": _term_list(metadata_obj.get("aliases")),
         "content_hash": str(row.get("content_hash") or ""),
         "chunk_count": int(row.get("chunk_count") or 0),
         "last_indexed_at": str(row.get("last_indexed_at") or ""),
@@ -352,7 +456,7 @@ def _index_source(conn: Connection, tenant_id: str, source_id: str, content: str
     source_row = conn.execute(
         text(
             """
-            SELECT title, filename, url
+            SELECT source_type, title, filename, url, metadata_json
             FROM saas_knowledge_sources
             WHERE tenant_id = CAST(:tenant_id AS uuid)
               AND id = CAST(:source_id AS uuid)
@@ -362,6 +466,7 @@ def _index_source(conn: Connection, tenant_id: str, source_id: str, content: str
         {"tenant_id": tenant_id, "source_id": source_id},
     ).mappings().first()
     source_title = _clean((source_row or {}).get("title") or (source_row or {}).get("filename") or (source_row or {}).get("url"), 500)
+    source_cover = _source_cover_text(dict(source_row or {}) | {"metadata_json": metadata or (source_row or {}).get("metadata_json")})
     conn.execute(
         text(
             """
@@ -373,7 +478,7 @@ def _index_source(conn: Connection, tenant_id: str, source_id: str, content: str
         {"tenant_id": tenant_id, "source_id": source_id},
     )
     for idx, chunk in enumerate(chunks):
-        vector = _sparse_vector(f"{source_title}\n{chunk}")
+        vector = _sparse_vector(f"{source_cover or source_title}\n{chunk}")
         conn.execute(
             text(
                 """
@@ -483,20 +588,59 @@ def _insert_source(
 
 def _score_chunk(query: str, terms: list[str], query_vector: dict[str, float], row: dict[str, Any]) -> dict[str, Any]:
     content = _clean(row.get("content"), 8000)
+    source_cover = _source_cover_text(row)
     title = _clean(row.get("title"), 500)
-    haystack = f"{title} {content}".lower()
+    haystack_raw = f"{source_cover or title} {content}"
+    haystack = _normalize_for_search(haystack_raw, 12000)
+    cover_haystack = _normalize_for_search(source_cover or title, 4000)
+    compact_query = _compact_for_search(query, 1200)
+    compact_haystack = _compact_for_search(haystack_raw, 12000)
+    compact_cover = _compact_for_search(source_cover or title, 4000)
     lexical_score = 0.0
-    clean_query = _clean(query, 1200).lower()
+    clean_query = _normalize_for_search(query, 1200)
     if clean_query and clean_query in haystack:
         lexical_score += 45
+        if clean_query in cover_haystack:
+            lexical_score += 18
+    compact_exact = False
+    if len(compact_query) >= 6 and compact_query in compact_haystack:
+        compact_exact = True
+        lexical_score += 58
+        if compact_query in compact_cover:
+            lexical_score += 18
     matched_terms: list[str] = []
     for term in terms:
         count = haystack.count(term)
         if count:
             matched_terms.append(term)
             lexical_score += min(28, 6 + (count * 2.2))
-            if term in title.lower():
-                lexical_score += 8
+            if term in cover_haystack:
+                lexical_score += 10
+    if len(compact_query) >= 6 and not compact_exact:
+        best_ratio = 0.0
+        best_label = ""
+        for compact, label in _compact_windows(haystack_raw):
+            if abs(len(compact) - len(compact_query)) > max(3, int(len(compact_query) * 0.25)):
+                continue
+            ratio = difflib.SequenceMatcher(None, compact_query, compact).ratio()
+            if ratio > best_ratio:
+                best_ratio = ratio
+                best_label = label
+        if best_ratio >= 0.86:
+            lexical_score += 34 * best_ratio
+            if best_label:
+                matched_terms.append(f"~{best_label}")
+    for meta_term in _metadata_terms(_json_value(row.get("metadata_json"), {}), limit=16):
+        meta_norm = _normalize_for_search(meta_term, 240)
+        meta_compact = _compact_for_search(meta_term, 240)
+        if not meta_norm:
+            continue
+        if clean_query and (clean_query in meta_norm or meta_norm in clean_query):
+            lexical_score += 24
+            matched_terms.append(meta_term)
+        elif compact_query and len(compact_query) >= 5 and (compact_query in meta_compact or meta_compact in compact_query):
+            lexical_score += 18
+            matched_terms.append(meta_term)
     if row.get("source_type") == "file":
         lexical_score += 2
     if str(row.get("url") or "").strip():
@@ -533,7 +677,7 @@ def search_knowledge(
             "context": "",
             "citations": [],
             "confidence": 0,
-            "retrieval_mode": "sparse_vector_lexical",
+            "retrieval_mode": "semantic_cover_sparse_vector_lexical",
         }
     rows = conn.execute(
         text(
@@ -561,6 +705,8 @@ def search_knowledge(
         if score >= float(min_score or 0):
             title = _clean(item.get("title") or item.get("filename") or item.get("url") or "Fuente", 240)
             source_label = _clean(item.get("url") or item.get("filename") or title, 500)
+            source_metadata = _json_value(item.get("metadata_json"), {})
+            source_metadata = source_metadata if isinstance(source_metadata, dict) else {}
             confidence = min(98, int(score * 1.35))
             scored.append(
                 {
@@ -573,6 +719,9 @@ def search_knowledge(
                     "filename": str(item.get("filename") or ""),
                     "source_label": source_label,
                     "content": _clean(item.get("content"), 1800),
+                    "semantic_description": _clean(source_metadata.get("semantic_description") or source_metadata.get("description"), 600),
+                    "tags": _term_list(source_metadata.get("tags")),
+                    "aliases": _term_list(source_metadata.get("aliases")),
                     "score": score,
                     "lexical_score": score_data["lexical_score"],
                     "vector_score": score_data["vector_score"],
@@ -594,6 +743,8 @@ def search_knowledge(
             "score": item["score"],
             "vector_score": item.get("vector_score", 0),
             "confidence": item["confidence"],
+            "tags": item.get("tags") or [],
+            "aliases": item.get("aliases") or [],
         }
         for item in results
     ]
@@ -602,6 +753,8 @@ def search_knowledge(
         source = item["source_label"]
         context_parts.append(
             f"[Fuente {idx}] {item['title']}{f' ({source})' if source else ''}\n"
+            f"Descripcion/uso: {item.get('semantic_description') or 'sin descripcion'}\n"
+            f"Etiquetas: {', '.join(item.get('tags') or []) or 'sin etiquetas'} / Alias: {', '.join(item.get('aliases') or []) or 'sin alias'}\n"
             f"Score: {item['score']} / Vector: {item.get('vector_score', 0)} / Confianza: {item['confidence']}%\n"
             f"{item['content']}"
         )
@@ -624,7 +777,7 @@ def search_knowledge(
             "result_count": len(results),
             "top_score": top_score,
             "used_by": _clean(used_by, 80),
-            "metadata_json": _json({"terms": terms, "citations": citations[:8], "retrieval_mode": "sparse_vector_lexical"}),
+            "metadata_json": _json({"terms": terms, "citations": citations[:8], "retrieval_mode": "semantic_cover_sparse_vector_lexical"}),
         },
     )
     return {
@@ -634,7 +787,7 @@ def search_knowledge(
         "citations": citations,
         "context": "\n\n---\n\n".join(context_parts),
         "confidence": confidence,
-        "retrieval_mode": "sparse_vector_lexical",
+        "retrieval_mode": "semantic_cover_sparse_vector_lexical",
     }
 
 
@@ -644,11 +797,11 @@ def knowledge_context_for_query(conn: Connection, tenant_id: str, query: str, *,
     if not context:
         return ""
     citation_lines = [
-        f"- Fuente {idx}: {item['title']} ({item['source']}) score {item['score']}"
+        f"- Fuente {idx}: {item['title']} ({item['source']}) score {item['score']} etiquetas={', '.join(item.get('tags') or []) or 'sin etiquetas'}"
         for idx, item in enumerate(result.get("citations") or [], start=1)
     ]
     return (
-        "Knowledge Base recuperada por RAG sparse-vector + lexical. Usa estas fuentes como verdad primaria; "
+        "Knowledge Base recuperada por RAG con portada semantica, sparse-vector y busqueda lexical tolerante. Usa estas fuentes como verdad primaria; "
         "si la informacion no esta aqui, pregunta o indica que debe verificarse. Cuando respondas con datos de la base, apoya la respuesta en las citas internas.\n\n"
         f"{context}\n\nCitas internas:\n" + "\n".join(citation_lines)
     )
@@ -891,7 +1044,7 @@ def evaluate_knowledge(payload: KnowledgeEvaluationIn, ctx: AuthContext = Depend
                     "answer_overlap": quality["answer_overlap"],
                     "source_coverage": quality["source_coverage"],
                     "min_quality_score": payload.min_quality_score,
-                    "retrieval_mode": result.get("retrieval_mode") or "sparse_vector_lexical",
+                    "retrieval_mode": result.get("retrieval_mode") or "semantic_cover_sparse_vector_lexical",
                 }),
             },
         ).mappings().first()
@@ -913,7 +1066,7 @@ def evaluate_knowledge(payload: KnowledgeEvaluationIn, ctx: AuthContext = Depend
         "search": {
             "results": result.get("results") or [],
             "citations": result.get("citations") or [],
-            "retrieval_mode": result.get("retrieval_mode") or "sparse_vector_lexical",
+            "retrieval_mode": result.get("retrieval_mode") or "semantic_cover_sparse_vector_lexical",
         },
     }
 
@@ -1013,7 +1166,7 @@ def knowledge_health(ctx: AuthContext = Depends(get_current_user)):
         "ok": True,
         "totals": {key: int(value or 0) for key, value in data.items()},
         "status": status,
-        "retrieval_mode": "sparse_vector_lexical",
+        "retrieval_mode": "semantic_cover_sparse_vector_lexical",
         "quality": {
             "total_evaluations": int((quality or {}).get("total_evaluations") or 0),
             "passed_evaluations": int((quality or {}).get("passed_evaluations") or 0),
@@ -1036,6 +1189,9 @@ async def upload_source(
     file: UploadFile = File(...),
     title: str = Form(default=""),
     notes: str = Form(default=""),
+    semantic_description: str = Form(default=""),
+    tags: str = Form(default=""),
+    aliases: str = Form(default=""),
     ctx: AuthContext = Depends(require_role("owner", "admin", "supervisor")),
 ):
     raw = await file.read()
@@ -1059,7 +1215,14 @@ async def upload_source(
             title=title or file.filename or "Archivo KB",
             filename=file.filename or "",
             content=content,
-            metadata={"content_type": file.content_type or "", "bytes": len(raw), "parser": parser},
+            metadata={
+                "content_type": file.content_type or "",
+                "bytes": len(raw),
+                "parser": parser,
+                "semantic_description": _clean(semantic_description, 1200),
+                "tags": _term_list(tags, limit=24, item_limit=80),
+                "aliases": _term_list(aliases, limit=32, item_limit=120),
+            },
         )
 
 
@@ -1078,8 +1241,82 @@ def add_url_source(payload: KnowledgeUrlIn, ctx: AuthContext = Depends(require_r
             title=payload.title or fetched_title,
             url=payload.url,
             content=content,
-            metadata={"fetched_title": fetched_title},
+            metadata={
+                "fetched_title": fetched_title,
+                "semantic_description": _clean(payload.semantic_description, 1200),
+                "tags": _term_list(payload.tags, limit=24, item_limit=80),
+                "aliases": _term_list(payload.aliases, limit=32, item_limit=120),
+            },
         )
+
+
+@router.patch("/sources/{source_id}")
+def update_source(source_id: str, payload: KnowledgeSourceUpdateIn, ctx: AuthContext = Depends(require_role("owner", "admin", "supervisor"))):
+    source_id = _uuid_or_400(source_id)
+    with db_session() as conn:
+        ensure_knowledge_tables(conn)
+        set_tenant_context(conn, ctx.tenant_id)
+        row = conn.execute(
+            text(
+                """
+                SELECT id::text, source_type, title, url, filename, content, status, metadata_json,
+                       content_hash, chunk_count, last_indexed_at::text, expires_at::text, error, updated_at::text
+                FROM saas_knowledge_sources
+                WHERE tenant_id = CAST(:tenant_id AS uuid)
+                  AND id = CAST(:source_id AS uuid)
+                LIMIT 1
+                """
+            ),
+            {"tenant_id": ctx.tenant_id, "source_id": source_id},
+        ).mappings().first()
+        if not row:
+            raise HTTPException(status_code=404, detail="knowledge_source_not_found")
+        current = dict(row)
+        metadata = _json_value(current.get("metadata_json"), {})
+        metadata = metadata if isinstance(metadata, dict) else {}
+        if payload.semantic_description is not None:
+            metadata["semantic_description"] = _clean(payload.semantic_description, 1200)
+        if payload.tags is not None:
+            metadata["tags"] = _term_list(payload.tags, limit=24, item_limit=80)
+        if payload.aliases is not None:
+            metadata["aliases"] = _term_list(payload.aliases, limit=32, item_limit=120)
+        new_title = _clean(payload.title, 240) if payload.title is not None else _clean(current.get("title"), 240)
+        if not new_title:
+            new_title = _clean(current.get("filename") or current.get("url") or "Fuente", 240)
+        conn.execute(
+            text(
+                """
+                UPDATE saas_knowledge_sources
+                SET title = :title,
+                    metadata_json = CAST(:metadata_json AS jsonb),
+                    updated_at = NOW()
+                WHERE tenant_id = CAST(:tenant_id AS uuid)
+                  AND id = CAST(:source_id AS uuid)
+                """
+            ),
+            {
+                "tenant_id": ctx.tenant_id,
+                "source_id": source_id,
+                "title": new_title,
+                "metadata_json": _json(metadata),
+            },
+        )
+        if payload.reindex:
+            _index_source(conn, ctx.tenant_id, source_id, _clean(current.get("content"), 250000), metadata=metadata)
+        refreshed = conn.execute(
+            text(
+                """
+                SELECT id::text, source_type, title, url, filename, content, status, metadata_json,
+                       content_hash, chunk_count, last_indexed_at::text, expires_at::text, error, updated_at::text
+                FROM saas_knowledge_sources
+                WHERE tenant_id = CAST(:tenant_id AS uuid)
+                  AND id = CAST(:source_id AS uuid)
+                LIMIT 1
+                """
+            ),
+            {"tenant_id": ctx.tenant_id, "source_id": source_id},
+        ).mappings().first()
+    return {"ok": True, "source": _safe_row(dict(refreshed or current))}
 
 
 @router.post("/sources/{source_id}/reindex")
