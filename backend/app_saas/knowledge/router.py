@@ -117,6 +117,52 @@ STOP_WORDS = {
     "the", "and", "for", "you", "your", "from", "this", "that", "are", "was", "were", "have",
 }
 
+QUERY_ALIAS_TERMS = {
+    "negra": "negro noir black dark intense",
+    "negro": "noir black dark intense",
+    "noir": "negro negra black dark",
+    "oscura": "oscuro dark black noir",
+    "oscuro": "dark black noir",
+    "blanca": "blanco white blanc blanche bianco",
+    "blanco": "white blanc blanche bianco",
+    "white": "blanco blanca blanc blanche",
+    "azul": "blue bleu",
+    "blue": "azul bleu",
+    "roja": "rojo red rouge",
+    "rojo": "red rouge",
+    "red": "rojo roja rouge",
+    "verde": "green vert",
+    "green": "verde vert",
+    "dorada": "dorado gold golden oro",
+    "dorado": "gold golden oro",
+    "plateada": "plateado silver plata",
+    "plateado": "silver plata",
+}
+
+QUERY_ALIAS_PHRASES = (
+    (r"\blacoste\s+(negra|negro|noir|oscura|oscuro)\b", "lacoste l 12 12 noir l1212 noir l.12.12 noir eau de lacoste noir"),
+    (r"\blacoste\s+(blanca|blanco|white|blanc)\b", "lacoste l 12 12 blanc l1212 blanc l.12.12 blanc eau de lacoste blanc"),
+    (r"\blacoste\s+(azul|blue|bleu)\b", "lacoste l 12 12 bleu l1212 bleu l.12.12 bleu eau de lacoste bleu"),
+    (r"\bclub\s+de\s+nuit\b", "armaf club de nuit intense milestone sillage"),
+)
+
+
+def _expand_query_aliases(value: str) -> str:
+    normalized = _normalize_for_search(value, 1200)
+    if not normalized:
+        return _clean(value, 1200)
+    extras: list[str] = []
+    for token in normalized.split():
+        alias = QUERY_ALIAS_TERMS.get(token)
+        if alias:
+            extras.append(alias)
+    for pattern, alias in QUERY_ALIAS_PHRASES:
+        if re.search(pattern, normalized):
+            extras.append(alias)
+    if not extras:
+        return _clean(value, 1200)
+    return _clean(f"{value} {' '.join(extras)}", 1800)
+
 
 def _token_stream(value: str, *, limit: int = 800) -> list[str]:
     words = re.findall(r"[a-z0-9]{3,}", _normalize_for_search(value, 30000), flags=re.UNICODE)
@@ -676,8 +722,9 @@ def search_knowledge(
 ) -> dict[str, Any]:
     ensure_knowledge_tables(conn)
     clean_query = _clean(query, 1200)
-    terms = _tokenize(clean_query)
-    query_vector = _sparse_vector(clean_query)
+    expanded_query = _expand_query_aliases(clean_query)
+    terms = _tokenize(expanded_query)
+    query_vector = _sparse_vector(expanded_query)
     if not terms and len(clean_query) < 2:
         return {
             "query": clean_query,
@@ -709,7 +756,7 @@ def search_knowledge(
     scored: list[dict[str, Any]] = []
     for row in rows:
         item = dict(row)
-        score_data = _score_chunk(clean_query, terms, query_vector, item)
+        score_data = _score_chunk(expanded_query, terms, query_vector, item)
         score = float(score_data["score"])
         if score >= float(min_score or 0):
             title = _clean(item.get("title") or item.get("filename") or item.get("url") or "Fuente", 240)
@@ -786,12 +833,18 @@ def search_knowledge(
             "result_count": len(results),
             "top_score": top_score,
             "used_by": _clean(used_by, 80),
-            "metadata_json": _json({"terms": terms, "citations": citations[:8], "retrieval_mode": "semantic_cover_sparse_vector_lexical"}),
+            "metadata_json": _json({
+                "terms": terms,
+                "expanded_query": expanded_query if expanded_query != clean_query else "",
+                "citations": citations[:8],
+                "retrieval_mode": "semantic_cover_sparse_vector_lexical",
+            }),
         },
     )
     return {
         "query": clean_query,
         "terms": terms,
+        "expanded_query": expanded_query if expanded_query != clean_query else "",
         "results": results,
         "citations": citations,
         "context": "\n\n---\n\n".join(context_parts),
@@ -811,7 +864,8 @@ def knowledge_context_for_query(conn: Connection, tenant_id: str, query: str, *,
     ]
     return (
         "Knowledge Base recuperada por RAG con portada semantica, sparse-vector y busqueda lexical tolerante. Usa estas fuentes como verdad primaria; "
-        "si la informacion no esta aqui, pregunta o indica que debe verificarse. Cuando respondas con datos de la base, apoya la respuesta en las citas internas.\n\n"
+        "si la informacion no esta aqui, pregunta o indica que debe verificarse. Las marcas [Fuente N], Citas internas, scores y etiquetas son solo para auditoria interna; "
+        "NO las muestres al cliente ni escribas '(Fuente N)' en la respuesta final.\n\n"
         f"{context}\n\nCitas internas:\n" + "\n".join(citation_lines)
     )
 

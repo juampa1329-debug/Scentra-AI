@@ -999,6 +999,9 @@ def _normalize_reply_text(value: Any) -> str:
         if marker:
             text_value = text_value[: marker.start()].strip(" \t\r\n,\"'")
             break
+    text_value = re.sub(r"\s*[\(\[]\s*(?:fuente|source)\s*\d+\s*[\)\]]", "", text_value, flags=re.IGNORECASE)
+    text_value = re.sub(r"\s*,?\s*seg.n\s+(?:la\s+)?(?:fuente|source)\s*\d+\b", "", text_value, flags=re.IGNORECASE)
+    text_value = re.sub(r"(?im)^\s*(?:fuente|source)\s*\d+\s*[:\-]\s*", "", text_value)
     return text_value
 
 
