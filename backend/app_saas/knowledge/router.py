@@ -26,6 +26,8 @@ from app_saas.shared.security import AuthContext, get_current_user, require_role
 
 router = APIRouter(prefix="/knowledge", tags=["saas-knowledge"])
 
+MAX_KNOWLEDGE_SOURCE_BYTES = 8_000_000
+
 
 class KnowledgeUrlIn(BaseModel):
     url: str = Field(min_length=8, max_length=1000)
@@ -902,14 +904,34 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def _fetch_public_url(url: str, *, max_redirects: int = 4) -> tuple[str, bytes]:
+def _fetch_public_url(url: str, *, max_redirects: int = 4) -> tuple[str, bytes, str]:
     current = _validate_fetch_url(url)
     opener = urllib.request.build_opener(_NoRedirectHandler)
     for _ in range(max_redirects + 1):
-        request = urllib.request.Request(current, headers={"User-Agent": "ScentraAI-Knowledge/1.0"})
+        request = urllib.request.Request(
+            current,
+            headers={
+                "User-Agent": "ScentraAI-Knowledge/1.0",
+                "Accept": "text/html,text/plain,application/pdf;q=0.9,*/*;q=0.3",
+                "Accept-Encoding": "identity",
+            },
+        )
         try:
             with opener.open(request, timeout=20) as response:
-                return current, response.read(1_000_000)
+                content_length = response.headers.get("Content-Length")
+                try:
+                    declared_length = int(content_length or 0)
+                except (TypeError, ValueError):
+                    declared_length = 0
+                if declared_length > MAX_KNOWLEDGE_SOURCE_BYTES:
+                    raise HTTPException(status_code=413, detail="knowledge_file_too_large")
+                content_type = (response.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+                raw = response.read(MAX_KNOWLEDGE_SOURCE_BYTES + 1)
+                if len(raw) > MAX_KNOWLEDGE_SOURCE_BYTES:
+                    raise HTTPException(status_code=413, detail="knowledge_file_too_large")
+                return current, raw, content_type
+        except HTTPException:
+            raise
         except urllib.error.HTTPError as exc:
             if exc.code in {301, 302, 303, 307, 308}:
                 location = exc.headers.get("Location", "")
@@ -923,15 +945,43 @@ def _fetch_public_url(url: str, *, max_redirects: int = 4) -> tuple[str, bytes]:
     raise HTTPException(status_code=502, detail="url_redirect_limit_exceeded")
 
 
-def _extract_url_text(url: str) -> tuple[str, str]:
-    clean_url, raw_bytes = _fetch_public_url(url)
+def _url_filename(url: str) -> str:
+    parsed = urllib.parse.urlparse(url)
+    return urllib.parse.unquote((parsed.path.rsplit("/", 1)[-1] or "").strip())
+
+
+def _is_pdf_response(url: str, content_type: str) -> bool:
+    filename = _url_filename(url).lower()
+    return filename.endswith(".pdf") or content_type in {"application/pdf", "application/x-pdf"}
+
+
+def _extract_url_text(url: str) -> tuple[str, str, dict[str, Any]]:
+    clean_url, raw_bytes, content_type = _fetch_public_url(url)
+    if _is_pdf_response(clean_url, content_type):
+        title = _url_filename(clean_url) or clean_url
+        content = _extract_pdf_text(raw_bytes)
+        if not _clean(content, 200):
+            raise HTTPException(status_code=400, detail="pdf_no_extractable_text")
+        return title, content, {
+            "fetched_title": title,
+            "fetched_url": clean_url,
+            "content_type": content_type or "application/pdf",
+            "bytes": len(raw_bytes),
+            "parser": "remote_pdf",
+        }
     raw = raw_bytes.decode("utf-8", errors="ignore")
     title_match = re.search(r"<title[^>]*>(.*?)</title>", raw, flags=re.I | re.S)
     title = re.sub(r"\s+", " ", title_match.group(1)).strip() if title_match else clean_url
     raw = re.sub(r"(?is)<(script|style|noscript).*?</\1>", " ", raw)
     text_value = re.sub(r"(?s)<[^>]+>", " ", raw)
-    text_value = re.sub(r"\s+", " ", text_value).strip()
-    return title, text_value
+    text_value = re.sub(r"\s+", " ", text_value.replace("\x00", " ")).strip()
+    return title, text_value, {
+        "fetched_title": title,
+        "fetched_url": clean_url,
+        "content_type": content_type,
+        "bytes": len(raw_bytes),
+        "parser": "html",
+    }
 
 
 @router.get("/sources")
@@ -1204,7 +1254,7 @@ async def upload_source(
     raw = await file.read()
     if not raw:
         raise HTTPException(status_code=400, detail="knowledge_file_required")
-    if len(raw) > 8_000_000:
+    if len(raw) > MAX_KNOWLEDGE_SOURCE_BYTES:
         raise HTTPException(status_code=413, detail="knowledge_file_too_large")
     content = _extract_file_text(file.filename or "archivo", file.content_type or "", raw)
     name = (file.filename or "").lower()
@@ -1235,7 +1285,7 @@ async def upload_source(
 
 @router.post("/url")
 def add_url_source(payload: KnowledgeUrlIn, ctx: AuthContext = Depends(require_role("owner", "admin", "supervisor"))):
-    fetched_title, content = _extract_url_text(payload.url)
+    fetched_title, content, fetch_metadata = _extract_url_text(payload.url)
     if payload.notes.strip():
         content = f"{payload.notes.strip()}\n\n{content}"
     with db_session() as conn:
@@ -1249,7 +1299,7 @@ def add_url_source(payload: KnowledgeUrlIn, ctx: AuthContext = Depends(require_r
             url=payload.url,
             content=content,
             metadata={
-                "fetched_title": fetched_title,
+                **fetch_metadata,
                 "semantic_description": _clean(payload.semantic_description, 1200),
                 "tags": _term_list(payload.tags, limit=24, item_limit=80),
                 "aliases": _term_list(payload.aliases, limit=32, item_limit=120),

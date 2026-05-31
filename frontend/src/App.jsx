@@ -331,6 +331,7 @@ function friendlyApiError(code, detail = {}) {
   if (code === "user_not_found") return "No encontramos un usuario activo para esta accion. Vuelve a iniciar sesion.";
   if (code === "smtp_required_for_email_otp") return "El correo 2FA no puede enviarse porque falta configurar SMTP en el servidor.";
   if (code === "knowledge_file_too_large") return "El archivo de conocimiento supera el limite permitido. Sube un PDF/CSV mas liviano o divide el documento.";
+  if (code === "pdf_no_extractable_text") return "El PDF no tiene texto extraible. Si es una imagen escaneada, sube una version con OCR o pega el contenido como TXT.";
   if (code === "media_forbidden" || code === "forbidden" || code === "permission_denied") return "No tenemos permiso para abrir este recurso. Revisa el token, permisos del proveedor o vuelve a conectar el canal.";
   if (code === "provider_not_configured" || code === "missing_api_key") return "Falta configurar la credencial del proveedor. Revisa Ajustes > APIs antes de volver a intentar.";
   return "";
@@ -348,6 +349,12 @@ function readableErrorNotice(text) {
   } else if (lower.includes("knowledge_file_too_large") || lower.includes("archivo supera 8 mb")) {
     message = "El archivo de Knowledge Base es demasiado grande para procesarlo.";
     suggestion = "Divide el PDF/CSV, baja el peso del archivo o sube una version resumida de hasta 8 MB.";
+  } else if (lower.includes("pdf_no_extractable_text") || lower.includes("pdf_text_extract_failed")) {
+    message = "No pudimos leer texto util de ese PDF.";
+    suggestion = "Si el PDF es una imagen escaneada o esta protegido, genera una version con OCR, dividelo o sube el contenido en TXT/CSV.";
+  } else if (lower.includes("url_fetch_failed") || lower.includes("url_dns_failed")) {
+    message = "No pudimos descargar esa URL para Knowledge Base.";
+    suggestion = "Revisa que el enlace sea publico, no requiera login, no bloquee servidores y responda con una pagina o PDF accesible.";
   } else if (lower.includes("phone number id") || lower.includes("phone_number_id") || lower.includes("numero de telefono")) {
     message = "No pudimos sincronizar o registrar el telefono de WhatsApp.";
     suggestion = "Verifica que el Phone Number ID pertenezca al WABA conectado, que el token tenga permisos y que la app de Meta este suscrita.";
@@ -3914,7 +3921,7 @@ function App() {
         }),
       });
       setKnowledgeUrlForm({ url: "", title: "", notes: "", semantic_description: "", tags: "", aliases: "" });
-      showStatus("Fuente web agregada a Knowledge Base.", "ok");
+      showStatus("Fuente web/PDF agregada a Knowledge Base.", "ok");
       await loadKnowledgeSources();
     } catch (err) {
       showStatus(String(err.message || err), "error");
@@ -5434,13 +5441,13 @@ function App() {
                   ) : null}
                   <h3>Fuentes Web</h3>
                   <form className="kb-url-form" onSubmit={addKnowledgeUrl}>
-                    <label>URL<input placeholder="https://tutienda.com/pagina-o-blog" value={knowledgeUrlForm.url} onChange={(event) => setKnowledgeUrlForm((prev) => ({ ...prev, url: event.target.value }))} /></label>
+                    <label>URL<input placeholder="https://tutienda.com/pagina-o-blog-o-archivo.pdf" value={knowledgeUrlForm.url} onChange={(event) => setKnowledgeUrlForm((prev) => ({ ...prev, url: event.target.value }))} /></label>
                     <label>Titulo opcional<input placeholder="Politicas de envio" value={knowledgeUrlForm.title} onChange={(event) => setKnowledgeUrlForm((prev) => ({ ...prev, title: event.target.value }))} /></label>
                     <label>Notas opcionales<input placeholder="Prioridad, uso interno, version..." value={knowledgeUrlForm.notes} onChange={(event) => setKnowledgeUrlForm((prev) => ({ ...prev, notes: event.target.value }))} /></label>
                     <label className="kb-field-wide">Descripcion de uso<input placeholder="Ej: Pagina oficial de precios/promos" value={knowledgeUrlForm.semantic_description} onChange={(event) => setKnowledgeUrlForm((prev) => ({ ...prev, semantic_description: event.target.value }))} /></label>
                     <label>Etiquetas<input placeholder="precios, envios, garantias" value={knowledgeUrlForm.tags} onChange={(event) => setKnowledgeUrlForm((prev) => ({ ...prev, tags: event.target.value }))} /></label>
                     <label>Alias<input placeholder="mayorista, promo, catalogo" value={knowledgeUrlForm.aliases} onChange={(event) => setKnowledgeUrlForm((prev) => ({ ...prev, aliases: event.target.value }))} /></label>
-                    <button type="submit" className="primary" disabled={knowledgeUploading}>{knowledgeUploading ? "Agregando..." : "Anadir fuente web"}</button>
+                    <button type="submit" className="primary" disabled={knowledgeUploading}>{knowledgeUploading ? "Agregando..." : "Anadir web/PDF"}</button>
                   </form>
                   <div className="kb-source-list">
                     {knowledgeSources.map((source) => (
